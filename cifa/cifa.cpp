@@ -4,26 +4,44 @@
 #include <string>
 #include <vector>
 
+using object = double;
+
 enum Stat
 {
     None = -1,
-    Number,
-    Op,
-    Para,
-    Calc,
+    Constant,
+    Operator,
+    Parameter,
+    Function,
+    Key,
+    Type,
 };
 
-struct Cal
+std::map<std::string, object> parameters;
+std::map<std::string, void*> functions;
+
+bool vector_have(std::vector<std::string>& ops, std::string& op)
+{
+    for (auto& o : ops)
+    {
+        if (op == o)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct CalUnit
 {
     Stat type;
-    std::vector<Cal> v;
-    char op_;
+    std::vector<CalUnit> v;
     std::string str;
-    double eval()
+    object eval()
     {
-        if (type == Op)
+        if (type == Operator)
         {
-            switch (op_)
+            switch (str[0])
             {
             case '+':
                 return v[0].eval() + v[1].eval();
@@ -37,110 +55,208 @@ struct Cal
             case '/':
                 return v[0].eval() / v[1].eval();
                 break;
+            case '=':
+                return parameters[v[0].str] = v[1].eval();
             default:
                 break;
             }
         }
-        else if (type == Number)
+        else if (type == Constant)
         {
             return atof(str.c_str());
         }
+        else if (type == Parameter)
+        {
+            return parameters[str];
+        }
+        else if (type == Function)
+        {
+        }
     }
-
-    Cal(std::string s) { str = s; }
-    Cal(Stat s, std::string s1)
+    CalUnit(Stat s, std::string s1)
     {
         type = s;
         str = s1;
-        op_ = s1[0];
     }
-    Cal() {}
+    CalUnit() {}
 };
 
 Stat guess(char c)
 {
-    if (c >= '0' && c <= '9')
+    if (std::string("0123456789").find(c) != std::string::npos)
     {
-        return Number;
+        return Constant;
     }
-    if (c == '+' || c == '-' || c == '*' || c == '/')
+    if (std::string("+-*/=().").find(c) != std::string::npos)
     {
-        return Op;
+        return Operator;
     }
-    return Para;
+    if (std::string("_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ").find(c) != std::string::npos)
+    {
+        return Parameter;
+    }
+    return None;
 }
 
-std::vector<Cal> split(std::string str)
+//分割语法
+std::vector<CalUnit> split(std::string str)
 {
-    convert::replaceAllSubStringRef(str, " ", "");
-    Stat stat = guess(str[0]);
     std::string r;
-    std::vector<Cal> rv;
+    std::vector<CalUnit> rv;
+
+    Stat stat = None;
     for (size_t i = 0; i < str.size(); i++)
     {
-        auto pre_stat = stat;
         auto c = str[i];
-        if (guess(c) == Number && (stat == Number || stat == Op))
+        auto pre_stat = stat;
+        auto g = guess(c);
+        if (g == Constant)
         {
-            stat = Number;
+            if (stat == Constant || stat == Operator || stat == None)
+            {
+                stat = Constant;
+            }
+            else if (stat == Parameter)
+            {
+                stat = Parameter;
+            }
         }
-        else if (guess(c) == Op)
+        else if (g == Operator)
         {
-            stat = Op;
-        }
-        else if (guess(c) == Para)
-        {
-            if (c == '.' || c == 'E' || c == 'e' && stat == Number)
+            if (c == '.' && stat == Constant)
             {
             }
             else
             {
-                stat = Para;
+                stat = Operator;
             }
         }
-        if (pre_stat == stat)
+        else if (g == Parameter)
         {
-            r += c;
+            if (c == 'E' || c == 'e' && stat == Constant)
+            {
+            }
+            else
+            {
+                stat = Parameter;
+            }
+        }
+        if (g == None)
+        {
+            stat = None;
+        }
+        if (pre_stat != stat || stat == Operator)
+        {
+            if (pre_stat != None)
+            {
+                rv.push_back({ pre_stat, r });
+            }
+            r = c;
         }
         else
         {
-            rv.push_back({ pre_stat, r });
-            r = c;
+            r += c;
         }
     }
     rv.push_back({ stat, r });
+
+    std::vector<std::string> keys = { "if", "for", "while" };
+    std::vector<std::string> types = { "auto" };
+    for (auto it = rv.begin(); it != rv.end(); ++it)
+    {
+        if (it->str == "(")
+        {
+            if (it != rv.begin() && (it - 1)->type == Parameter)
+            {
+                (it - 1)->type = Function;
+            }
+        }
+        if (vector_have(keys, it->str))
+        {
+            it->type = Key;
+        }
+        if (vector_have(types, it->str))
+        {
+            it->type = Type;
+        }
+    }
     return rv;
 }
 
-Cal uniform_cal(std::vector<Cal> ppp)
+void replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
 {
-    std::vector<std::string> ops = { "*/", "+-" };
+    auto it = ppp.erase(ppp.begin() + i, ppp.begin() + i + len);
+    ppp.insert(it, c);
+}
+
+//表达式语法树
+CalUnit uniform_cal(std::vector<CalUnit> ppp)
+{
+    //清除括号
+    while (true)
+    {
+        bool have = false;
+        for (auto it = ppp.begin(); it != ppp.end(); ++it)
+        {
+            if (it->str == "(" || it->str == ")")
+            {
+                have = true;
+                break;
+            }
+        }
+        if (!have)
+        {
+            break;
+        }
+        auto itl0 = ppp.begin(), itr0 = ppp.end();
+        for (auto itr = ppp.begin(); itr != ppp.end(); ++itr)
+        {
+            if (itr->str == ")")
+            {
+                itr0 = itr;
+                for (auto itl = itr - 1; itl != ppp.begin(); --itl)
+                {
+                    if (itl->str == "(")
+                    {
+                        itl0 = itl;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        replace_cal(ppp, itl0 - ppp.begin(), itr0 - itl0 + 1, uniform_cal(std::vector<CalUnit>{ itl0 + 1, itr0 }));
+
+        //auto c = uniform_cal(std::vector<CalUnit>{ itl0 + 1, itr0 });
+        //auto it = ppp.erase(itl0, itr0 + 1);
+        //ppp.insert(it, c);
+    }
+
+    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "=" } };
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
         {
             auto& p = it;
-            if (it->type == Op && op.find(it->str) != std::string::npos)
+            if (it->type == Operator && vector_have(op, it->str))
             {
                 it->v = { *(it - 1), *(it + 1) };
+                //replace_cal(ppp, it - 1 - ppp.begin(), 3, *it);
                 ppp.erase(it + 1);
-                it = ppp.erase(it - 1);
+                it = ppp.erase(it - 1);                
             }
             ++it;
         }
     }
-    return ppp[0];  //should only one
+    return ppp[0];    //应该只剩一个
 }
 
 int main()
 {
-    std::cout << "Hello World!\n";
-    std::string str = "1.6 + 6e3 * 6";
+    std::string str = "  (1.6 + 6) * 6 / (87  +90)";
     auto rv = split(str);
-    for (auto s : rv)
-    {
-        std::cout << s.str << '\n';
-    }
+
     auto c = uniform_cal(rv);
     auto v = c.eval();
     std::cout << str << " = " << v << '\n';
