@@ -83,10 +83,10 @@ Stat Cifa::guess_char(char c)
 }
 
 //分割语法
-std::vector<Cifa::CalUnit> Cifa::split(std::string str)
+std::list<Cifa::CalUnit> Cifa::split(std::string str)
 {
     std::string r;
-    std::vector<CalUnit> rv;
+    std::list<CalUnit> rv;
 
     Stat stat = None;
     for (size_t i = 0; i < str.size(); i++)
@@ -155,9 +155,9 @@ std::vector<Cifa::CalUnit> Cifa::split(std::string str)
         //括号前的变量视为函数
         if (it->str == "(")
         {
-            if (it != rv.begin() && (it - 1)->type == Parameter)
+            if (it != rv.begin() && std::prev(it)->type == Parameter)
             {
-                (it - 1)->type = Function;
+                std::prev(it)->type = Function;
             }
         }
         if (vector_have(keys, it->str))
@@ -176,10 +176,10 @@ std::vector<Cifa::CalUnit> Cifa::split(std::string str)
     {
         for (auto it = rv.begin(); it != rv.end();)
         {
-            if (it->str == std::string(1, op[0]) && (it + 1)->str == std::string(1, op[1]))
+            if (it->str == std::string(1, op[0]) && std::next(it)->str == std::string(1, op[1]))
             {
                 it->str = op;
-                it = rv.erase(it + 1);
+                it = rv.erase(std::next(it));
             }
             else
             {
@@ -190,14 +190,14 @@ std::vector<Cifa::CalUnit> Cifa::split(std::string str)
     return rv;
 }
 
-auto Cifa::replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
+auto Cifa::replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0, std::list<CalUnit>::iterator i1, const CalUnit& c)
 {
-    auto it = ppp.erase(ppp.begin() + i, ppp.begin() + i + len);
+    auto it = ppp.erase(i0, i1);
     return ppp.insert(it, c);
 }
 
 //表达式语法树
-Cifa::CalUnit Cifa::combine_cal_unit(std::vector<CalUnit> ppp)
+Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit> ppp)
 {
     //清除括号
     while (true)
@@ -221,7 +221,7 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::vector<CalUnit> ppp)
             if (itr->str == ")")
             {
                 itr0 = itr;
-                for (auto itl = itr - 1; itl != ppp.begin(); --itl)
+                for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
                 {
                     if (itl->str == "(")
                     {
@@ -233,14 +233,14 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::vector<CalUnit> ppp)
             }
         }
 
-        itl0 = replace_cal(ppp, itl0 - ppp.begin(), itr0 - itl0 + 1, combine_cal_unit(std::vector<CalUnit>{ itl0 + 1, itr0 }));
+        itl0 = replace_cal(ppp, itl0, std::next(itr0), combine_cal_unit(std::list<CalUnit>{ std::next(itl0), itr0 }));
         itl0->str += "()";
         //如果括号前是函数则合并
         if (itl0 != ppp.begin())
         {
-            if ((itl0 - 1)->type == Function)
+            if (std::prev(itl0)->type == Function)
             {
-                (itl0 - 1)->v = { *itl0 };
+                std::prev(itl0)->v = { *itl0 };
                 ppp.erase(itl0);
             }
         }
@@ -257,22 +257,14 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::vector<CalUnit> ppp)
         {
             if (it->type == Operator && vector_have(op, it->str))
             {
-                it->v = { *(it - 1), *(it + 1) };
-                //replace_cal(ppp, it - 1 - ppp.begin(), 3, *it);
-                ppp.erase(it + 1);
-                it = ppp.erase(it - 1);
+                it->v = { *std::prev(it), *std::next(it) };
+                ppp.erase(std::next(it));
+                it = ppp.erase(std::prev(it));
             }
             ++it;
         }
     }
-    return ppp[0];    //应该只剩一个
-}
-
-object Cifa::run_line(std::string str)
-{
-    auto rv = split(str);
-    auto c = combine_cal_unit(rv);
-    return eval(c);
+    return ppp.front();    //应该只剩一个
 }
 
 void Cifa::register_function(std::string name, func_type func)
@@ -292,4 +284,11 @@ object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
         }
         return p(v);
     }
+}
+
+object Cifa::run_line(std::string str)
+{
+    auto rv = split(str);
+    auto c = combine_cal_unit(rv);
+    return eval(c);
 }

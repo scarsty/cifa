@@ -15,7 +15,7 @@ int main()
     c1.register_function("cos", &cos);
     c1.register_function("pow", &pow);
 
-    std::string str = " x=355/117,y=0.5;x;pow(x,y);x=x-1";
+    std::string str = " x=1/(113/355),y=0.5;x;pow(x,y);x=x-1";
     auto strs = convert::splitString(str, ";");
     for (auto s : strs)
     {

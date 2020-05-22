@@ -1,4 +1,5 @@
 #pragma once
+#include <list>
 #include <map>
 #include <string>
 #include <vector>
@@ -62,13 +63,13 @@ public:
     }
 
     Stat guess_char(char c);
-    std::vector<CalUnit> split(std::string str);
-    auto replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c);
-    CalUnit combine_cal_unit(std::vector<CalUnit> ppp);
-
-    object run_line(std::string str);
+    std::list<CalUnit> split(std::string str);
+    auto replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0, std::list<CalUnit>::iterator i1, const CalUnit& c);
+    CalUnit combine_cal_unit(std::list<CalUnit> ppp);
 
     void register_function(std::string name, func_type func);
 
     object run_function(std::string name, std::vector<CalUnit> vc);
+
+    object run_line(std::string str);
 };
