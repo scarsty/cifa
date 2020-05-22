@@ -75,6 +75,10 @@ Stat Cifa::guess_char(char c)
     {
         return Parameter;
     }
+    if (std::string("{};").find(c) != std::string::npos)
+    {
+        return Parameter;
+    }
     return None;
 }
 
@@ -111,6 +115,10 @@ std::vector<Cifa::CalUnit> Cifa::split(std::string str)
                 stat = Operator;
             }
         }
+        else if (g == Split)
+        {
+            stat = Split;
+        }
         else if (g == Parameter)
         {
             if (c == 'E' || c == 'e' && stat == Constant)
@@ -125,7 +133,7 @@ std::vector<Cifa::CalUnit> Cifa::split(std::string str)
         {
             stat = None;
         }
-        if (pre_stat != stat || stat == Operator)
+        if (pre_stat != stat || stat == Operator || stat == Split)
         {
             if (pre_stat != None)
             {

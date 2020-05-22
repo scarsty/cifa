@@ -11,6 +11,7 @@ enum Stat
     None = -1,
     Constant,
     Operator,
+    Split,
     Parameter,
     Function,
     Key,
