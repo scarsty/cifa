@@ -149,11 +149,11 @@
   <ItemGroup>
     <ClCompile Include="..\..\common\convert.cpp" />
     <ClCompile Include="1.cpp" />
-    <ClCompile Include="cifa.cpp" />
+    <ClCompile Include="Cifa.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\common\convert.h" />
-    <ClInclude Include="cifa.h" />
+    <ClInclude Include="Cifa.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

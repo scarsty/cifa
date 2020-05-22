@@ -15,13 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="cifa.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\common\convert.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="1.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="Cifa.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
@@ -29,7 +29,7 @@
     <ClInclude Include="..\..\common\convert.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="cifa.h">
+    <ClInclude Include="Cifa.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

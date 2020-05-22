@@ -1,11 +1,24 @@
-#include "cifa.h"
-#include <iostream>
+#include "../../common/convert.h"
+#include "Cifa.h"
 #include <cmath>
+#include <iostream>
+
+
+object sin(object_vector& d) { return sin(d[0]); }
+object cos(object_vector& d) { return cos(d[0]); }
+object pow(object_vector& d) { return pow(d[0], d[1]); }
 
 int main()
 {
-    register_function("sin", &sin);
-    run("x = 5");
-    std::string str = "  (1.6 + x) + (87  +90)* 6";
-    std::cout << str << " = " <<run(str) << '\n';
+    Cifa c1;
+    c1.register_function("sin", &sin);
+    c1.register_function("cos", &cos);
+    c1.register_function("pow", &pow);
+
+    std::string str = " x=355&&1>7,y=0.5;x;pow(x,y)";
+    auto strs = convert::splitString(str, ";");
+    for (auto s : strs)
+    {
+        std::cout << s << " ...... " << c1.run_line(s) << '\n';
+    }
 }

@@ -1,50 +1,73 @@
-﻿#include "cifa.h"
+﻿#include "Cifa.h"
+#include <functional>
 
-std::map<std::string, object> parameters;
-std::map<std::string, void*> functions;
-
-object CalUnit::eval()
+object Cifa::eval(CalUnit c)
 {
-    if (str.size() > 2 && str.find("()") == str.size() - 2)
+    c.simple();
+    if (c.type == Operator)
     {
-        str.resize(str.size() - 2);
+        if (c.str == "+") { return eval(c.v[0]) + eval(c.v[1]); }
+        if (c.str == "-") { return eval(c.v[0]) - eval(c.v[1]); }
+        if (c.str == "*") { return eval(c.v[0]) * eval(c.v[1]); }
+        if (c.str == "/") { return eval(c.v[0]) / eval(c.v[1]); }
+        if (c.str == "=") { return parameters[c.v[0].str] = eval(c.v[1]); }
+        if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
+        if (c.str == ">") { return eval(c.v[0]) > eval(c.v[1]); }
+        if (c.str == "<") { return eval(c.v[0]) < eval(c.v[1]); }
+        if (c.str == "==") { return eval(c.v[0]) == eval(c.v[1]); }
+        if (c.str == "!=") { return eval(c.v[0]) != eval(c.v[1]); }
+        if (c.str == ">=") { return eval(c.v[0]) >= eval(c.v[1]); }
+        if (c.str == "<=") { return eval(c.v[0]) <= eval(c.v[1]); }
+        //if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
+        //if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
+        if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
+        if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
     }
-    if (type == Operator)
+    else if (c.type == Constant)
     {
-        if (str == "+") { return v[0].eval() + v[1].eval(); }
-        if (str == "-") { return v[0].eval() - v[1].eval(); }
-        if (str == "*") { return v[0].eval() * v[1].eval(); }
-        if (str == "/") { return v[0].eval() / v[1].eval(); }
-        if (str == "=") { return parameters[v[0].str] = v[1].eval(); }
-        if (str == ",") { return v[0].eval(), v[1].eval(); }
+        return atof(c.str.c_str());
     }
-    else if (type == Constant)
+    else if (c.type == Parameter)
     {
-        return atof(str.c_str());
-    }
-    else if (type == Parameter)
-    {
-        if (parameters.count(str))
+        if (parameters.count(c.str))
         {
-            return parameters[str];
+            return parameters[c.str];
         }
         else
         {
             return 0;
         }
     }
-    else if (type == Function)
+    else if (c.type == Function)
     {
+        std::vector<CalUnit> v;
+        std::function<void(CalUnit&)> get = [&v, &get](CalUnit& c1)
+        {
+            c1.simple();
+            if (c1.str == ",")
+            {
+                for (auto& c2 : c1.v)
+                {
+                    get(c2);
+                }
+            }
+            else
+            {
+                v.push_back(c1);
+            }
+        };
+        get(c.v[0]);
+        return run_function(c.str, v);
     }
 }
 
-Stat guess_char(char c)
+Stat Cifa::guess_char(char c)
 {
     if (std::string("0123456789").find(c) != std::string::npos)
     {
         return Constant;
     }
-    if (std::string("+-*/=().,").find(c) != std::string::npos)
+    if (std::string("+-*/=().!<>&|,").find(c) != std::string::npos)
     {
         return Operator;
     }
@@ -56,7 +79,7 @@ Stat guess_char(char c)
 }
 
 //分割语法
-std::vector<CalUnit> split(std::string str)
+std::vector<Cifa::CalUnit> Cifa::split(std::string str)
 {
     std::string r;
     std::vector<CalUnit> rv;
@@ -139,18 +162,34 @@ std::vector<CalUnit> split(std::string str)
         }
     }
 
-    //合并多字节运算符，未完成
+    //合并多字节运算符
+    std::vector<std::string> dop = { "==", "!=", ">=", "<=", "||", "&&" };
+    for (auto& op : dop)
+    {
+        for (auto it = rv.begin(); it != rv.end();)
+        {
+            if (it->str == std::string(1, op[0]) && (it + 1)->str == std::string(1, op[1]))
+            {
+                it->str = op;
+                it = rv.erase(it + 1);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
     return rv;
 }
 
-auto replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
+auto Cifa::replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
 {
     auto it = ppp.erase(ppp.begin() + i, ppp.begin() + i + len);
     return ppp.insert(it, c);
 }
 
 //表达式语法树
-CalUnit combine_cal_unit(std::vector<CalUnit> ppp)
+Cifa::CalUnit Cifa::combine_cal_unit(std::vector<CalUnit> ppp)
 {
     //清除括号
     while (true)
@@ -193,7 +232,7 @@ CalUnit combine_cal_unit(std::vector<CalUnit> ppp)
         {
             if ((itl0 - 1)->type == Function)
             {
-                (itl0 - 1)->v = itl0->v;
+                (itl0 - 1)->v = { *itl0 };
                 ppp.erase(itl0);
             }
         }
@@ -203,7 +242,7 @@ CalUnit combine_cal_unit(std::vector<CalUnit> ppp)
     }
 
     //双目运算符，要求左右皆有操作数，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
@@ -221,9 +260,28 @@ CalUnit combine_cal_unit(std::vector<CalUnit> ppp)
     return ppp[0];    //应该只剩一个
 }
 
-object run(std::string str)
+object Cifa::run_line(std::string str)
 {
     auto rv = split(str);
     auto c = combine_cal_unit(rv);
-    return c.eval();
+    return eval(c);
+}
+
+void Cifa::register_function(std::string name, func_type func)
+{
+    functions[name] = func;
+}
+
+object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
+{
+    if (functions.count(name))
+    {
+        auto p = functions[name];
+        std::vector<object> v;
+        for (auto& c : vc)
+        {
+            v.push_back(eval(c));
+        }
+        return p(v);
+    }
 }
