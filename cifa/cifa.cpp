@@ -1,93 +1,50 @@
-﻿#include "../../common/convert.h"
-#include <iostream>
-#include <map>
-#include <string>
-#include <vector>
-
-using object = double;
-
-enum Stat
-{
-    None = -1,
-    Constant,
-    Operator,
-    Parameter,
-    Function,
-    Key,
-    Type,
-};
+﻿#include "cifa.h"
 
 std::map<std::string, object> parameters;
 std::map<std::string, void*> functions;
 
-bool vector_have(std::vector<std::string>& ops, std::string& op)
+object CalUnit::eval()
 {
-    for (auto& o : ops)
+    if (str.size() > 2 && str.find("()") == str.size() - 2)
     {
-        if (op == o)
-        {
-            return true;
-        }
+        str.resize(str.size() - 2);
     }
-    return false;
-}
-
-struct CalUnit
-{
-    Stat type;
-    std::vector<CalUnit> v;
-    std::string str;
-    object eval()
+    if (type == Operator)
     {
-        if (type == Operator)
-        {
-            switch (str[0])
-            {
-            case '+':
-                return v[0].eval() + v[1].eval();
-                break;
-            case '-':
-                return v[0].eval() - v[1].eval();
-                break;
-            case '*':
-                return v[0].eval() * v[1].eval();
-                break;
-            case '/':
-                return v[0].eval() / v[1].eval();
-                break;
-            case '=':
-                return parameters[v[0].str] = v[1].eval();
-            default:
-                break;
-            }
-        }
-        else if (type == Constant)
-        {
-            return atof(str.c_str());
-        }
-        else if (type == Parameter)
+        if (str == "+") { return v[0].eval() + v[1].eval(); }
+        if (str == "-") { return v[0].eval() - v[1].eval(); }
+        if (str == "*") { return v[0].eval() * v[1].eval(); }
+        if (str == "/") { return v[0].eval() / v[1].eval(); }
+        if (str == "=") { return parameters[v[0].str] = v[1].eval(); }
+        if (str == ",") { return v[0].eval(), v[1].eval(); }
+    }
+    else if (type == Constant)
+    {
+        return atof(str.c_str());
+    }
+    else if (type == Parameter)
+    {
+        if (parameters.count(str))
         {
             return parameters[str];
         }
-        else if (type == Function)
+        else
         {
+            return 0;
         }
     }
-    CalUnit(Stat s, std::string s1)
+    else if (type == Function)
     {
-        type = s;
-        str = s1;
     }
-    CalUnit() {}
-};
+}
 
-Stat guess(char c)
+Stat guess_char(char c)
 {
     if (std::string("0123456789").find(c) != std::string::npos)
     {
         return Constant;
     }
-    if (std::string("+-*/=().").find(c) != std::string::npos)
+    if (std::string("+-*/=().,").find(c) != std::string::npos)
     {
         return Operator;
     }
@@ -109,7 +66,7 @@ std::vector<CalUnit> split(std::string str)
     {
         auto c = str[i];
         auto pre_stat = stat;
-        auto g = guess(c);
+        auto g = guess_char(c);
         if (g == Constant)
         {
             if (stat == Constant || stat == Operator || stat == None)
@@ -164,6 +121,7 @@ std::vector<CalUnit> split(std::string str)
     std::vector<std::string> types = { "auto" };
     for (auto it = rv.begin(); it != rv.end(); ++it)
     {
+        //括号前的变量视为函数
         if (it->str == "(")
         {
             if (it != rv.begin() && (it - 1)->type == Parameter)
@@ -180,17 +138,19 @@ std::vector<CalUnit> split(std::string str)
             it->type = Type;
         }
     }
+
+    //合并多字节运算符，未完成
     return rv;
 }
 
-void replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
+auto replace_cal(std::vector<CalUnit>& ppp, int i, int len, const CalUnit& c)
 {
     auto it = ppp.erase(ppp.begin() + i, ppp.begin() + i + len);
-    ppp.insert(it, c);
+    return ppp.insert(it, c);
 }
 
 //表达式语法树
-CalUnit uniform_cal(std::vector<CalUnit> ppp)
+CalUnit combine_cal_unit(std::vector<CalUnit> ppp)
 {
     //清除括号
     while (true)
@@ -226,25 +186,34 @@ CalUnit uniform_cal(std::vector<CalUnit> ppp)
             }
         }
 
-        replace_cal(ppp, itl0 - ppp.begin(), itr0 - itl0 + 1, uniform_cal(std::vector<CalUnit>{ itl0 + 1, itr0 }));
-
+        itl0 = replace_cal(ppp, itl0 - ppp.begin(), itr0 - itl0 + 1, combine_cal_unit(std::vector<CalUnit>{ itl0 + 1, itr0 }));
+        itl0->str += "()";
+        //如果括号前是函数则合并
+        if (itl0 != ppp.begin())
+        {
+            if ((itl0 - 1)->type == Function)
+            {
+                (itl0 - 1)->v = itl0->v;
+                ppp.erase(itl0);
+            }
+        }
         //auto c = uniform_cal(std::vector<CalUnit>{ itl0 + 1, itr0 });
         //auto it = ppp.erase(itl0, itr0 + 1);
         //ppp.insert(it, c);
     }
 
-    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "=" } };
+    //双目运算符，要求左右皆有操作数，此处的顺序即优先级
+    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "=" }, { "," } };
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
         {
-            auto& p = it;
             if (it->type == Operator && vector_have(op, it->str))
             {
                 it->v = { *(it - 1), *(it + 1) };
                 //replace_cal(ppp, it - 1 - ppp.begin(), 3, *it);
                 ppp.erase(it + 1);
-                it = ppp.erase(it - 1);                
+                it = ppp.erase(it - 1);
             }
             ++it;
         }
@@ -252,12 +221,9 @@ CalUnit uniform_cal(std::vector<CalUnit> ppp)
     return ppp[0];    //应该只剩一个
 }
 
-int main()
+object run(std::string str)
 {
-    std::string str = "  (1.6 + 6) * 6 / (87  +90)";
     auto rv = split(str);
-
-    auto c = uniform_cal(rv);
-    auto v = c.eval();
-    std::cout << str << " = " << v << '\n';
+    auto c = combine_cal_unit(rv);
+    return c.eval();
 }
