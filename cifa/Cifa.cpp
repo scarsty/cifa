@@ -1,27 +1,35 @@
 ﻿#include "Cifa.h"
 #include <functional>
 
-object Cifa::eval(CalUnit c)
+object Cifa::eval(CalUnit& c)
 {
     c.simple();
     if (c.type == Operator)
     {
-        if (c.str == "+") { return eval(c.v[0]) + eval(c.v[1]); }
-        if (c.str == "-") { return eval(c.v[0]) - eval(c.v[1]); }
-        if (c.str == "*") { return eval(c.v[0]) * eval(c.v[1]); }
-        if (c.str == "/") { return eval(c.v[0]) / eval(c.v[1]); }
-        if (c.str == "=") { return parameters[c.v[0].str] = eval(c.v[1]); }
-        if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
-        if (c.str == ">") { return eval(c.v[0]) > eval(c.v[1]); }
-        if (c.str == "<") { return eval(c.v[0]) < eval(c.v[1]); }
-        if (c.str == "==") { return eval(c.v[0]) == eval(c.v[1]); }
-        if (c.str == "!=") { return eval(c.v[0]) != eval(c.v[1]); }
-        if (c.str == ">=") { return eval(c.v[0]) >= eval(c.v[1]); }
-        if (c.str == "<=") { return eval(c.v[0]) <= eval(c.v[1]); }
-        //if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
-        //if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
-        if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
-        if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
+        if (c.v.size() == 1)
+        {
+            if (c.str == "+") { return eval(c.v[0]); }
+            if (c.str == "-") { return -eval(c.v[0]); }
+        }
+        if (c.v.size() == 2)
+        {
+            if (c.str == "+") { return eval(c.v[0]) + eval(c.v[1]); }
+            if (c.str == "-") { return eval(c.v[0]) - eval(c.v[1]); }
+            if (c.str == "*") { return eval(c.v[0]) * eval(c.v[1]); }
+            if (c.str == "/") { return eval(c.v[0]) / eval(c.v[1]); }
+            if (c.str == "=") { return parameters[c.v[0].str] = eval(c.v[1]); }
+            if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
+            if (c.str == ">") { return eval(c.v[0]) > eval(c.v[1]); }
+            if (c.str == "<") { return eval(c.v[0]) < eval(c.v[1]); }
+            if (c.str == "==") { return eval(c.v[0]) == eval(c.v[1]); }
+            if (c.str == "!=") { return eval(c.v[0]) != eval(c.v[1]); }
+            if (c.str == ">=") { return eval(c.v[0]) >= eval(c.v[1]); }
+            if (c.str == "<=") { return eval(c.v[0]) <= eval(c.v[1]); }
+            //if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
+            //if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
+            if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
+            if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
+        }
     }
     else if (c.type == Constant)
     {
@@ -197,7 +205,7 @@ auto Cifa::replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0,
 }
 
 //表达式语法树
-Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit> ppp)
+Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
 {
     //清除括号
     while (true)
@@ -233,8 +241,15 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit> ppp)
             }
         }
 
-        itl0 = replace_cal(ppp, itl0, std::next(itr0), combine_cal_unit(std::list<CalUnit>{ std::next(itl0), itr0 }));
-        itl0->str += "()";
+        std::list<CalUnit> ppp2;
+
+        ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
+        auto c1 = combine_cal_unit(ppp2);
+        c1.str += "()";
+        //itl0 = replace_cal(ppp, itl0, std::next(itr0), combine_cal_unit(std::list<CalUnit>{  }));
+        //itl0->str += "()";
+        itl0 = ppp.erase(itl0);
+        *itl0 = std::move(c1);
         //如果括号前是函数则合并
         if (itl0 != ppp.begin())
         {
@@ -250,18 +265,30 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit> ppp)
     }
 
     //双目运算符，要求左右皆有操作数，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
         {
             if (it->type == Operator && vector_have(op, it->str))
             {
-                it->v = { *std::prev(it), *std::next(it) };
-                ppp.erase(std::next(it));
-                it = ppp.erase(std::prev(it));
+                if (it == ppp.begin() || !std::prev(it)->canCal() || it->str == "!")    //退化为单目运算
+                {
+                    it->v = { *std::next(it) };
+                    it = ppp.erase(std::next(it));
+                }
+                else
+                {
+                    it->v = { *std::prev(it), *std::next(it) };
+                    ppp.erase(std::next(it));
+                    it = ppp.erase(std::prev(it));
+                    ++it;
+                }
             }
-            ++it;
+            else
+            {
+                ++it;
+            }
         }
     }
     return ppp.front();    //应该只剩一个

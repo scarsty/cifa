@@ -45,9 +45,13 @@ public:
                 str.resize(str.size() - 2);
             }
         }
+        bool canCal()
+        {
+            return type == Constant || type == Parameter || type == Function || type == Operator && v.size() > 0;
+        }
     };
 
-    object eval(CalUnit c);
+    object eval(CalUnit& c);
 
     template <typename T>
     bool vector_have(std::vector<T>& ops, T& op)
@@ -65,7 +69,7 @@ public:
     Stat guess_char(char c);
     std::list<CalUnit> split(std::string str);
     auto replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0, std::list<CalUnit>::iterator i1, const CalUnit& c);
-    CalUnit combine_cal_unit(std::list<CalUnit> ppp);
+    CalUnit combine_cal_unit(std::list<CalUnit>& ppp);
 
     void register_function(std::string name, func_type func);
 
