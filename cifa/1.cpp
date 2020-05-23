@@ -3,10 +3,11 @@
 #include <cmath>
 #include <iostream>
 
+using namespace cifa;
 
-object sin(object_vector& d) { return sin(d[0]); }
-object cos(object_vector& d) { return cos(d[0]); }
-object pow(object_vector& d) { return pow(d[0], d[1]); }
+Object sin(ObjectVector& d) { return sin(d[0]); }
+Object cos(ObjectVector& d) { return cos(d[0]); }
+Object pow(ObjectVector& d) { return pow(d[0], d[1]); }
 
 int main()
 {
@@ -15,7 +16,7 @@ int main()
     c1.register_function("cos", &cos);
     c1.register_function("pow", &pow);
 
-    std::string str = " x=-(113/355),y=0.5;x;pow(0-cos(x),y);x=x-1";
+    std::string str = " x=-(!355/113)+4-5,y=0.5;x;pow(-cos(x),y);x=x-1";
     auto strs = convert::splitString(str, ";");
     for (auto s : strs)
     {

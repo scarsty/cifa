@@ -1,15 +1,18 @@
 ﻿#include "Cifa.h"
 #include <functional>
 
-object Cifa::eval(CalUnit& c)
+namespace cifa
 {
-    c.simple();
+
+Object Cifa::eval(CalUnit& c)
+{
     if (c.type == Operator)
     {
         if (c.v.size() == 1)
         {
             if (c.str == "+") { return eval(c.v[0]); }
             if (c.str == "-") { return -eval(c.v[0]); }
+            if (c.str == "!") { return !eval(c.v[0]); }
         }
         if (c.v.size() == 2)
         {
@@ -30,6 +33,8 @@ object Cifa::eval(CalUnit& c)
             if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
             if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
         }
+        fprintf(stderr, "Unknown operator %s\n", c.str.c_str());
+        //return std::nan(c.str.c_str());
     }
     else if (c.type == Constant)
     {
@@ -51,7 +56,6 @@ object Cifa::eval(CalUnit& c)
         std::vector<CalUnit> v;
         std::function<void(CalUnit&)> get = [&v, &get](CalUnit& c1)
         {
-            c1.simple();
             if (c1.str == ",")
             {
                 for (auto& c2 : c1.v)
@@ -91,7 +95,7 @@ Stat Cifa::guess_char(char c)
 }
 
 //分割语法
-std::list<Cifa::CalUnit> Cifa::split(std::string str)
+std::list<CalUnit> Cifa::split(std::string str)
 {
     std::string r;
     std::list<CalUnit> rv;
@@ -205,7 +209,7 @@ auto Cifa::replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0,
 }
 
 //表达式语法树
-Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
+CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
 {
     //清除括号
     while (true)
@@ -245,9 +249,6 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
 
         ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
         auto c1 = combine_cal_unit(ppp2);
-        c1.str += "()";
-        //itl0 = replace_cal(ppp, itl0, std::next(itr0), combine_cal_unit(std::list<CalUnit>{  }));
-        //itl0->str += "()";
         itl0 = ppp.erase(itl0);
         *itl0 = std::move(c1);
         //如果括号前是函数则合并
@@ -270,7 +271,7 @@ Cifa::CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
         {
-            if (it->type == Operator && vector_have(op, it->str))
+            if (it->type == Operator && it->v.size() == 0 && vector_have(op, it->str))    //已经能计算的不需再算
             {
                 if (it == ppp.begin() || !std::prev(it)->canCal() || it->str == "!")    //退化为单目运算
                 {
@@ -299,12 +300,12 @@ void Cifa::register_function(std::string name, func_type func)
     functions[name] = func;
 }
 
-object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
+Object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
 {
     if (functions.count(name))
     {
         auto p = functions[name];
-        std::vector<object> v;
+        std::vector<Object> v;
         for (auto& c : vc)
         {
             v.push_back(eval(c));
@@ -313,9 +314,11 @@ object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
     }
 }
 
-object Cifa::run_line(std::string str)
+Object Cifa::run_line(std::string str)
 {
     auto rv = split(str);
     auto c = combine_cal_unit(rv);
     return eval(c);
 }
+
+}    // namespace cifa
