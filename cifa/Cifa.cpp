@@ -91,6 +91,7 @@ Object Cifa::eval(CalUnit& c)
             {
                 return eval(c.v[2]);
             }
+            return Object(0);
         }
         if (c.str == "for")
         {
@@ -99,7 +100,10 @@ Object Cifa::eval(CalUnit& c)
             for (eval(c.v[0].v[0]); eval(c.v[0].v[1]); eval(c.v[0].v[2]))
             {
                 o = eval(c.v[1]);
+                if (o.type == "break") { break; }
+                if (o.type == "continue") { continue; }
             }
+            o.type = "";
             return o;
         }
         if (c.str == "while")
@@ -108,18 +112,22 @@ Object Cifa::eval(CalUnit& c)
             while (eval(c.v[0]))
             {
                 o = eval(c.v[1]);
+                if (o.type == "break") { break; }
+                if (o.type == "continue") { continue; }
             }
+            o.type = "";
             return o;
         }
         if (c.str == "break")
         {
-            Object o;    //未完成
+            Object o;
+            o.type = "break";
             return o;
         }
         if (c.str == "continue")
         {
             Object o;
-            //未完成
+            o.type = "continue";
             return o;
         }
     }
@@ -129,6 +137,8 @@ Object Cifa::eval(CalUnit& c)
         for (auto& c1 : c.v)
         {
             o = eval(c1);
+            if (o.type == "break") { break; }
+            if (o.type == "continue") { break; }
         }
         return o;
     }
@@ -152,6 +162,7 @@ CalUnitType Cifa::guess_char(char c)
     {
         return Split;
     }
+    //tudo: 需增加字串
     return None;
 }
 
@@ -246,7 +257,7 @@ std::list<CalUnit> Cifa::split(std::string str)
                 std::prev(it)->type = Function;
             }
         }
-        if (vector_have(keys, it->str))
+        if (vector_have(keys, it->str)||vector_have(keys_single, it->str))
         {
             it->type = Key;
         }
@@ -394,7 +405,7 @@ CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolo
             ++it;
         }
     }
-    if (!need_end_semicolon)    //{}内的必须一个分号结尾
+    if (!need_end_semicolon && !ppp.empty())    //{}内的必须一个分号结尾
     {
         c.v.emplace_back(std::move(combine_all_cal(ppp)));
     }
@@ -419,7 +430,7 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_multi_line(ppp2, true);    //此处合并多行
+        auto c1 = combine_multi_line(ppp2, false);    //此处合并多行
         it = ppp.erase(it);
         *it = std::move(c1);
     }
@@ -494,7 +505,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
             auto it1 = ppp.erase(std::next(it));
             it->v.emplace_back(std::move(*it1));
             it1 = ppp.erase(it1);
-            if (it->str == "if" && it1->str == "else")
+            if (it->str == "if" && it1!=ppp.end()&&it1->str == "else")
             {
                 it->v.emplace_back(std::move(*std::next(it1)));
                 it1 = ppp.erase(it1);

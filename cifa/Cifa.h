@@ -11,6 +11,11 @@ struct Object
 {
     Object() {}
     Object(double v) { value = v; }
+    Object(std::string str)
+    {
+        type = "string";
+        content = str;
+    }
     double value = 0;
     std::string type;
     std::string content;
@@ -77,7 +82,8 @@ class Cifa
     //运算符，大部分为双目，此处的顺序即优先级
     std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "*=", "/=", "+=", "-=" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
-    std::vector<std::string> keys = { "if", "else", "for", "while", "break", "continue" };
+    std::vector<std::string> keys = { "if", "for", "while" };
+    std::vector<std::string> keys_single = { "else", "break", "continue" };
     std::vector<std::string> types = { "auto", "int", "double" };
 
     std::map<std::string, Object> parameters;
