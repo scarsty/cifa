@@ -1,6 +1,8 @@
 ﻿#include "Cifa.h"
 #include <functional>
 
+#include <iostream>
+
 namespace cifa
 {
 
@@ -71,6 +73,35 @@ Object Cifa::eval(CalUnit& c)
         get(c.v[0]);
         return run_function(c.str, v);
     }
+    else if (c.type == Key)
+    {
+        if (c.str == "if")
+        {
+            if (eval(c.v[0]))
+            {
+                return eval(c.v[1]);
+            }
+            else if (c.v.size() >= 3)
+            {
+                return eval(c.v[2]);
+            }
+        }
+        if (c.str == "for")
+        {
+            if (eval(c.v[0]))
+            {
+                return eval(c.v[1]);
+            }
+        }
+    }
+    else if (c.type == Union)
+    {
+        for (auto& c1 : c.v)
+        {
+            std::cout << eval(c1) << std::endl;
+        }
+        return c.v.size();
+    }
 }
 
 Stat Cifa::guess_char(char c)
@@ -89,7 +120,7 @@ Stat Cifa::guess_char(char c)
     }
     if (std::string("{};").find(c) != std::string::npos)
     {
-        return Parameter;
+        return Split;
     }
     return None;
 }
@@ -160,8 +191,6 @@ std::list<CalUnit> Cifa::split(std::string str)
     }
     rv.push_back({ stat, r });
 
-    std::vector<std::string> keys = { "if", "for", "while" };
-    std::vector<std::string> types = { "auto" };
     for (auto it = rv.begin(); it != rv.end(); ++it)
     {
         //括号前的变量视为函数
@@ -183,19 +212,24 @@ std::list<CalUnit> Cifa::split(std::string str)
     }
 
     //合并多字节运算符
-    std::vector<std::string> dop = { "==", "!=", ">=", "<=", "||", "&&" };
-    for (auto& op : dop)
+    for (auto& ops1 : ops)
     {
-        for (auto it = rv.begin(); it != rv.end();)
+        for (auto& op : ops1)
         {
-            if (it->str == std::string(1, op[0]) && std::next(it)->str == std::string(1, op[1]))
+            if (op.size() == 2)
             {
-                it->str = op;
-                it = rv.erase(std::next(it));
-            }
-            else
-            {
-                ++it;
+                for (auto it = rv.begin(); it != rv.end();)
+                {
+                    if (it->str == std::string(1, op[0]) && std::next(it)->str == std::string(1, op[1]))
+                    {
+                        it->str = op;
+                        it = rv.erase(std::next(it));
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
             }
         }
     }
@@ -208,65 +242,104 @@ auto Cifa::replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0,
     return ppp.insert(it, c);
 }
 
-//表达式语法树
-CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
+//提取最内层括号
+std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, std::string bl, std::string br)
 {
-    //清除括号
+    bool have = false;
+    for (auto it = ppp.begin(); it != ppp.end(); ++it)
+    {
+        if (it->str == bl || it->str == br)
+        {
+            have = true;
+            break;
+        }
+    }
+    if (!have)
+    {
+        return ppp.end();
+    }
+    auto itl0 = ppp.begin(), itr0 = ppp.end();
+    for (auto itr = ppp.begin(); itr != ppp.end(); ++itr)
+    {
+        if (itr->str == br)
+        {
+            itr0 = itr;
+            for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
+            {
+                if (itl->str == bl)
+                {
+                    itl0 = itl;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
+    return itl0;
+}
+
+CalUnit Cifa::combine_multi_line(std::list<CalUnit> ppp)
+{
+    CalUnit c;
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->str == ";")
+        {
+            std::list<CalUnit> ppp2;
+            ppp2.splice(ppp2.begin(), ppp, ppp.begin(), it);
+            c.v.push_back(std::move(combine_all_cal(ppp2)));
+            it = ppp.erase(ppp.begin());
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    c.type = Union;
+    return c;
+}
+
+//表达式语法树
+CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
+{
+    //合并{}
     while (true)
     {
-        bool have = false;
-        for (auto it = ppp.begin(); it != ppp.end(); ++it)
-        {
-            if (it->str == "(" || it->str == ")")
-            {
-                have = true;
-                break;
-            }
-        }
-        if (!have)
+        std::list<CalUnit> ppp2;
+        auto it = inside_bracket(ppp, ppp2, "{", "}");
+        if (ppp2.empty())
         {
             break;
         }
-        auto itl0 = ppp.begin(), itr0 = ppp.end();
-        for (auto itr = ppp.begin(); itr != ppp.end(); ++itr)
-        {
-            if (itr->str == ")")
-            {
-                itr0 = itr;
-                for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
-                {
-                    if (itl->str == "(")
-                    {
-                        itl0 = itl;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-
+        auto c1 = combine_multi_line(ppp2);    //此处合并多行
+        it = ppp.erase(it);
+        *it = std::move(c1);
+    }
+    //合并()
+    while (true)
+    {
         std::list<CalUnit> ppp2;
-
-        ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
-        auto c1 = combine_cal_unit(ppp2);
-        itl0 = ppp.erase(itl0);
-        *itl0 = std::move(c1);
-        //如果括号前是函数则合并
-        if (itl0 != ppp.begin())
+        auto it = inside_bracket(ppp, ppp2, "(", ")");
+        if (ppp2.empty())
         {
-            if (std::prev(itl0)->type == Function)
+            break;
+        }
+        auto c1 = combine_all_cal(ppp2);
+        it = ppp.erase(it);
+        *it = std::move(c1);
+        //如果括号前是函数则合并
+        if (it != ppp.begin())
+        {
+            if (std::prev(it)->type == Function)
             {
-                std::prev(itl0)->v = { *itl0 };
-                ppp.erase(itl0);
+                std::prev(it)->v = { *it };
+                ppp.erase(it);
             }
         }
-        //auto c = uniform_cal(std::vector<CalUnit>{ itl0 + 1, itr0 });
-        //auto it = ppp.erase(itl0, itr0 + 1);
-        //ppp.insert(it, c);
     }
 
     //双目运算符，要求左右皆有操作数，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
@@ -292,7 +365,8 @@ CalUnit Cifa::combine_cal_unit(std::list<CalUnit>& ppp)
             }
         }
     }
-    return ppp.front();    //应该只剩一个
+    //合并关键词
+    return ppp.front();    //如果语法正确应该只剩一个
 }
 
 void Cifa::register_function(std::string name, func_type func)
@@ -317,7 +391,7 @@ Object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
 Object Cifa::run_line(std::string str)
 {
     auto rv = split(str);
-    auto c = combine_cal_unit(rv);
+    auto c = combine_all_cal(rv);
     return eval(c);
 }
 

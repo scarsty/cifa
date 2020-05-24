@@ -16,10 +16,11 @@ int main()
     c1.register_function("cos", &cos);
     c1.register_function("pow", &pow);
 
-    std::string str = " x=-(!355/113)+4-5,y=0.5;x;pow(-cos(x),y);x=x-1";
-    auto strs = convert::splitString(str, ";");
-    for (auto s : strs)
-    {
-        std::cout << s << " ...... " << c1.run_line(s) << '\n';
-    }
+    std::string str = " if (1>0) {x=-(!355/113)+4-5,y=0.5;x;pow(-cos(x),y);x=x-1;}";
+    //auto strs = convert::splitString(str, ";");
+    //for (auto s : strs)
+    //{
+    //    std::cout << s << " ...... " << c1.run_line(s) << '\n';
+    //}
+    c1.run_line(str);
 }
