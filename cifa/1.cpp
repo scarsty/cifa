@@ -7,7 +7,22 @@ using namespace cifa;
 
 Object sin(ObjectVector& d) { return sin(d[0]); }
 Object cos(ObjectVector& d) { return cos(d[0]); }
-Object pow(ObjectVector& d) { return pow(d[0], d[1]); }
+Object pow(ObjectVector& d) { return pow(d[0].value, d[1].value); }
+
+std::ostream& operator<<(std::ostream& stream, const Object& o)
+{
+    stream << o.value;
+    return stream;
+}
+
+Object print(ObjectVector& d)
+{
+    for (auto& d1 : d)
+    {
+        std::cout << d1 << " ";
+    }
+    return Object(d.size());
+}
 
 int main()
 {
@@ -15,12 +30,8 @@ int main()
     c1.register_function("sin", &sin);
     c1.register_function("cos", &cos);
     c1.register_function("pow", &pow);
+    c1.register_function("print", &print);
 
-    std::string str = " if (1>0) {x=-(!355/113)+4-5,y=0.5;x;pow(-cos(x),y);x=x-1;}";
-    //auto strs = convert::splitString(str, ";");
-    //for (auto s : strs)
-    //{
-    //    std::cout << s << " ...... " << c1.run_line(s) << '\n';
-    //}
+    std::string str = convert::readStringFromFile("1.c");
     c1.run_line(str);
 }
