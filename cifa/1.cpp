@@ -33,5 +33,5 @@ int main()
     c1.register_function("print", &print);
 
     std::string str = convert::readStringFromFile("1.c");
-    c1.run_line(str);
+    c1.run_script(str);
 }

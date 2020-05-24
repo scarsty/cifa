@@ -111,6 +111,17 @@ Object Cifa::eval(CalUnit& c)
             }
             return o;
         }
+        if (c.str == "break")
+        {
+            Object o;    //未完成
+            return o;
+        }
+        if (c.str == "continue")
+        {
+            Object o;
+            //未完成
+            return o;
+        }
     }
     else if (c.type == Union)
     {
@@ -150,9 +161,7 @@ std::list<CalUnit> Cifa::split(std::string str)
     std::string r;
     std::list<CalUnit> rv;
 
-    for (size_t i = 0; i < str.size(); i++)
-    {
-    }
+    //删除注释
     size_t pos = 0;
     while (pos != std::string::npos)
     {
@@ -163,7 +172,7 @@ std::list<CalUnit> Cifa::split(std::string str)
             {
                 pos1 = str.size();
             }
-            str.erase(pos, pos1 - pos - 1);
+            std::fill(str.begin() + pos, str.begin() + pos1 + 1, ' ');
         }
     }
 
@@ -269,17 +278,25 @@ std::list<CalUnit> Cifa::split(std::string str)
             }
         }
     }
+
+    //不处理类型符号
+    for (auto it = rv.begin(); it != rv.end();)
+    {
+        if (it->type == Type)
+        {
+            it = rv.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
     return rv;
 }
 
-auto Cifa::replace_cal(std::list<CalUnit>& ppp, std::list<CalUnit>::iterator i0, std::list<CalUnit>::iterator i1, const CalUnit& c)
-{
-    auto it = ppp.erase(i0, i1);
-    return ppp.insert(it, c);
-}
-
-//提取最内层括号
-std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, std::string bl, std::string br)
+//查找现有最内层括号，并返回位置
+std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br)
 {
     bool have = false;
     for (auto it = ppp.begin(); it != ppp.end(); ++it)
@@ -319,43 +336,11 @@ std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<C
 CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
 {
     //合并{}
-    while (true)
-    {
-        std::list<CalUnit> ppp2;
-        auto it = inside_bracket(ppp, ppp2, "{", "}");
-        if (ppp2.empty())
-        {
-            break;
-        }
-        auto c1 = combine_multi_line(ppp2, true);    //此处合并多行
-        it = ppp.erase(it);
-        *it = std::move(c1);
-    }
+    combine_curly_backet(ppp);
     //合并()
-    while (true)
-    {
-        std::list<CalUnit> ppp2;
-        auto it = inside_bracket(ppp, ppp2, "(", ")");
-        if (ppp2.empty())
-        {
-            break;
-        }
-        auto c1 = combine_all_cal(ppp2);
-        it = ppp.erase(it);
-        *it = std::move(c1);
-        //如果括号前是函数则合并
-        if (it != ppp.begin())
-        {
-            if (std::prev(it)->type == Function)
-            {
-                std::prev(it)->v = { *it };
-                ppp.erase(it);
-            }
-        }
-    }
-
+    combine_round_backet(ppp);
+    //合并算符
     combine_ops(ppp);
-
     //删除剩余的所有分号
     for (auto it = ppp.begin(); it != ppp.end();)
     {
@@ -368,7 +353,7 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
             ++it;
         }
     }
-
+    //合并关键字
     combine_keys(ppp);
 
     if (ppp.size() == 0)
@@ -422,6 +407,47 @@ CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolo
         return c.v.front();
     }
     return c;
+}
+
+void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
+{
+    while (true)
+    {
+        std::list<CalUnit> ppp2;
+        auto it = inside_bracket(ppp, ppp2, "{", "}");
+        if (ppp2.empty())
+        {
+            break;
+        }
+        auto c1 = combine_multi_line(ppp2, true);    //此处合并多行
+        it = ppp.erase(it);
+        *it = std::move(c1);
+    }
+}
+
+void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
+{
+    while (true)
+    {
+        std::list<CalUnit> ppp2;
+        auto it = inside_bracket(ppp, ppp2, "(", ")");
+        if (ppp2.empty())
+        {
+            break;
+        }
+        auto c1 = combine_all_cal(ppp2);
+        it = ppp.erase(it);
+        *it = std::move(c1);
+        //括号前是函数
+        if (it != ppp.begin())
+        {
+            if (std::prev(it)->type == Function)
+            {
+                std::prev(it)->v = { *it };
+                ppp.erase(it);
+            }
+        }
+    }
 }
 
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
@@ -497,7 +523,7 @@ Object Cifa::run_function(std::string name, std::vector<CalUnit> vc)
     }
 }
 
-Object Cifa::run_line(std::string str)
+Object Cifa::run_script(std::string str)
 {
     auto rv = split(str);
     auto c = combine_all_cal(rv);
