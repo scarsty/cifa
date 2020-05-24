@@ -6,6 +6,8 @@
 namespace cifa
 {
 
+std::function<Object(const Object&, const Object&)> add, sub, mul, div, assign;
+
 Object Cifa::eval(CalUnit& c)
 {
     if (c.type == Operator)
@@ -47,6 +49,10 @@ Object Cifa::eval(CalUnit& c)
     else if (c.type == Constant)
     {
         return Object(atof(c.str.c_str()));
+    }
+    else if (c.type == String)
+    {
+        return Object(c.str);
     }
     else if (c.type == Parameter)
     {
@@ -162,6 +168,10 @@ CalUnitType Cifa::guess_char(char c)
     {
         return Split;
     }
+    if (std::string("\"\'").find(c) != std::string::npos)
+    {
+        return String;
+    }
     //tudo: 需增加字串
     return None;
 }
@@ -188,12 +198,33 @@ std::list<CalUnit> Cifa::split(std::string str)
     }
 
     CalUnitType stat = None;
+    char in_string = 0;
     for (size_t i = 0; i < str.size(); i++)
     {
         auto c = str[i];
         auto pre_stat = stat;
         auto g = guess_char(c);
-        if (g == Constant)
+        if (in_string)
+        {
+            if (g == String && in_string == c)
+            {
+                in_string = 0;
+                stat = None;
+            }
+            else
+            {
+                stat = String;
+            }
+        }
+        else if (g == String)
+        {
+            if (in_string == 0)
+            {
+                in_string = c;
+                stat = None;
+            }
+        }
+        else if (g == Constant)
         {
             if (stat == Constant || stat == Operator || stat == None)
             {
@@ -257,7 +288,7 @@ std::list<CalUnit> Cifa::split(std::string str)
                 std::prev(it)->type = Function;
             }
         }
-        if (vector_have(keys, it->str)||vector_have(keys_single, it->str))
+        if (vector_have(keys, it->str) || vector_have(keys_single, it->str))
         {
             it->type = Key;
         }
@@ -505,7 +536,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
             auto it1 = ppp.erase(std::next(it));
             it->v.emplace_back(std::move(*it1));
             it1 = ppp.erase(it1);
-            if (it->str == "if" && it1!=ppp.end()&&it1->str == "else")
+            if (it->str == "if" && it1 != ppp.end() && it1->str == "else")
             {
                 it->v.emplace_back(std::move(*std::next(it1)));
                 it1 = ppp.erase(it1);
@@ -539,6 +570,23 @@ Object Cifa::run_script(std::string str)
     auto rv = split(str);
     auto c = combine_all_cal(rv);
     return eval(c);
+}
+
+Object print(ObjectVector& d)
+{
+    for (auto& d1 : d)
+    {
+        if (d1.type == "string")
+        {
+            std::cout << d1.content;
+        }
+        else
+        {
+            std::cout << d1.value;
+        }
+    }
+    std::cout << "\n";
+    return Object(d.size());
 }
 
 }    // namespace cifa

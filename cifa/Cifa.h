@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <list>
 #include <map>
 #include <string>
@@ -11,7 +12,7 @@ struct Object
 {
     Object() {}
     Object(double v) { value = v; }
-    Object(std::string str)
+    Object(const std::string& str)
     {
         type = "string";
         content = str;
@@ -23,14 +24,47 @@ struct Object
     operator double() { return value; }
 };
 
-inline Object operator+(Object& o) { return Object(o.value); }
+extern std::function<Object(const Object&, const Object&)> add, sub, mul, div, assign;
+
+#define OPERATOR(o1, o2, op, op2) \
+    if (o1.type == "" && o2.type == "") \
+    { \
+        return Object(o1.value op o2.value); \
+    } \
+    if (op2) \
+    { \
+        return op2(o1, o2); \
+    } \
+    return Object(o1.value op o2.value);
+
+inline Object operator+(Object& o)
+{
+    return Object(o.value);
+}
 inline Object operator!(Object& o) { return Object(!o.value); }
 
-inline Object operator+(const Object& o1, const Object& o2) { return Object(o1.value + o2.value); }
-inline Object operator-(const Object& o1, const Object& o2) { return Object(o1.value - o2.value); }
-inline Object operator*(const Object& o1, const Object& o2) { return Object(o1.value * o2.value); }
-inline Object operator/(const Object& o1, const Object& o2) { return Object(o1.value / o2.value); }
-inline Object operator+=(Object& o1, const Object& o2) { return Object(o1.value += o2.value); }
+inline Object operator+(const Object& o1, const Object& o2)
+{
+    if (o1.type == "string" && o2.type == "string")
+    {
+        return Object(o1.content + o2.content);
+    }
+    OPERATOR(o1, o2, +, add);
+}
+inline Object operator-(const Object& o1, const Object& o2) { OPERATOR(o1, o2, -, sub); }
+inline Object operator*(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, sub); }
+inline Object operator/(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, sub); }
+inline Object operator+=(Object& o1, const Object& o2)
+{
+    if (o1.type == "" && o2.type == "")
+    {
+        return Object(o1.value += o2.value);
+    }
+    else if (o1.type == "string" && o2.type == "string")
+    {
+        return Object(o1.content += o2.content);
+    }
+}
 inline Object operator-=(Object& o1, const Object& o2) { return Object(o1.value -= o2.value); }
 inline Object operator*=(Object& o1, const Object& o2) { return Object(o1.value *= o2.value); }
 inline Object operator/=(Object& o1, const Object& o2) { return Object(o1.value /= o2.value); }
@@ -51,6 +85,7 @@ enum CalUnitType
 {
     None = -1,
     Constant,
+    String,
     Operator,
     Split,
     Parameter,
@@ -73,9 +108,11 @@ struct CalUnit
     CalUnit() {}
     bool canCal()
     {
-        return type == Constant || type == Parameter || type == Function || type == Operator && v.size() > 0;
+        return type == Constant || type == String || type == Parameter || type == Function || type == Operator && v.size() > 0;
     }
 };
+
+Object print(ObjectVector& d);
 
 class Cifa
 {
@@ -91,6 +128,10 @@ class Cifa
     std::map<std::string, func_type> functions;
 
 public:
+    Cifa()
+    {
+        register_function("print", print);
+    }
     Object eval(CalUnit& c);
 
     template <typename T>
