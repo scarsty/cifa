@@ -24,6 +24,8 @@ struct Object
     operator double() { return value; }
 };
 
+using ObjectVector = std::vector<Object>;
+
 extern std::function<Object(const Object&, const Object&)> add, sub, mul, div, assign;
 
 #define OPERATOR(o1, o2, op, op2) \
@@ -37,12 +39,12 @@ extern std::function<Object(const Object&, const Object&)> add, sub, mul, div, a
     } \
     return Object(o1.value op o2.value);
 
-inline Object operator+(Object& o)
+inline Object operator!(Object& o)
 {
-    return Object(o.value);
+    return Object(!o.value);
 }
-inline Object operator!(Object& o) { return Object(!o.value); }
-
+inline Object operator*(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, sub); }
+inline Object operator/(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, sub); }
 inline Object operator+(const Object& o1, const Object& o2)
 {
     if (o1.type == "string" && o2.type == "string")
@@ -52,8 +54,14 @@ inline Object operator+(const Object& o1, const Object& o2)
     OPERATOR(o1, o2, +, add);
 }
 inline Object operator-(const Object& o1, const Object& o2) { OPERATOR(o1, o2, -, sub); }
-inline Object operator*(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, sub); }
-inline Object operator/(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, sub); }
+inline Object operator>(const Object& o1, const Object& o2) { return Object(o1.value > o2.value); }
+inline Object operator<(const Object& o1, const Object& o2) { return Object(o1.value < o2.value); }
+inline Object operator>=(const Object& o1, const Object& o2) { return Object(o1.value >= o2.value); }
+inline Object operator<=(const Object& o1, const Object& o2) { return Object(o1.value <= o2.value); }
+inline Object operator==(const Object& o1, const Object& o2) { return Object(o1.value == o2.value); }
+inline Object operator!=(const Object& o1, const Object& o2) { return Object(o1.value != o2.value); }
+inline Object operator&&(const Object& o1, const Object& o2) { return Object(o1.value && o2.value); }
+inline Object operator||(const Object& o1, const Object& o2) { return Object(o1.value || o2.value); }
 inline Object operator+=(Object& o1, const Object& o2)
 {
     if (o1.type == "" && o2.type == "")
@@ -64,26 +72,15 @@ inline Object operator+=(Object& o1, const Object& o2)
     {
         return Object(o1.content += o2.content);
     }
+    return Object();
 }
 inline Object operator-=(Object& o1, const Object& o2) { return Object(o1.value -= o2.value); }
 inline Object operator*=(Object& o1, const Object& o2) { return Object(o1.value *= o2.value); }
 inline Object operator/=(Object& o1, const Object& o2) { return Object(o1.value /= o2.value); }
 
-inline Object operator>(const Object& o1, const Object& o2) { return Object(o1.value > o2.value); }
-inline Object operator<(const Object& o1, const Object& o2) { return Object(o1.value < o2.value); }
-inline Object operator==(const Object& o1, const Object& o2) { return Object(o1.value == o2.value); }
-inline Object operator!=(const Object& o1, const Object& o2) { return Object(o1.value != o2.value); }
-inline Object operator>=(const Object& o1, const Object& o2) { return Object(o1.value >= o2.value); }
-inline Object operator<=(const Object& o1, const Object& o2) { return Object(o1.value <= o2.value); }
-
-inline Object operator&&(const Object& o1, const Object& o2) { return Object(o1.value && o2.value); }
-inline Object operator||(const Object& o1, const Object& o2) { return Object(o1.value || o2.value); }
-
-using ObjectVector = std::vector<Object>;
-
-enum CalUnitType
+enum class CalUnitType
 {
-    None = -1,
+    None = 0,
     Constant,
     String,
     Operator,
@@ -97,7 +94,7 @@ enum CalUnitType
 
 struct CalUnit
 {
-    CalUnitType type = None;
+    CalUnitType type = CalUnitType::None;
     std::vector<CalUnit> v;
     std::string str;
     size_t line = 0, col = 0;
@@ -107,9 +104,9 @@ struct CalUnit
         str = s1;
     }
     CalUnit() {}
-    bool canCal()
+    bool can_cal()
     {
-        return type == Constant || type == String || type == Parameter || type == Function || type == Operator && v.size() > 0;
+        return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter || type == CalUnitType::Function || type == CalUnitType::Operator && v.size() > 0;
     }
 };
 
@@ -120,7 +117,7 @@ Object to_number(ObjectVector& d);
 class Cifa
 {
     //运算符，大部分为双目，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { "." }, { "*", "/" }, { "+", "-" }, { "*=", "/=", "+=", "-=" }, { "++", "--" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     std::vector<std::string> keys = { "if", "for", "while" };
     std::vector<std::string> keys_single = { "else", "break", "continue" };
@@ -129,12 +126,12 @@ class Cifa
     std::map<std::string, Object> parameters;
     using func_type = Object (*)(std::vector<Object>&);
     std::map<std::string, func_type> functions;
-    enum ParseResult
+    enum class ParseResult
     {
         OK = 0,
         Error,
     };
-    ParseResult parse_result = OK;
+    ParseResult parse_result = ParseResult::OK;
 
 public:
     Cifa()
