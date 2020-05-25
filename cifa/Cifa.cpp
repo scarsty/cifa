@@ -26,7 +26,7 @@ Object print(ObjectVector& d)
     return Object(double(d.size()));
 }
 
-cifa::Object to_string(ObjectVector& d)
+Object to_string(ObjectVector& d)
 {
     if (d.empty())
     {
@@ -37,7 +37,7 @@ cifa::Object to_string(ObjectVector& d)
     return Object(stream.str());
 }
 
-cifa::Object to_number(ObjectVector& d)
+Object to_number(ObjectVector& d)
 {
     if (d.empty())
     {
@@ -142,26 +142,9 @@ Object Cifa::eval(CalUnit& c)
     else if (c.type == CalUnitType::Function)
     {
         std::vector<CalUnit> v;
-        std::function<void(CalUnit&)> get = [&v, &get](CalUnit& c1)
-        {
-            if (c1.str == ",")
-            {
-                for (auto& c2 : c1.v)
-                {
-                    get(c2);
-                }
-            }
-            else
-            {
-                if (c1.type != CalUnitType::None)
-                {
-                    v.push_back(c1);
-                }
-            }
-        };
         if (!c.v.empty())
         {
-            get(c.v[0]);
+            expand_comma(c.v[0], v);
         }
         return run_function(c.str, v);
     }
@@ -239,6 +222,24 @@ Object Cifa::eval(CalUnit& c)
     }
     return Object();
 }
+
+void Cifa::expand_comma(CalUnit& c1, std::vector<CalUnit>& v)
+{
+    if (c1.str == ",")
+    {
+        for (auto& c2 : c1.v)
+        {
+            expand_comma(c2, v);
+        }
+    }
+    else
+    {
+        if (c1.type != CalUnitType::None)
+        {
+            v.push_back(c1);
+        }
+    }
+};
 
 CalUnitType Cifa::guess_char(char c)
 {
@@ -544,7 +545,7 @@ CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolo
 }
 
 //查找现有最内层括号，并返回位置
-std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br)
+std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br)
 {
     bool have = false;
     auto it = ppp.begin();
@@ -634,6 +635,14 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
             {
                 auto itl = std::prev(it);
                 add_error("Error (%zu, %zu): %s is not a function", itl->line, itl->col, itl->str.c_str());
+                std::prev(it)->v = { *it };
+                ppp.erase(it);
+            }
+            else if (std::prev(it)->type == CalUnitType::Constant)
+            {
+                auto itl = std::prev(it);
+                add_error("Error (%zu, %zu): %s is not a function", itl->line, itl->col, itl->str.c_str());
+                std::prev(it)->v = { *it };
                 ppp.erase(it);
             }
         }
@@ -695,7 +704,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
 
 void Cifa::combine_keys(std::list<CalUnit>& ppp)
 {
-    //合并关键词，从右向左
+    //合并关键字，从右向左
     auto it = ppp.end();
     while (it != ppp.begin())
     {
@@ -746,7 +755,7 @@ void Cifa::register_function(const std::string& name, func_type func)
     functions[name] = func;
 }
 
-Object Cifa::run_function(const std::string& name, std::vector<CalUnit> vc)
+Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc)
 {
     if (functions.count(name))
     {

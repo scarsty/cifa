@@ -140,6 +140,32 @@ public:
         register_function("to_number", to_number);
     }
     Object eval(CalUnit& c);
+    void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
+
+    CalUnitType guess_char(char c);
+    std::list<CalUnit> split(std::string str);
+
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp);
+    CalUnit combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolon);
+    std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
+    void combine_curly_backet(std::list<CalUnit>& ppp);
+    void combine_round_backet(std::list<CalUnit>& ppp);
+    void combine_ops(std::list<CalUnit>& ppp);
+    void combine_keys(std::list<CalUnit>& ppp);
+    void combine_types(std::list<CalUnit>& ppp) {}
+
+    void register_function(const std::string& name, func_type func);
+    Object run_function(const std::string& name, std::vector<CalUnit>& vc);
+
+    Object run_script(const std::string& str);
+
+    template <typename... Args>
+    void add_error(Args... args)
+    {
+        char buffer[1024];
+        sprintf(buffer, args...);
+        errors.emplace_back(buffer);
+    }
 
     template <typename T>
     bool vector_have(std::vector<T>& ops, T& op)
@@ -152,29 +178,6 @@ public:
             }
         }
         return false;
-    }
-
-    CalUnitType guess_char(char c);
-    std::list<CalUnit> split(std::string str);
-
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp);
-    CalUnit combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolon);
-    std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br);
-    void combine_curly_backet(std::list<CalUnit>& ppp);
-    void combine_round_backet(std::list<CalUnit>& ppp);
-    void combine_ops(std::list<CalUnit>& ppp);
-    void combine_keys(std::list<CalUnit>& ppp);
-
-    void register_function(const std::string& name, func_type func);
-    Object run_function(const std::string& name, std::vector<CalUnit> vc);
-
-    Object run_script(const std::string& str);
-
-    template <typename...Args> void add_error(Args... args)
-    {
-        char buffer[1024];
-        sprintf(buffer, args...);
-        errors.emplace_back(buffer);
     }
 };
 
