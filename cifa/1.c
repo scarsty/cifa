@@ -1,9 +1,12 @@
 //cifa
 
-for (int i = 1; i <= 100; i = i + 1)
+str = '';
+for (int i = 1; i <= 100; i += 1)
 {
-    if (i == 50) continue;
-    sum += i;
+    if (i == 50);
+    sum = sum+i;
+    str += to_string(i) ;
+    if (i < 100) str += "+";
 }
-str = 'sum=' + "1+...+100 - 50";
 print(str, "=", sum);
+ccc();

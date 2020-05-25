@@ -114,6 +114,8 @@ struct CalUnit
 };
 
 Object print(ObjectVector& d);
+Object to_string(ObjectVector& d);
+Object to_number(ObjectVector& d);
 
 class Cifa
 {
@@ -127,11 +129,19 @@ class Cifa
     std::map<std::string, Object> parameters;
     using func_type = Object (*)(std::vector<Object>&);
     std::map<std::string, func_type> functions;
+    enum ParseResult
+    {
+        OK = 0,
+        Error,
+    };
+    ParseResult parse_result = OK;
 
 public:
     Cifa()
     {
         register_function("print", print);
+        register_function("to_string", to_string);
+        register_function("to_number", to_number);
     }
     Object eval(CalUnit& c);
 
@@ -153,6 +163,7 @@ public:
 
     CalUnit combine_all_cal(std::list<CalUnit>& ppp);
     CalUnit combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolon);
+    std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br);
     void combine_curly_backet(std::list<CalUnit>& ppp);
     void combine_round_backet(std::list<CalUnit>& ppp);
     void combine_ops(std::list<CalUnit>& ppp);
