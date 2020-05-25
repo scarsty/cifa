@@ -1,4 +1,5 @@
 ﻿#include "Cifa.h"
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <sstream>
@@ -47,22 +48,26 @@ cifa::Object to_number(ObjectVector& d)
 
 Object Cifa::eval(CalUnit& c)
 {
-    if (c.type == CalUnitType::Operator)
+    if (force_return)
+    {
+        return Object();
+    }
+    else if (c.type == CalUnitType::Operator)
     {
         if (c.v.size() == 1)
         {
             if (c.str == "+") { return eval(c.v[0]); }
             if (c.str == "-") { return Object(0) - eval(c.v[0]); }
             if (c.str == "!") { return !eval(c.v[0]); }
-            if (c.str == "++i") { return parameters[c.v[0].str] += 1; }
-            if (c.str == "--i") { return parameters[c.v[0].str] -= 1; }
-            if (c.str == "i++")
+            if (c.str == "++") { return parameters[c.v[0].str] += 1; }
+            if (c.str == "--") { return parameters[c.v[0].str] -= 1; }
+            if (c.str == "()++")
             {
                 auto v = parameters[c.str];
                 parameters[c.v[0].str] += 1;
                 return v;
             }
-            if (c.str == "i--")
+            if (c.str == "()--")
             {
                 auto v = parameters[c.str];
                 parameters[c.v[0].str] -= 1;
@@ -100,8 +105,8 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "<=") { return eval(c.v[0]) <= eval(c.v[1]); }
             if (c.str == "==") { return eval(c.v[0]) == eval(c.v[1]); }
             if (c.str == "!=") { return eval(c.v[0]) != eval(c.v[1]); }
-            //if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
-            //if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
+            if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
+            if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
             if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
             if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
             if (c.str == "=") { return parameters[c.v[0].str] = eval(c.v[1]); }
@@ -111,7 +116,7 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "/=") { return parameters[c.v[0].str] /= eval(c.v[1]); }
             if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
         }
-        fprintf(stderr, "Error (%zu, %zu): Unknown operator or wrong using %s\n", c.line, c.col, c.str.c_str());
+        add_error("Error (%zu, %zu): Unknown operator or wrong using %s", c.line, c.col, c.str.c_str());
         return Object();
     }
     else if (c.type == CalUnitType::Constant)
@@ -131,7 +136,7 @@ Object Cifa::eval(CalUnit& c)
         else
         {
             //parameters[c.str] = Object(0);
-            return Object(0);
+            return Object(nan(""));
         }
     }
     else if (c.type == CalUnitType::Function)
@@ -148,7 +153,10 @@ Object Cifa::eval(CalUnit& c)
             }
             else
             {
-                v.push_back(c1);
+                if (c1.type != CalUnitType::None)
+                {
+                    v.push_back(c1);
+                }
             }
         };
         if (!c.v.empty())
@@ -180,6 +188,7 @@ Object Cifa::eval(CalUnit& c)
                 o = eval(c.v[1]);
                 if (o.type == "break") { break; }
                 if (o.type == "continue") { continue; }
+                if (force_return) { return Object(); }
             }
             o.type = "";
             return o;
@@ -192,6 +201,7 @@ Object Cifa::eval(CalUnit& c)
                 o = eval(c.v[1]);
                 if (o.type == "break") { break; }
                 if (o.type == "continue") { continue; }
+                if (force_return) { return Object(); }
             }
             o.type = "";
             return o;
@@ -208,6 +218,12 @@ Object Cifa::eval(CalUnit& c)
             o.type = "continue";
             return o;
         }
+        if (c.str == "return")
+        {
+            result = eval(c.v[0]);
+            force_return = true;
+            return result;
+        }
     }
     else if (c.type == CalUnitType::Union)
     {
@@ -217,6 +233,7 @@ Object Cifa::eval(CalUnit& c)
             o = eval(c1);
             if (o.type == "break") { break; }
             if (o.type == "continue") { break; }
+            if (force_return) { return Object(); }
         }
         return o;
     }
@@ -397,9 +414,12 @@ std::list<CalUnit> Cifa::split(std::string str)
                 std::prev(it)->type = CalUnitType::Function;
             }
         }
-        if (vector_have(keys, it->str) || vector_have(keys_single, it->str))
+        for (auto& keys1 : keys)
         {
-            it->type = CalUnitType::Key;
+            if (vector_have(keys1, it->str))
+            {
+                it->type = CalUnitType::Key;
+            }
         }
         if (vector_have(types, it->str))
         {
@@ -470,7 +490,7 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
     //合并关键字
     combine_keys(ppp);
 
-    if (ppp.size() == 0 || parse_result != ParseResult::OK)
+    if (ppp.size() == 0)
     {
         return CalUnit();
     }
@@ -542,8 +562,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (it->str == br)
     {
-        fprintf(stderr, "Error (%zu, %zu): Unpaired right bracket %s\n", it->line, it->col, it->str.c_str());
-        parse_result = ParseResult::Error;
+        add_error("Error (%zu, %zu): Unpaired right bracket %s", it->line, it->col, it->str.c_str());
         return ppp.end();
     }
     auto itl0 = it, itr0 = ppp.end();
@@ -565,8 +584,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (itr0 == ppp.end())
     {
-        fprintf(stderr, "Error (%zu, %zu): Unpaired left bracket %s\n", it->line, it->col, it->str.c_str());
-        parse_result = ParseResult::Error;
+        add_error("Error (%zu, %zu): Unpaired left bracket %s", it->line, it->col, it->str.c_str());
         return ppp.end();
     }
     ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
@@ -615,8 +633,7 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
             else if (std::prev(it)->type == CalUnitType::Parameter)
             {
                 auto itl = std::prev(it);
-                fprintf(stderr, "Error (%zu, %zu): %s is not a function\n", itl->line, itl->col, itl->str.c_str());
-                parse_result = ParseResult::Error;
+                add_error("Error (%zu, %zu): %s is not a function", itl->line, itl->col, itl->str.c_str());
                 ppp.erase(it);
             }
         }
@@ -625,7 +642,6 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
 
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
-    ParseResult pr = ParseResult::OK;
     for (auto& op : ops)
     {
         for (auto it = ppp.begin(); it != ppp.end();)
@@ -635,21 +651,21 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                 if (it == ppp.begin() || !std::prev(it)->can_cal() || vector_have(ops1, it->str))    //退化为单目运算
                 {
                     auto itr = std::next(it);
-                    if (itr != ppp.end() && itr->can_cal())
+                    if (itr != ppp.end() && itr->type == CalUnitType::Parameter)
                     {
                         it->v = { *itr };
-                        it->str += "i";
                         it = ppp.erase(itr);
                     }
-                    else if (it != ppp.begin() && (it->str == "++" || it->str == "--"))
+                    else if (it != ppp.begin() && (it->str == "++" || it->str == "--") && std::prev(it)->type == CalUnitType::Parameter)
                     {
                         it->v = { *std::prev(it) };
-                        it->str = "i" + it->str;
+                        it->str = "()" + it->str;
                         it = ppp.erase(std::prev(it));
                     }
                     else
                     {
-                        pr = ParseResult::Error;
+                        add_error("Error (%zu, %zu): Operator %s has no operands", it->line, it->col, it->str.c_str());
+                        it = ppp.erase(it);
                     }
                 }
                 else
@@ -664,14 +680,9 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     else
                     {
-                        pr = ParseResult::Error;
+                        add_error("Error (%zu, %zu): Operator %s has no operands", it->line, it->col, it->str.c_str());
+                        it = ppp.erase(it);
                     }
-                }
-                if (pr != ParseResult::OK)
-                {
-                    fprintf(stderr, "Error (%zu, %zu): Operator %s has no parameter\n", it->line, it->col, it->str.c_str());
-                    parse_result = pr;
-                    return;
                 }
             }
             else
@@ -684,51 +695,49 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
 
 void Cifa::combine_keys(std::list<CalUnit>& ppp)
 {
-    ParseResult pr = ParseResult::OK;
     //合并关键词，从右向左
     auto it = ppp.end();
     while (it != ppp.begin())
     {
         --it;
-        if (it->type == CalUnitType::Key && it->v.size() == 0 && vector_have(keys, it->str))
+        for (size_t para_count = 1; para_count < keys.size(); para_count++)
         {
-            auto itr = std::next(it);
-            if (itr == ppp.end())
+            auto& keys1 = keys[para_count];
+            if (it->type == CalUnitType::Key && it->v.size() == 0 && vector_have(keys1, it->str))
             {
-                pr = ParseResult::Error;
-                break;
-            }
-            auto key = it->str;
-            it->v.emplace_back(std::move(*std::next(it)));
-            auto it1 = ppp.erase(std::next(it));
-            if (it1 != ppp.end())
-            {
-                it->v.emplace_back(std::move(*it1));
-                it1 = ppp.erase(it1);
-            }
-            else
-            {
-                it->v.emplace_back();
-            }
-            if (it->str == "if" && it1 != ppp.end() && it1->str == "else")
-            {
-                auto it1r = std::next(it1);
-                if (it1r == ppp.end())
+                auto itr = std::next(it);
+                for (size_t i = 0; i < para_count; i++)
                 {
-                    it = it1;
-                    pr = ParseResult::Error;
-                    break;
+                    if (itr != ppp.end())
+                    {
+                        it->v.emplace_back(std::move(*itr));
+                        itr = ppp.erase(itr);
+                    }
+                    else if (i == para_count - 1 && itr == ppp.end())
+                    {
+                        it->v.emplace_back();
+                    }
+                    else
+                    {
+                        add_error("Error (%zu, %zu): %s has no content", it->line, it->col, it->str.c_str());
+                        break;
+                    }
                 }
-                it->v.emplace_back(std::move(*std::next(it1)));
-                it1 = ppp.erase(it1);
-                it1 = ppp.erase(it1);
+                if (it->str == "if" && itr != ppp.end() && itr->str == "else")
+                {
+                    auto it1r = std::next(itr);
+                    if (it1r == ppp.end())
+                    {
+                        it = itr;
+                        add_error("Error (%zu, %zu): else has no content", it->line, it->col);
+                        break;
+                    }
+                    it->v.emplace_back(std::move(*std::next(itr)));
+                    itr = ppp.erase(itr);
+                    itr = ppp.erase(itr);
+                }
             }
         }
-    }
-    if (pr != ParseResult::OK)
-    {
-        fprintf(stderr, "Error (%zu, %zu): %s has no content\n", it->line, it->col, it->str.c_str());
-        parse_result = pr;
     }
 }
 
@@ -757,17 +766,28 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit> vc)
 
 Object Cifa::run_script(const std::string& str)
 {
-    parse_result = ParseResult::OK;
+    errors.clear();
+    force_return = false;
     auto rv = split(str);
     auto c = combine_all_cal(rv);
-    if (parse_result == ParseResult::OK)
+    if (errors.empty())
     {
-        return eval(c);
+        auto o = eval(c);
+        //如果只有一个表达式，则返回其值，否则为return返回的值
+        if (c.type != CalUnitType::Union)
+        {
+            return o;
+        }
     }
     else
     {
-        return Object();
+        std::sort(errors.begin(), errors.end());
+        for (auto& e : errors)
+        {
+            std::cerr << e << "\n";
+        }
     }
+    return result;
 }
 
 }    // namespace cifa

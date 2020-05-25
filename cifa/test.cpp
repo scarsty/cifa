@@ -15,5 +15,6 @@ int main()
     c1.register_function("sin", &sin);
     c1.register_function("cos", &cos);
     std::string str = convert::readStringFromFile("1.c");
-    c1.run_script(str);
+    auto o = c1.run_script(str);
+    std::cout << "the last value is: " << o.value;
 }

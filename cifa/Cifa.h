@@ -117,21 +117,20 @@ Object to_number(ObjectVector& d);
 class Cifa
 {
     //运算符，大部分为双目，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
-    std::vector<std::string> keys = { "if", "for", "while" };
-    std::vector<std::string> keys_single = { "else", "break", "continue" };
+    //关键字，在表中的位置为其所需参数个数
+    std::vector<std::vector<std::string>> keys = { { "else", "break", "continue" }, { "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, Object> parameters;
     using func_type = Object (*)(std::vector<Object>&);
     std::map<std::string, func_type> functions;
-    enum class ParseResult
-    {
-        OK = 0,
-        Error,
-    };
-    ParseResult parse_result = ParseResult::OK;
+
+    bool force_return = false;
+    Object result;
+
+    std::vector<std::string> errors;
 
 public:
     Cifa()
@@ -170,6 +169,13 @@ public:
     Object run_function(const std::string& name, std::vector<CalUnit> vc);
 
     Object run_script(const std::string& str);
+
+    template <typename...Args> void add_error(Args... args)
+    {
+        char buffer[1024];
+        sprintf(buffer, args...);
+        errors.emplace_back(buffer);
+    }
 };
 
 }    // namespace cifa
