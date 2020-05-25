@@ -1,6 +1,5 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
-#include <functional>
 #include <iostream>
 #include <sstream>
 
@@ -116,7 +115,7 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "/=") { return parameters[c.v[0].str] /= eval(c.v[1]); }
             if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
         }
-        add_error("Error (%zu, %zu): Unknown operator or wrong using %s", c.line, c.col, c.str.c_str());
+        add_error("Error (%zu, %zu): unknown operator using %s with %zu operands", c.line, c.col, c.str.c_str(), c.v.size());
         return Object();
     }
     else if (c.type == CalUnitType::Constant)
@@ -563,7 +562,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (it->str == br)
     {
-        add_error("Error (%zu, %zu): Unpaired right bracket %s", it->line, it->col, it->str.c_str());
+        add_error("Error (%zu, %zu): unpaired right bracket %s", it->line, it->col, it->str.c_str());
         return ppp.end();
     }
     auto itl0 = it, itr0 = ppp.end();
@@ -585,7 +584,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (itr0 == ppp.end())
     {
-        add_error("Error (%zu, %zu): Unpaired left bracket %s", it->line, it->col, it->str.c_str());
+        add_error("Error (%zu, %zu): unpaired left bracket %s", it->line, it->col, it->str.c_str());
         return ppp.end();
     }
     ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
@@ -673,7 +672,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     else
                     {
-                        add_error("Error (%zu, %zu): Operator %s has no operands", it->line, it->col, it->str.c_str());
+                        add_error("Error (%zu, %zu): operator %s has not enough operands", it->line, it->col, it->str.c_str());
                         it = ppp.erase(it);
                     }
                 }
@@ -689,7 +688,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     else
                     {
-                        add_error("Error (%zu, %zu): Operator %s has no operands", it->line, it->col, it->str.c_str());
+                        add_error("Error (%zu, %zu): operator %s has not enough operands", it->line, it->col, it->str.c_str());
                         it = ppp.erase(it);
                     }
                 }

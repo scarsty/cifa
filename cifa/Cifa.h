@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdio>
 #include <functional>
 #include <list>
 #include <map>
@@ -163,7 +164,7 @@ public:
     void add_error(Args... args)
     {
         char buffer[1024];
-        sprintf(buffer, args...);
+        snprintf(buffer, 1024, args...);
         errors.emplace_back(buffer);
     }
 
