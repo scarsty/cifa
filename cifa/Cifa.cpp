@@ -193,15 +193,17 @@ std::list<CalUnit> Cifa::split(std::string str)
             {
                 pos1 = str.size();
             }
-            std::fill(str.begin() + pos, str.begin() + pos1 + 1, ' ');
+            std::fill(str.begin() + pos, str.begin() + pos1, ' ');
         }
     }
 
     CalUnitType stat = None;
     char in_string = 0;
+    size_t line = 1, col = 0;
     for (size_t i = 0; i < str.size(); i++)
     {
         auto c = str[i];
+        col++;
         auto pre_stat = stat;
         auto g = guess_char(c);
         if (in_string)
@@ -267,13 +269,21 @@ std::list<CalUnit> Cifa::split(std::string str)
         {
             if (pre_stat != None)
             {
-                rv.push_back({ pre_stat, r });
+                CalUnit c(pre_stat, r);
+                c.line = line;
+                c.col = col - r.size();
+                rv.emplace_back(std::move(c));
             }
             r = c;
         }
         else
         {
             r += c;
+        }
+        if (c == '\n')
+        {
+            col = 0;
+            line++;
         }
     }
     rv.push_back({ stat, r });
@@ -335,43 +345,6 @@ std::list<CalUnit> Cifa::split(std::string str)
     }
 
     return rv;
-}
-
-//查找现有最内层括号，并返回位置
-std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br)
-{
-    bool have = false;
-    for (auto it = ppp.begin(); it != ppp.end(); ++it)
-    {
-        if (it->str == bl || it->str == br)
-        {
-            have = true;
-            break;
-        }
-    }
-    if (!have)
-    {
-        return ppp.end();
-    }
-    auto itl0 = ppp.begin(), itr0 = ppp.end();
-    for (auto itr = ppp.begin(); itr != ppp.end(); ++itr)
-    {
-        if (itr->str == br)
-        {
-            itr0 = itr;
-            for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
-            {
-                if (itl->str == bl)
-                {
-                    itl0 = itl;
-                    break;
-                }
-            }
-            break;
-        }
-    }
-    ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
-    return itl0;
 }
 
 //表达式语法树
@@ -449,6 +422,54 @@ CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolo
         return c.v.front();
     }
     return c;
+}
+
+//查找现有最内层括号，并返回位置
+std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string bl, const std::string br)
+{
+    bool have = false;
+    auto it = ppp.begin();
+    for (; it != ppp.end(); ++it)
+    {
+        if (it->str == bl || it->str == br)
+        {
+            have = true;
+            break;
+        }
+    }
+    if (!have)
+    {
+        return ppp.end();
+    }
+    if (it->str == br)
+    {
+        fprintf(stderr, "unpaired right barcket %s, line %d, col %d\n", it->str.c_str(), it->line, it->col);
+        return ppp.end();
+    }
+    auto itl0 = it, itr0 = ppp.end();
+    for (auto itr = it; itr != ppp.end(); ++itr)
+    {
+        if (itr->str == br)
+        {
+            itr0 = itr;
+            for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
+            {
+                if (itl->str == bl)
+                {
+                    itl0 = itl;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (itr0 == ppp.end())
+    {
+        fprintf(stderr, "unpaired left barcket %s, line %d, col %d\n", it->str.c_str(), it->line, it->col);
+        return ppp.end();
+    }
+    ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
+    return itl0;
 }
 
 void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)

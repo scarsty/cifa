@@ -100,6 +100,7 @@ struct CalUnit
     CalUnitType type = None;
     std::vector<CalUnit> v;
     std::string str;
+    size_t line = 0, col = 0;
     CalUnit(CalUnitType s, std::string s1)
     {
         type = s;
