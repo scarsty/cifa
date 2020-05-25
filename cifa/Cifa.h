@@ -169,10 +169,10 @@ public:
     void combine_ops(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
 
-    void register_function(std::string name, func_type func);
-    Object run_function(std::string name, std::vector<CalUnit> vc);
+    void register_function(const std::string& name, func_type func);
+    Object run_function(const std::string& name, std::vector<CalUnit> vc);
 
-    Object run_script(std::string str);
+    Object run_script(const std::string& str);
 };
 
 }    // namespace cifa

@@ -18,10 +18,10 @@
     <ClCompile Include="..\..\common\convert.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="1.cpp">
+    <ClCompile Include="Cifa.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="Cifa.cpp">
+    <ClCompile Include="test.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

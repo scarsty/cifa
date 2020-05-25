@@ -148,7 +148,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\common\convert.cpp" />
-    <ClCompile Include="1.cpp" />
+    <ClCompile Include="test.cpp" />
     <ClCompile Include="Cifa.cpp" />
   </ItemGroup>
   <ItemGroup>
