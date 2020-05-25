@@ -14,9 +14,6 @@ int main()
     Cifa c1;
     c1.register_function("sin", &sin);
     c1.register_function("cos", &cos);
-    c1.register_function("pow", &pow);
-    //c1.register_function("print", &print);
-
     std::string str = convert::readStringFromFile("1.c");
     c1.run_script(str);
 }

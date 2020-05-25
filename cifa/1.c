@@ -1,13 +1,15 @@
 //cifa
 
 str = '';
-for (int i = 1; i <= 100; i += 1)
+sum = 0;
+for (int i = 1;; ++i)
 {
-    if (i == 50) continue;
-    sum += i;
-    str += to_string(i);
+    //if (i == 50) continue;
+    sum += i * i;
     if (i == 90) break;
-    if (i < 100) str += "+";
+    //print(sum);
 }
-print(str, "=", sum);
+str.print("=", sum);
+n = 90;
+print("sum of square 1...90 is ", n*(n + 1) * (2 * n + 1) / 6);
 //ccc(;

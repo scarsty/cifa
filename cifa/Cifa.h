@@ -17,7 +17,7 @@ struct Object
         type = "string";
         content = str;
     }
-    double value = 0;
+    double value = nan("");
     std::string type;
     std::string content;
     operator bool() { return value; }
@@ -120,11 +120,11 @@ Object to_number(ObjectVector& d);
 class Cifa
 {
     //运算符，大部分为双目，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { "*", "/" }, { "+", "-" }, { "*=", "/=", "+=", "-=" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { "." }, { "*", "/" }, { "+", "-" }, { "*=", "/=", "+=", "-=" }, { "++", "--" }, { "!", ">", "<", "==", "!=", ">=", "<=" }, { "&&", "||" }, { "=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     std::vector<std::string> keys = { "if", "for", "while" };
     std::vector<std::string> keys_single = { "else", "break", "continue" };
-    std::vector<std::string> types = { "auto", "int", "double" };
+    std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, Object> parameters;
     using func_type = Object (*)(std::vector<Object>&);

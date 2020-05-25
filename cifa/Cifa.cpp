@@ -54,8 +54,20 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "+") { return eval(c.v[0]); }
             if (c.str == "-") { return Object(0) - eval(c.v[0]); }
             if (c.str == "!") { return !eval(c.v[0]); }
-            //if (c.str == "++") { return eval(c.v[0]); }
-            //if (c.str == "--") { return -eval(c.v[0]); }
+            if (c.str == "++i") { return parameters[c.v[0].str] += 1; }
+            if (c.str == "--i") { return parameters[c.v[0].str] -= 1; }
+            if (c.str == "i++")
+            {
+                auto v = parameters[c.str];
+                parameters[c.v[0].str] += 1;
+                return v;
+            }
+            if (c.str == "i--")
+            {
+                auto v = parameters[c.str];
+                parameters[c.v[0].str] -= 1;
+                return v;
+            }
         }
         if (c.v.size() == 2)
         {
@@ -79,6 +91,25 @@ Object Cifa::eval(CalUnit& c)
             //if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
             if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
             if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
+            if (c.str == "." && c.v[0].canCal())
+            {
+                if (c.v[1].type == Function)
+                {
+                    if (c.v[1].v[0].type != None)
+                    {
+                        CalUnit c1;
+                        c1.type = Operator;
+                        c1.str = ",";
+                        c1.v = { std::move(c.v[0]), std::move(c.v[1].v[0]) };
+                        c.v[1].v = { std::move(c1) };
+                    }
+                    else
+                    {
+                        c.v[1].v = { std::move(c.v[0]) };
+                    }
+                    return eval(c.v[1]);
+                }
+            }
         }
         fprintf(stderr, "Error (%d, %d): Unknown operator or wrong using %s\n", c.line, c.col, c.str.c_str());
         return Object();
@@ -99,6 +130,7 @@ Object Cifa::eval(CalUnit& c)
         }
         else
         {
+            parameters[c.str] = Object(0);
             return 0;
         }
     }
@@ -224,6 +256,26 @@ std::list<CalUnit> Cifa::split(std::string str)
 
     //删除注释
     size_t pos = 0;
+    while (pos != std::string::npos)
+    {
+        if ((pos = str.find("/*", pos)) != std::string::npos)
+        {
+            auto pos1 = str.find("*/", pos + 2);
+            if (pos1 == std::string::npos)
+            {
+                pos1 = str.size();
+            }
+            else
+            {
+                pos1 += 2;
+            }
+            for (size_t i = pos; i <= pos1; i++)
+            {
+                if (str[i] != '\n') { str[i] = ' '; }
+            }
+        }
+    }
+    pos = 0;
     while (pos != std::string::npos)
     {
         if ((pos = str.find("//", pos)) != std::string::npos)
@@ -456,7 +508,7 @@ CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolo
             ++it;
         }
     }
-    if (!need_end_semicolon && !ppp.empty())    //{}内的必须一个分号结尾
+    if (!need_end_semicolon && !ppp.empty())
     {
         c.v.emplace_back(std::move(combine_all_cal(ppp)));
     }
@@ -549,7 +601,7 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_all_cal(ppp2);
+        auto c1 = combine_multi_line(ppp2,false);
         it = ppp.erase(it);
         *it = std::move(c1);
         //括号前是函数
@@ -586,7 +638,14 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     if (itr != ppp.end() && itr->canCal())
                     {
                         it->v = { *itr };
+                        it->str += "i";
                         it = ppp.erase(itr);
+                    }
+                    else if (it != ppp.begin() && (it->str == "++" || it->str == "--"))
+                    {
+                        it->v = { *std::prev(it) };
+                        it->str = "i" + it->str;
+                        it = ppp.erase(std::prev(it));
                     }
                     else
                     {
