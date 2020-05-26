@@ -12,11 +12,15 @@ namespace cifa
 struct Object
 {
     Object() {}
-    Object(double v) { value = v; }
-    Object(const std::string& str)
+    Object(double v, const std::string ty = "")
     {
-        type = "string";
+        value = v;
+        type = ty;
+    }
+    Object(const std::string& str, const std::string ty = "string")
+    {
         content = str;
+        type = ty;
     }
     double value = nan("");
     std::string type;
@@ -114,7 +118,7 @@ struct CalUnit
     }
     bool is_statement()
     {
-        return can_cal() && suffix;
+        return suffix || !can_cal();
     }
 };
 
@@ -128,7 +132,7 @@ class Cifa
     std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     //关键字，在表中的位置为其所需参数个数
-    std::vector<std::vector<std::string>> keys = { { "true", "false", "break", "continue" }, { "else", "return" }, { "if", "for", "while" } };
+    std::vector<std::vector<std::string>> keys = { {}, { "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, Object> parameters;
@@ -146,10 +150,15 @@ public:
         register_function("print", print);
         register_function("to_string", to_string);
         register_function("to_number", to_number);
+        parameters["true"] = Object(1, "__");
+        parameters["false"] = Object(0, "__");
+        parameters["break"] = Object("break", "__");
+        parameters["continue"] = Object("continue", "__");
     }
     Object eval(CalUnit& c);
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
     CalUnit& find_right_side(CalUnit& c1);
+    //bool need_suffix(CalUnit& c) { return c.can_cal() || vector_have(keys[0], c.str); }
 
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
@@ -160,11 +169,14 @@ public:
     void combine_square_backet(std::list<CalUnit>& ppp);
     void combine_round_backet(std::list<CalUnit>& ppp);
     void combine_ops(std::list<CalUnit>& ppp);
+    void combine_semi(std::list<CalUnit>& ppp, bool need_last_semi);
     void combine_keys(std::list<CalUnit>& ppp);
-    void combine_types(std::list<CalUnit>& ppp) {}
+    void combine_types(std::list<CalUnit>& ppp);
 
     void register_function(const std::string& name, func_type func);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
+
+    void check_cal_unit(CalUnit& c);
 
     Object run_script(std::string str);
 

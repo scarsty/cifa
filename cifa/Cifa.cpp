@@ -169,8 +169,8 @@ Object Cifa::eval(CalUnit& c)
             for (eval(c.v[0].v[0]); eval(c.v[0].v[1]); eval(c.v[0].v[2]))
             {
                 o = eval(c.v[1]);
-                if (o.type == "break") { break; }
-                if (o.type == "continue") { continue; }
+                if (o.type == "__" && o.content == "break") { break; }
+                if (o.type == "__" && o.content == "continue") { continue; }
                 if (force_return) { return Object(); }
             }
             o.type = "";
@@ -182,23 +182,11 @@ Object Cifa::eval(CalUnit& c)
             while (eval(c.v[0]))
             {
                 o = eval(c.v[1]);
-                if (o.type == "break") { break; }
-                if (o.type == "continue") { continue; }
+                if (o.type == "__" && o.content == "break") { break; }
+                if (o.type == "__" && o.content == "continue") { continue; }
                 if (force_return) { return Object(); }
             }
             o.type = "";
-            return o;
-        }
-        if (c.str == "break")
-        {
-            Object o;
-            o.type = "break";
-            return o;
-        }
-        if (c.str == "continue")
-        {
-            Object o;
-            o.type = "continue";
             return o;
         }
         if (c.str == "return")
@@ -207,14 +195,6 @@ Object Cifa::eval(CalUnit& c)
             force_return = true;
             return result;
         }
-        if (c.str == "true")
-        {
-            return Object(1);
-        }
-        if (c.str == "false")
-        {
-            return Object(0);
-        }
     }
     else if (c.type == CalUnitType::Union)
     {
@@ -222,8 +202,8 @@ Object Cifa::eval(CalUnit& c)
         for (auto& c1 : c.v)
         {
             o = eval(c1);
-            if (o.type == "break") { break; }
-            if (o.type == "continue") { break; }
+            if (o.type == "__" && o.content == "break") { break; }
+            if (o.type == "__" && o.content == "continue") { break; }
             if (force_return) { return Object(); }
         }
         return o;
@@ -265,7 +245,7 @@ CalUnitType Cifa::guess_char(char c)
     {
         return CalUnitType::Constant;
     }
-    if (std::string("+-*/=.!<>&|,").find(c) != std::string::npos)
+    if (std::string("+-*/%=.!<>&|,").find(c) != std::string::npos)
     {
         return CalUnitType::Operator;
     }
@@ -504,7 +484,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
 CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool curly, bool square, bool round)
 {
     //合并{}
-    if (curly) combine_curly_backet(ppp);
+    if (curly) { combine_curly_backet(ppp); }
     //合并[]
     if (square) { combine_square_backet(ppp); }
     //合并()
@@ -514,58 +494,12 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool
     combine_ops(ppp);
 
     //检查分号正确性并去除
-    //if (need_last_semi && ppp.back().str != ";")
-    //{}
-    //for (auto it = ppp.begin(); it != ppp.end(); )
-    //{
-    //    if (it->type != CalUnitType::Union && it->type != CalUnitType::Split && it->type != CalUnitType::Key)
-    //    {
-    //        //此时后面必须有分号，且可以直接合并
-    //        if (std::next(it) != ppp.end() && std::next(it)->str == ";")
-    //        {
-    //            it = ppp.erase(it);
-    //        }
-    //            || need_last_semi && std::next(it) == ppp.end())
-    //        {
-    //            auto& c1 = find_right_side(*it);
-    //            add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
-    //        }
-    //        else
-    //        {
-    //            it = ppp.erase(it);
-    //        }
-    //    }
-    //    else
-    //    {
-    //        ++it;
-    //    }
-    //}
+    combine_semi(ppp, need_last_semi);
 
-    //for (auto it = ppp.begin(); it != ppp.end();)
-    //{
-    //    if (it->str == ";")
-    //    {
-    //        if (it == ppp.begin() || std::prev(it)->can_cal())
-    //        {
-    //                //需要删除的情况
-    //            it = ppp.erase(it);
-    //        }
-    //        else
-    //        {
-    //            //其他情况换成空语句
-    //            it->type = CalUnitType::None;
-    //            ++it;
-    //        }
-    //    }
-    //    else
-    //    {
-    //        ++it;
-    //    }
-    //}
     //合并关键字
     combine_keys(ppp);
 
-    //到此处应仅剩余分号、语句、语句组，只需简单合并即可
+    //到此处应仅剩余单独分号（空语句）、语句、语句组，只需简单合并即可
     //即使只有一条语句也必须返回Union！
     CalUnit c;
     c.type = CalUnitType::Union;
@@ -577,15 +511,6 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool
     {
         for (auto it = ppp.begin(); it != ppp.end(); ++it)
         {
-            if (it->type != CalUnitType::Union && it->type != CalUnitType::Split && it->type != CalUnitType::Key)
-            {
-                if (std::next(it) != ppp.end() && std::next(it)->str != ";"
-                    || need_last_semi && std::next(it) == ppp.end())
-                {
-                    auto& c1 = find_right_side(*it);
-                    add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
-                }
-            }
             if (it->type != CalUnitType::Split)
             {
                 c.v.emplace_back(std::move(*it));
@@ -757,12 +682,12 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     auto itr = std::next(it);
                     if (itr != ppp.end() && itr->can_cal())
                     {
-                        it->v = { *itr };
+                        it->v = { std::move(*itr) };
                         it = ppp.erase(itr);
                     }
                     else if (it != ppp.begin() && (it->str == "++" || it->str == "--") && std::prev(it)->type == CalUnitType::Parameter)
                     {
-                        it->v = { *std::prev(it) };
+                        it->v = { std::move(*std::prev(it)) };
                         it->str = "()" + it->str;
                         it = ppp.erase(std::prev(it));
                     }
@@ -777,7 +702,12 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     auto itr = std::next(it);
                     if (itr != ppp.end() && itr->can_cal())
                     {
-                        it->v = { *std::prev(it), *itr };
+                        it->v = { std::move(*std::prev(it)), std::move(*itr) };
+                        if (it->str == "="
+                            && it->v[0].type == CalUnitType::Parameter && parameters[it->v[0].str].type == "__")
+                        {
+                            add_error("Error (%zu, %zu): %s cannot be assingned", it->v[0].line, it->v[0].col, it->v[0].str.c_str());
+                        }
                         ppp.erase(itr);
                         it = ppp.erase(std::prev(it));
                         ++it;
@@ -797,6 +727,50 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
     }
 }
 
+void Cifa::combine_semi(std::list<CalUnit>& ppp, bool need_last_semi)
+{
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->can_cal())
+        {
+            if (std::next(it) != ppp.end() && std::next(it)->str == ";")
+            {
+                auto itr = std::next(it);
+                it->suffix = true;
+                it = ppp.erase(itr);
+            }
+            else if (std::next(it) == ppp.end())
+            {
+                ++it;
+            }
+            else
+            {
+                auto& c1 = find_right_side(*it);
+                add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
+                ++it;
+            }
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    if (!ppp.empty())
+    {
+        if (need_last_semi && !ppp.back().is_statement())
+        {
+            auto& c1 = find_right_side(ppp.back());
+            add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
+        }
+        if (!need_last_semi && ppp.back().is_statement())
+        {
+            auto& c1 = find_right_side(ppp.back());
+            add_error("Error (%zu, %zu): unnecessary ;", c1.line, c1.col + c1.str.size());
+        }
+        //ppp.back().suffix = true;
+    }
+}
+
 void Cifa::combine_keys(std::list<CalUnit>& ppp)
 {
     //合并关键字，从右向左
@@ -807,11 +781,15 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
         for (size_t para_count = 1; para_count < keys.size(); para_count++)
         {
             auto& keys1 = keys[para_count];
-            if (it->type == CalUnitType::Key && it->v.size() == 0 && vector_have(keys1, it->str))
+            if (it->type == CalUnitType::Key && it->v.size() < para_count && vector_have(keys1, it->str))
             {
                 auto itr = std::next(it);
                 if (itr != ppp.end())
                 {
+                    if (!itr->is_statement())
+                    {
+                        add_error("Error (%zu, %zu): %s is not a statement", itr->line, itr->col, itr->str.c_str());
+                    }
                     it->v.emplace_back(std::move(*itr));
                     itr = ppp.erase(itr);
                 }
@@ -846,6 +824,8 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
         }
     }
 }
+
+void Cifa::combine_types(std::list<CalUnit>& ppp) {}
 
 void Cifa::register_function(const std::string& name, func_type func)
 {
