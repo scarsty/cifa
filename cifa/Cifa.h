@@ -46,6 +46,7 @@ inline Object operator!(Object& o)
 }
 inline Object operator*(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, sub); }
 inline Object operator/(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, sub); }
+inline Object operator%(const Object& o1, const Object& o2) { return Object(int(o1.value) % int(o2.value)); }
 inline Object operator+(const Object& o1, const Object& o2)
 {
     if (o1.type == "string" && o2.type == "string")
@@ -100,6 +101,7 @@ struct CalUnit
     std::vector<CalUnit> v;
     std::string str;
     size_t line = 0, col = 0;
+    bool suffix = false;
     CalUnit(CalUnitType s, std::string s1)
     {
         type = s;
@@ -110,6 +112,10 @@ struct CalUnit
     {
         return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter || type == CalUnitType::Function || type == CalUnitType::Operator && v.size() > 0;
     }
+    bool is_statement()
+    {
+        return can_cal() && suffix;
+    }
 };
 
 Object print(ObjectVector& d);
@@ -119,7 +125,7 @@ Object to_number(ObjectVector& d);
 class Cifa
 {
     //运算符，大部分为双目，此处的顺序即优先级
-    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
+    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     //关键字，在表中的位置为其所需参数个数
     std::vector<std::vector<std::string>> keys = { { "true", "false", "break", "continue" }, { "else", "return" }, { "if", "for", "while" } };
