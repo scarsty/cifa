@@ -1,11 +1,8 @@
 //cifa
 
-str = '';
-sum = 0.5;
-for (int i = 1; i <= 90; i += 2)
-{
-    sum += i * i;
-}
-print("sum=", sum);
-print();
+//str = '';
+int sum = 0;
+for (int i = 1; i >= -10; i ----)
+    for (int j = 1; j <= 10; j++) sum += (i * j) + (-1);
+
 return sum;

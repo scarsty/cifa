@@ -91,6 +91,7 @@ enum class CalUnitType
     Key,
     Type,
     Union,
+    Union2,    //()合并模式，仅for语句使用
 };
 
 struct CalUnit
@@ -121,7 +122,7 @@ class Cifa
     std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     //关键字，在表中的位置为其所需参数个数
-    std::vector<std::vector<std::string>> keys = { { "else", "break", "continue" }, { "return" }, { "if", "for", "while" } };
+    std::vector<std::vector<std::string>> keys = { { "true", "false", "break", "continue" }, { "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, Object> parameters;
@@ -144,13 +145,13 @@ public:
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
 
     CalUnitType guess_char(char c);
-    std::list<CalUnit> split(std::string str);
+    std::list<CalUnit> split(std::string& str);
 
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp);
-    CalUnit combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolon);
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool round = true);
     std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
     void combine_curly_backet(std::list<CalUnit>& ppp);
     void combine_round_backet(std::list<CalUnit>& ppp);
+    CalUnit combine_round_backet1(std::list<CalUnit>& ppp);
     void combine_ops(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
     void combine_types(std::list<CalUnit>& ppp) {}
@@ -158,7 +159,7 @@ public:
     void register_function(const std::string& name, func_type func);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 
-    Object run_script(const std::string& str);
+    Object run_script(std::string str);
 
     template <typename... Args>
     void add_error(Args... args)
@@ -169,13 +170,28 @@ public:
     }
 
     template <typename T>
-    bool vector_have(std::vector<T>& ops, T& op)
+    bool vector_have(const std::vector<T>& ops, const T& op)
     {
         for (auto& o : ops)
         {
             if (op == o)
             {
                 return true;
+            }
+        }
+        return false;
+    }
+    template <typename T>
+    bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
+    {
+        for (auto& ops1 : ops)
+        {
+            for (auto& o : ops1)
+            {
+                if (op == o)
+                {
+                    return true;
+                }
             }
         }
         return false;

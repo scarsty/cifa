@@ -206,6 +206,14 @@ Object Cifa::eval(CalUnit& c)
             force_return = true;
             return result;
         }
+        if (c.str == "true")
+        {
+            return Object(1);
+        }
+        if (c.str == "false")
+        {
+            return Object(0);
+        }
     }
     else if (c.type == CalUnitType::Union)
     {
@@ -246,7 +254,7 @@ CalUnitType Cifa::guess_char(char c)
     {
         return CalUnitType::Constant;
     }
-    if (std::string("+-*/=().!<>&|,").find(c) != std::string::npos)
+    if (std::string("+-*/=.!<>&|,").find(c) != std::string::npos)
     {
         return CalUnitType::Operator;
     }
@@ -254,7 +262,7 @@ CalUnitType Cifa::guess_char(char c)
     {
         return CalUnitType::Parameter;
     }
-    if (std::string("{};").find(c) != std::string::npos)
+    if (std::string("()[]{};").find(c) != std::string::npos)
     {
         return CalUnitType::Split;
     }
@@ -266,7 +274,7 @@ CalUnitType Cifa::guess_char(char c)
 }
 
 //分割语法
-std::list<CalUnit> Cifa::split(std::string str)
+std::list<CalUnit> Cifa::split(std::string& str)
 {
     std::string r;
     std::list<CalUnit> rv;
@@ -436,7 +444,10 @@ std::list<CalUnit> Cifa::split(std::string str)
             {
                 for (auto it = rv.begin(); it != rv.end();)
                 {
-                    if (it->str == std::string(1, op[0]) && std::next(it)->str == std::string(1, op[1]))
+                    auto itr = std::next(it);
+                    if (itr != rv.end()
+                        && it->str == std::string(1, op[0]) && itr->str == std::string(1, op[1])
+                        && it->line == itr->line && it->col == itr->col - 1)
                     {
                         it->str = op;
                         it = rv.erase(std::next(it));
@@ -447,6 +458,13 @@ std::list<CalUnit> Cifa::split(std::string str)
                     }
                 }
             }
+        }
+    }
+    for (auto it = rv.begin(); it != rv.end(); ++it)
+    {
+        if (it->type == CalUnitType::Operator && !vector_have(ops, it->str))
+        {
+            add_error("Error (%zu, %zu): unknown operator %s", it->line, it->col, it->str.c_str());
         }
     }
 
@@ -467,29 +485,19 @@ std::list<CalUnit> Cifa::split(std::string str)
 }
 
 //表达式语法树
-CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
+CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool round)
 {
     //合并{}
     combine_curly_backet(ppp);
     //合并()
     combine_round_backet(ppp);
+
     //合并算符
     combine_ops(ppp);
-    //删除剩余的所有分号
-    for (auto it = ppp.begin(); it != ppp.end();)
-    {
-        if (it->str == ";")
-        {
-            it = ppp.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
     //合并关键字
     combine_keys(ppp);
 
+    //到此处应仅剩余分号、语句、语句组，只需简单合并即可
     if (ppp.size() == 0)
     {
         return CalUnit();
@@ -504,43 +512,18 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp)
         c.type = CalUnitType::Union;
         for (auto it = ppp.begin(); it != ppp.end(); ++it)
         {
-            c.v.emplace_back(std::move(*it));
+            if (it->type != CalUnitType::Union && it->type != CalUnitType::Split && it->type != CalUnitType::Key
+                && std::next(it) != ppp.end() && std::next(it)->str != ";")
+            {
+                add_error("Error (%zu, %zu): missing ;", it->line, it->col);
+            }
+            if (it->type != CalUnitType::Split)
+            {
+                c.v.emplace_back(std::move(*it));
+            }
         }
         return c;
     }
-}
-
-CalUnit Cifa::combine_multi_line(std::list<CalUnit>& ppp, bool need_end_semicolon)
-{
-    CalUnit c;
-    c.type = CalUnitType::Union;
-    for (auto it = ppp.begin(); it != ppp.end();)
-    {
-        if (it->str == ";")
-        {
-            std::list<CalUnit> ppp2;
-            ppp2.splice(ppp2.begin(), ppp, ppp.begin(), it);
-            c.v.emplace_back(std::move(combine_all_cal(ppp2)));
-            it = ppp.erase(ppp.begin());
-        }
-        else
-        {
-            ++it;
-        }
-    }
-    if (!need_end_semicolon && !ppp.empty())
-    {
-        c.v.emplace_back(std::move(combine_all_cal(ppp)));
-    }
-    if (c.v.size() == 0)
-    {
-        return CalUnit();
-    }
-    if (c.v.size() == 1)
-    {
-        return c.v.front();
-    }
-    return c;
 }
 
 //查找现有最内层括号，并返回位置
@@ -602,7 +585,7 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_multi_line(ppp2, false);    //此处合并多行
+        auto c1 = combine_all_cal(ppp2);    //此处合并多行
         it = ppp.erase(it);
         *it = std::move(c1);
     }
@@ -619,7 +602,7 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_multi_line(ppp2, false);
+        auto c1 = combine_round_backet1(ppp2);
         it = ppp.erase(it);
         *it = std::move(c1);
         //括号前是函数
@@ -648,6 +631,61 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
     }
 }
 
+//特殊处理此处实际上仅是为了for语句的条件
+CalUnit Cifa::combine_round_backet1(std::list<CalUnit>& ppp)
+{
+    if (ppp.empty())
+    {
+        return CalUnit();
+    }
+    CalUnit c;
+    c.type = CalUnitType::Union2;
+    c.line = ppp.begin()->line;
+    c.col = ppp.begin()->col;
+    bool end_by_semi = ppp.back().str == ";";
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->str == ";")
+        {
+            std::list<CalUnit> ppp2;
+            ppp2.splice(ppp2.begin(), ppp, ppp.begin(), it);
+            if (ppp2.empty())
+            {
+                c.v.emplace_back();
+            }
+            else
+            {
+                c.v.emplace_back(std::move(combine_all_cal(ppp2)));
+            }
+            it = ppp.erase(ppp.begin());
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    if (ppp.empty())
+    {
+        if (end_by_semi)
+        {
+            c.v.emplace_back();
+        }
+    }
+    else
+    {
+        c.v.emplace_back(std::move(combine_all_cal(ppp)));
+    }
+    if (c.v.size() == 0)
+    {
+        return CalUnit();
+    }
+    else if (c.v.size() == 1)
+    {
+        return c.v[0];
+    }
+    return c;
+}
+
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
     for (auto& op : ops)
@@ -659,7 +697,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                 if (it == ppp.begin() || !std::prev(it)->can_cal() || vector_have(ops1, it->str))    //退化为单目运算
                 {
                     auto itr = std::next(it);
-                    if (itr != ppp.end() && itr->type == CalUnitType::Parameter)
+                    if (itr != ppp.end() && itr->can_cal())
                     {
                         it->v = { *itr };
                         it = ppp.erase(itr);
@@ -718,10 +756,14 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
                 {
                     if (itr != ppp.end())
                     {
+                        if (i == 0 && it->str == "for" && (itr->type != CalUnitType::Union2 || itr->v.size() != 3))
+                        {
+                            add_error("Error (%zu, %zu): for loop condition is not right", it->line, it->col);
+                        }
                         it->v.emplace_back(std::move(*itr));
                         itr = ppp.erase(itr);
                     }
-                    else if (i == para_count - 1 && itr == ppp.end())
+                    else if (i == para_count - 1 && (itr == ppp.end() || std::next(it)->type == CalUnitType::Split))
                     {
                         it->v.emplace_back();
                     }
@@ -731,20 +773,28 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
                         break;
                     }
                 }
-                if (it->str == "if" && itr != ppp.end() && itr->str == "else")
-                {
-                    auto it1r = std::next(itr);
-                    if (it1r == ppp.end())
-                    {
-                        it = itr;
-                        add_error("Error (%zu, %zu): else has no content", it->line, it->col);
-                        break;
-                    }
-                    it->v.emplace_back(std::move(*std::next(itr)));
-                    itr = ppp.erase(itr);
-                    itr = ppp.erase(itr);
-                }
             }
+        }
+    }
+    //else
+    for (it = std::next(ppp.begin()); it != ppp.end();)
+    {
+        if (it->str == "else")
+        {
+            if (std::prev(it)->str == "if")
+            {
+                std::prev(it)->v.emplace_back(std::move(it->v[0]));
+                it = ppp.erase(it);
+            }
+            else
+            {
+                add_error("Error (%zu, %zu): else has no if", it->line, it->col);
+                break;
+            }
+        }
+        else
+        {
+            ++it;
         }
     }
 }
@@ -772,7 +822,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc)
     }
 }
 
-Object Cifa::run_script(const std::string& str)
+Object Cifa::run_script(std::string str)
 {
     errors.clear();
     force_return = false;
