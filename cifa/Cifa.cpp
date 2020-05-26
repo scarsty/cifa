@@ -248,6 +248,16 @@ void Cifa::expand_comma(CalUnit& c1, std::vector<CalUnit>& v)
     }
 };
 
+CalUnit& Cifa::find_right_side(CalUnit& c1)
+{
+    CalUnit* p = &c1;
+    while (p->v.size() > 0)
+    {
+        p = &(p->v.back());
+    }
+    return *p;
+}
+
 CalUnitType Cifa::guess_char(char c)
 {
     if (std::string("0123456789").find(c) != std::string::npos)
@@ -409,7 +419,10 @@ std::list<CalUnit> Cifa::split(std::string& str)
     }
     if (stat != CalUnitType::None)
     {
-        rv.push_back({ stat, r });
+        CalUnit c(stat, r);
+        c.line = line;
+        c.col = col - r.size();
+        rv.emplace_back(std::move(c));
     }
 
     for (auto it = rv.begin(); it != rv.end(); ++it)
@@ -485,12 +498,16 @@ std::list<CalUnit> Cifa::split(std::string& str)
 }
 
 //表达式语法树
-CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool round)
+//参数含义：是否需要尾句号，是否合并{}，是否合并[]，是否合并()
+//事实上仅有for()内部不需要尾句号
+CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool curly, bool square, bool round)
 {
     //合并{}
-    combine_curly_backet(ppp);
+    if (curly) combine_curly_backet(ppp);
+    //合并[]
+    if (square) { combine_square_backet(ppp); }
     //合并()
-    combine_round_backet(ppp);
+    if (round) { combine_round_backet(ppp); }
 
     //合并算符
     combine_ops(ppp);
@@ -498,24 +515,24 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool round)
     combine_keys(ppp);
 
     //到此处应仅剩余分号、语句、语句组，只需简单合并即可
+    //即使只有一条语句也必须返回Union！
+    CalUnit c;
+    c.type = CalUnitType::Union;
     if (ppp.size() == 0)
     {
-        return CalUnit();
-    }
-    if (ppp.size() == 1)
-    {
-        return ppp.front();
+        return c;
     }
     else
     {
-        CalUnit c;
-        c.type = CalUnitType::Union;
         for (auto it = ppp.begin(); it != ppp.end(); ++it)
         {
-            if (it->type != CalUnitType::Union && it->type != CalUnitType::Split && it->type != CalUnitType::Key
-                && std::next(it) != ppp.end() && std::next(it)->str != ";")
+            if (it->type != CalUnitType::Union && it->type != CalUnitType::Split && it->type != CalUnitType::Key)
             {
-                add_error("Error (%zu, %zu): missing ;", it->line, it->col);
+                if (need_last_semi && (std::next(it) == ppp.end() || std::next(it) != ppp.end() && std::next(it)->str != ";"))
+                {
+                    auto& c1 = find_right_side(*it);
+                    add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
+                }
             }
             if (it->type != CalUnitType::Split)
             {
@@ -579,15 +596,47 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
     while (true)
     {
         std::list<CalUnit> ppp2;
-        //auto size = ppp.size();
         auto it = inside_bracket(ppp, ppp2, "{", "}");
         if (it == ppp.end())
         {
             break;
         }
-        auto c1 = combine_all_cal(ppp2);    //此处合并多行
+        auto c1 = combine_all_cal(ppp2, true, false, true, true);    //此处合并多行
         it = ppp.erase(it);
         *it = std::move(c1);
+    }
+}
+
+void Cifa::combine_square_backet(std::list<CalUnit>& ppp)
+{
+    while (true)
+    {
+        std::list<CalUnit> ppp2;
+        auto it = inside_bracket(ppp, ppp2, "[", "]");
+        if (it == ppp.end())
+        {
+            break;
+        }
+        auto c1 = combine_all_cal(ppp2, true, true, false, true);
+        it = ppp.erase(it);
+        *it = std::move(c1);
+        if (it != ppp.begin())
+        {
+            if (std::prev(it)->type == CalUnitType::Parameter)
+            {
+                std::prev(it)->v = { *it };
+                ppp.erase(it);
+            }
+            else
+            {
+                auto itl = std::prev(it);
+                add_error("Error (%zu, %zu): %s is not a parameter", itl->line, itl->col, itl->str.c_str());
+            }
+        }
+        else
+        {
+            add_error("Error (%zu, %zu): [] has not a operand", it->line, it->col);
+        }
     }
 }
 
@@ -602,9 +651,17 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_round_backet1(ppp2);
         it = ppp.erase(it);
-        *it = std::move(c1);
+        auto c1 = combine_all_cal(ppp2, false, true, true, false);
+        if (c1.v.size() == 1)
+        {
+            *it = std::move(c1.v[0]);
+        }
+        else
+        {
+            c1.type = CalUnitType::UnionRound;
+            *it = std::move(c1);
+        }
         //括号前是函数
         if (it != ppp.begin())
         {
@@ -629,61 +686,6 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
             }
         }
     }
-}
-
-//特殊处理此处实际上仅是为了for语句的条件
-CalUnit Cifa::combine_round_backet1(std::list<CalUnit>& ppp)
-{
-    if (ppp.empty())
-    {
-        return CalUnit();
-    }
-    CalUnit c;
-    c.type = CalUnitType::Union2;
-    c.line = ppp.begin()->line;
-    c.col = ppp.begin()->col;
-    bool end_by_semi = ppp.back().str == ";";
-    for (auto it = ppp.begin(); it != ppp.end();)
-    {
-        if (it->str == ";")
-        {
-            std::list<CalUnit> ppp2;
-            ppp2.splice(ppp2.begin(), ppp, ppp.begin(), it);
-            if (ppp2.empty())
-            {
-                c.v.emplace_back();
-            }
-            else
-            {
-                c.v.emplace_back(std::move(combine_all_cal(ppp2)));
-            }
-            it = ppp.erase(ppp.begin());
-        }
-        else
-        {
-            ++it;
-        }
-    }
-    if (ppp.empty())
-    {
-        if (end_by_semi)
-        {
-            c.v.emplace_back();
-        }
-    }
-    else
-    {
-        c.v.emplace_back(std::move(combine_all_cal(ppp)));
-    }
-    if (c.v.size() == 0)
-    {
-        return CalUnit();
-    }
-    else if (c.v.size() == 1)
-    {
-        return c.v[0];
-    }
-    return c;
 }
 
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
@@ -756,7 +758,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
                 {
                     if (itr != ppp.end())
                     {
-                        if (i == 0 && it->str == "for" && (itr->type != CalUnitType::Union2 || itr->v.size() != 3))
+                        if (i == 0 && it->str == "for" && (itr->type != CalUnitType::UnionRound || itr->v.size() != 3))
                         {
                             add_error("Error (%zu, %zu): for loop condition is not right", it->line, it->col);
                         }
@@ -826,13 +828,14 @@ Object Cifa::run_script(std::string str)
 {
     errors.clear();
     force_return = false;
+    str += ";";
     auto rv = split(str);
     auto c = combine_all_cal(rv);
     if (errors.empty())
     {
         auto o = eval(c);
         //如果只有一个表达式，则返回其值，否则为return返回的值
-        if (c.type != CalUnitType::Union)
+        if (c.v.size() <= 1)
         {
             return o;
         }

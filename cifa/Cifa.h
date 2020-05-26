@@ -91,7 +91,7 @@ enum class CalUnitType
     Key,
     Type,
     Union,
-    Union2,    //()合并模式，仅for语句使用
+    UnionRound,    //()合并模式，仅for语句使用
 };
 
 struct CalUnit
@@ -143,15 +143,16 @@ public:
     }
     Object eval(CalUnit& c);
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
+    CalUnit& find_right_side(CalUnit& c1);
 
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
 
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool round = true);
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi = true, bool curly = true, bool square = true, bool round = true);
     std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
     void combine_curly_backet(std::list<CalUnit>& ppp);
+    void combine_square_backet(std::list<CalUnit>& ppp);
     void combine_round_backet(std::list<CalUnit>& ppp);
-    CalUnit combine_round_backet1(std::list<CalUnit>& ppp);
     void combine_ops(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
     void combine_types(std::list<CalUnit>& ppp) {}

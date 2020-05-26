@@ -12,6 +12,7 @@ using namespace cifa;
 double test()
 {
 //#include "1.c"
+    ;
     return nan("");
 }
 
