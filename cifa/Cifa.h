@@ -23,8 +23,8 @@ struct Object
         type = ty;
     }
     double value = nan("");
-    std::string type;
     std::string content;
+    std::string type;
     operator bool() { return value; }
     operator double() { return value; }
 };
@@ -96,7 +96,7 @@ enum class CalUnitType
     Key,
     Type,
     Union,
-    UnionRound,    //()合并模式，仅for语句使用
+    //UnionRound,    //()合并模式，仅for语句使用
 };
 
 struct CalUnit
@@ -132,7 +132,7 @@ class Cifa
     std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
     std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
     //关键字，在表中的位置为其所需参数个数
-    std::vector<std::vector<std::string>> keys = { {}, { "else", "return" }, { "if", "for", "while" } };
+    std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, Object> parameters;
@@ -142,7 +142,12 @@ class Cifa
     bool force_return = false;
     Object result;
 
-    std::vector<std::string> errors;
+    struct ErrorMessage
+    {
+        size_t line, col;
+        std::string message;
+    };
+    std::vector<ErrorMessage> errors;
 
 public:
     Cifa()
@@ -150,10 +155,10 @@ public:
         register_function("print", print);
         register_function("to_string", to_string);
         register_function("to_number", to_number);
-        parameters["true"] = Object(1, "__");
-        parameters["false"] = Object(0, "__");
-        parameters["break"] = Object("break", "__");
-        parameters["continue"] = Object("continue", "__");
+        //parameters["true"] = Object(1, "__");
+        //parameters["false"] = Object(0, "__");
+        //parameters["break"] = Object("break", "__");
+        //parameters["continue"] = Object("continue", "__");
     }
     Object eval(CalUnit& c);
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
@@ -163,33 +168,37 @@ public:
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
 
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi = true, bool curly = true, bool square = true, bool round = true);
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true);
     std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
     void combine_curly_backet(std::list<CalUnit>& ppp);
     void combine_square_backet(std::list<CalUnit>& ppp);
     void combine_round_backet(std::list<CalUnit>& ppp);
     void combine_ops(std::list<CalUnit>& ppp);
-    void combine_semi(std::list<CalUnit>& ppp, bool need_last_semi);
+    void combine_semi(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
     void combine_types(std::list<CalUnit>& ppp);
 
     void register_function(const std::string& name, func_type func);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 
-    void check_cal_unit(CalUnit& c);
+    //void check_cal_unit(CalUnit& c);
 
     Object run_script(std::string str);
 
     template <typename... Args>
-    void add_error(Args... args)
+    void add_error(CalUnit& c, Args... args)
     {
+        ErrorMessage e;
+        e.line = c.line;
+        e.col = c.col;
         char buffer[1024];
         snprintf(buffer, 1024, args...);
-        errors.emplace_back(buffer);
+        e.message = buffer;
+        errors.emplace_back(std::move(e));
     }
 
     template <typename T>
-    bool vector_have(const std::vector<T>& ops, const T& op)
+    static bool vector_have(const std::vector<T>& ops, const T& op)
     {
         for (auto& o : ops)
         {
@@ -201,7 +210,7 @@ public:
         return false;
     }
     template <typename T>
-    bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
+    static bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
     {
         for (auto& ops1 : ops)
         {

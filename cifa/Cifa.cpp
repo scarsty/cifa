@@ -116,7 +116,7 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "/=") { return parameters[c.v[0].str] /= eval(c.v[1]); }
             if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
         }
-        add_error("Error (%zu, %zu): unknown operator using %s with %zu operands", c.line, c.col, c.str.c_str(), c.v.size());
+        add_error(c, "unknown operator using %s with %zu operands", c.str.c_str(), c.v.size());
         return Object();
     }
     else if (c.type == CalUnitType::Constant)
@@ -194,6 +194,22 @@ Object Cifa::eval(CalUnit& c)
             result = eval(c.v[0]);
             force_return = true;
             return result;
+        }
+        if (c.str == "break")
+        {
+            return Object("break", "__");
+        }
+        if (c.str == "continue")
+        {
+            return Object("continue", "__");
+        }
+        if (c.str == "true")
+        {
+            return Object(1, "__");
+        }
+        if (c.str == "false")
+        {
+            return Object(0, "__");
         }
     }
     else if (c.type == CalUnitType::Union)
@@ -458,7 +474,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
     {
         if (it->type == CalUnitType::Operator && !vector_have(ops, it->str))
         {
-            add_error("Error (%zu, %zu): unknown operator %s", it->line, it->col, it->str.c_str());
+            add_error(*it, "unknown operator %s", it->str.c_str());
         }
     }
 
@@ -479,9 +495,8 @@ std::list<CalUnit> Cifa::split(std::string& str)
 }
 
 //表达式语法树
-//参数含义：是否需要尾句号，是否合并{}，是否合并[]，是否合并()
-//事实上仅有for()内部不需要尾句号
-CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool curly, bool square, bool round)
+//参数含义：是否合并{}，是否合并[]，是否合并()
+CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, bool round)
 {
     //合并{}
     if (curly) { combine_curly_backet(ppp); }
@@ -494,7 +509,7 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool
     combine_ops(ppp);
 
     //检查分号正确性并去除
-    combine_semi(ppp, need_last_semi);
+    combine_semi(ppp);
 
     //合并关键字
     combine_keys(ppp);
@@ -509,6 +524,8 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool need_last_semi, bool
     }
     else
     {
+        c.line = ppp.front().line;
+        c.col = ppp.front().col;
         for (auto it = ppp.begin(); it != ppp.end(); ++it)
         {
             if (it->type != CalUnitType::Split)
@@ -539,7 +556,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (it->str == br)
     {
-        add_error("Error (%zu, %zu): unpaired right bracket %s", it->line, it->col, it->str.c_str());
+        add_error(*it, "unpaired right bracket %s", it->str.c_str());
         return ppp.end();
     }
     auto itl0 = it, itr0 = ppp.end();
@@ -561,7 +578,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     }
     if (itr0 == ppp.end())
     {
-        add_error("Error (%zu, %zu): unpaired left bracket %s", it->line, it->col, it->str.c_str());
+        add_error(*it, "unpaired left bracket %s", it->str.c_str());
         return ppp.end();
     }
     ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
@@ -578,7 +595,11 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_all_cal(ppp2, true, false, true, true);    //此处合并多行
+        auto c1 = combine_all_cal(ppp2, false, true, true);    //此处合并多行
+        if (c1.v.size() > 0 && !c1.v.back().is_statement())
+        {
+            add_error(*std::next(it), "missing ;");
+        }
         it = ppp.erase(it);
         *it = std::move(c1);
     }
@@ -594,7 +615,7 @@ void Cifa::combine_square_backet(std::list<CalUnit>& ppp)
         {
             break;
         }
-        auto c1 = combine_all_cal(ppp2, true, true, false, true);
+        auto c1 = combine_all_cal(ppp2, true, false, true);
         it = ppp.erase(it);
         *it = std::move(c1);
         if (it != ppp.begin())
@@ -607,12 +628,12 @@ void Cifa::combine_square_backet(std::list<CalUnit>& ppp)
             else
             {
                 auto itl = std::prev(it);
-                add_error("Error (%zu, %zu): %s is not a parameter", itl->line, itl->col, itl->str.c_str());
+                add_error(*itl, "%s is not a parameter", itl->str.c_str());
             }
         }
         else
         {
-            add_error("Error (%zu, %zu): [] has not a operand", it->line, it->col);
+            add_error(*it, "[] has not a operand");
         }
     }
 }
@@ -629,14 +650,13 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
             break;
         }
         it = ppp.erase(it);
-        auto c1 = combine_all_cal(ppp2, false, true, true, false);
+        auto c1 = combine_all_cal(ppp2, true, true, false);
         if (c1.v.size() == 1)
         {
             *it = std::move(c1.v[0]);
         }
         else
         {
-            c1.type = CalUnitType::UnionRound;
             *it = std::move(c1);
         }
         //括号前
@@ -650,13 +670,13 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
             }
             else if (itl->type == CalUnitType::Parameter)
             {
-                add_error("Error (%zu, %zu): %s is not a function", itl->line, itl->col, itl->str.c_str());
+                add_error(*itl, "%s is not a function", itl->str.c_str());
                 itl->v = { std::move(*it) };
                 ppp.erase(it);
             }
             else if (itl->type == CalUnitType::Constant)
             {
-                add_error("Error (%zu, %zu): %s is not a function", itl->line, itl->col, itl->str.c_str());
+                add_error(*itl, "%s is not a function", itl->str.c_str());
                 itl->v = { std::move(*it) };
                 ppp.erase(it);
             }
@@ -693,7 +713,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     else
                     {
-                        add_error("Error (%zu, %zu): operator %s has not enough operands", it->line, it->col, it->str.c_str());
+                        add_error(*it, "operator %s has not enough operands", it->str.c_str());
                         it = ppp.erase(it);
                     }
                 }
@@ -706,7 +726,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                         if (it->str == "="
                             && it->v[0].type == CalUnitType::Parameter && parameters[it->v[0].str].type == "__")
                         {
-                            add_error("Error (%zu, %zu): %s cannot be assingned", it->v[0].line, it->v[0].col, it->v[0].str.c_str());
+                            add_error(*it, "%s cannot be assingned", it->v[0].str.c_str());
                         }
                         ppp.erase(itr);
                         it = ppp.erase(std::prev(it));
@@ -714,7 +734,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     else
                     {
-                        add_error("Error (%zu, %zu): operator %s has not enough operands", it->line, it->col, it->str.c_str());
+                        add_error(*it, "operator %s has not enough operands", it->str.c_str());
                         it = ppp.erase(it);
                     }
                 }
@@ -727,26 +747,25 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
     }
 }
 
-void Cifa::combine_semi(std::list<CalUnit>& ppp, bool need_last_semi)
+void Cifa::combine_semi(std::list<CalUnit>& ppp)
 {
     for (auto it = ppp.begin(); it != ppp.end();)
     {
         if (it->can_cal())
         {
-            if (std::next(it) != ppp.end() && std::next(it)->str == ";")
+            auto itr = std::next(it);
+            if (itr != ppp.end() && itr->str == ";")
             {
-                auto itr = std::next(it);
                 it->suffix = true;
                 it = ppp.erase(itr);
             }
-            else if (std::next(it) == ppp.end())
+            else if (itr == ppp.end())
             {
                 ++it;
             }
             else
             {
-                auto& c1 = find_right_side(*it);
-                add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
+                add_error(*itr, "missing ;");
                 ++it;
             }
         }
@@ -754,20 +773,6 @@ void Cifa::combine_semi(std::list<CalUnit>& ppp, bool need_last_semi)
         {
             ++it;
         }
-    }
-    if (!ppp.empty())
-    {
-        if (need_last_semi && !ppp.back().is_statement())
-        {
-            auto& c1 = find_right_side(ppp.back());
-            add_error("Error (%zu, %zu): missing ;", c1.line, c1.col + c1.str.size());
-        }
-        if (!need_last_semi && ppp.back().is_statement())
-        {
-            auto& c1 = find_right_side(ppp.back());
-            add_error("Error (%zu, %zu): unnecessary ;", c1.line, c1.col + c1.str.size());
-        }
-        //ppp.back().suffix = true;
     }
 }
 
@@ -788,22 +793,26 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
                 {
                     if (!itr->is_statement())
                     {
-                        add_error("Error (%zu, %zu): %s is not a statement", itr->line, itr->col, itr->str.c_str());
+                        add_error(*itr, "%s is not a statement", itr->str.c_str());
                     }
                     it->v.emplace_back(std::move(*itr));
                     itr = ppp.erase(itr);
                 }
                 else
                 {
-                    add_error("Error (%zu, %zu): %s has no content", it->line, it->col, it->str.c_str());
+                    add_error(*it, "%s need content", it->str.c_str());
                     break;
                 }
-                if (it->str == "for" && (it->v[0].type != CalUnitType::UnionRound || it->v[0].v.size() != 3))
+                if (it->str == "for" && (it->v[0].type != CalUnitType::Union || it->v[0].v.size() != 3 || it->v[0].v.back().is_statement()))
                 {
-                    add_error("Error (%zu, %zu): for loop condition is not right", it->line, it->col);
+                    add_error(*it, "for loop condition is not right");
+                }
+                if ((it->str == "break" || it->str == "continue") && it->v[0].str != ";")
+                {
+                    add_error(*it, "%s missing ;", it->str.c_str());
                 }
             }
-            if (it->str == "if" && it->v.size() == 2)
+            if (it->str == "if" && it->v.size() == 2 && std::next(it) != ppp.end())
             {
                 auto itr = std::next(it);
                 if (itr->str == "else")
@@ -819,7 +828,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
     {
         if (it->str == "else")
         {
-            add_error("Error (%zu, %zu): else has no if", it->line, it->col);
+            add_error(*it, "else has no if");
             break;
         }
     }
@@ -868,10 +877,11 @@ Object Cifa::run_script(std::string str)
     }
     else
     {
-        std::sort(errors.begin(), errors.end());
+        std::sort(errors.begin(), errors.end(), [](const ErrorMessage& l, const ErrorMessage& r) -> bool
+            { return l.line * 1024 + l.col < r.line * 1024 + r.col; });
         for (auto& e : errors)
         {
-            std::cerr << e << "\n";
+            std::cerr << "Error (" << e.line << ", " << e.col << "): " << e.message << "\n";
         }
     }
     return result;
