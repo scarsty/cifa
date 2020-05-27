@@ -6,43 +6,15 @@
 namespace cifa
 {
 
-std::function<Object(const Object&, const Object&)> add, sub, mul, div, assign;
-
-Object print(ObjectVector& d)
+Cifa::Cifa()
 {
-    for (auto& d1 : d)
-    {
-        if (d1.type == "string")
-        {
-            std::cout << d1.content;
-        }
-        else
-        {
-            std::cout << d1.value;
-        }
-    }
-    std::cout << "\n";
-    return Object(double(d.size()));
-}
-
-Object to_string(ObjectVector& d)
-{
-    if (d.empty())
-    {
-        return Object("");
-    }
-    std::ostringstream stream;
-    stream << d[0].value;
-    return Object(stream.str());
-}
-
-Object to_number(ObjectVector& d)
-{
-    if (d.empty())
-    {
-        return Object();
-    }
-    return Object(atof(d[0].content.c_str()));
+    register_function("print", print);
+    register_function("to_string", to_string);
+    register_function("to_number", to_number);
+    //parameters["true"] = Object(1, "__");
+    //parameters["false"] = Object(0, "__");
+    //parameters["break"] = Object("break", "__");
+    //parameters["continue"] = Object("continue", "__");
 }
 
 Object Cifa::eval(CalUnit& c)
@@ -56,20 +28,20 @@ Object Cifa::eval(CalUnit& c)
         if (c.v.size() == 1)
         {
             if (c.str == "+") { return eval(c.v[0]); }
-            if (c.str == "-") { return Object(0) - eval(c.v[0]); }
+            if (c.str == "-") { return sub(Object(0), eval(c.v[0])); }
             if (c.str == "!") { return !eval(c.v[0]); }
-            if (c.str == "++") { return parameters[c.v[0].str] += 1; }
-            if (c.str == "--") { return parameters[c.v[0].str] -= 1; }
+            if (c.str == "++") { return parameters[c.v[0].str] = add(parameters[c.v[0].str], Object(1)); }
+            if (c.str == "--") { return parameters[c.v[0].str] = add(parameters[c.v[0].str], Object(-1)); }
             if (c.str == "()++")
             {
                 auto v = parameters[c.str];
-                parameters[c.v[0].str] += 1;
+                parameters[c.v[0].str] = add(parameters[c.v[0].str], Object(1));
                 return v;
             }
             if (c.str == "()--")
             {
                 auto v = parameters[c.str];
-                parameters[c.v[0].str] -= 1;
+                parameters[c.v[0].str] = add(parameters[c.v[0].str], Object(-1));
                 return v;
             }
         }
@@ -94,26 +66,26 @@ Object Cifa::eval(CalUnit& c)
                     return eval(c.v[1]);
                 }
             }
-            if (c.str == "*") { return eval(c.v[0]) * eval(c.v[1]); }
-            if (c.str == "/") { return eval(c.v[0]) / eval(c.v[1]); }
-            if (c.str == "%") { return eval(c.v[0]) % eval(c.v[1]); }
-            if (c.str == "+") { return eval(c.v[0]) + eval(c.v[1]); }
-            if (c.str == "-") { return eval(c.v[0]) - eval(c.v[1]); }
-            if (c.str == ">") { return eval(c.v[0]) > eval(c.v[1]); }
-            if (c.str == "<") { return eval(c.v[0]) < eval(c.v[1]); }
-            if (c.str == ">=") { return eval(c.v[0]) >= eval(c.v[1]); }
-            if (c.str == "<=") { return eval(c.v[0]) <= eval(c.v[1]); }
-            if (c.str == "==") { return eval(c.v[0]) == eval(c.v[1]); }
-            if (c.str == "!=") { return eval(c.v[0]) != eval(c.v[1]); }
-            if (c.str == "&") { return eval(c.v[0]) & eval(c.v[1]); }
-            if (c.str == "|") { return eval(c.v[0]) | eval(c.v[1]); }
-            if (c.str == "&&") { return eval(c.v[0]) && eval(c.v[1]); }
-            if (c.str == "||") { return eval(c.v[0]) || eval(c.v[1]); }
+            if (c.str == "*") { return mul(eval(c.v[0]), eval(c.v[1])); }
+            if (c.str == "/") { return div(eval(c.v[0]), eval(c.v[1])); }
+            if (c.str == "%") { return int(eval(c.v[0])) % int(eval(c.v[1])); }
+            if (c.str == "+") { return add(eval(c.v[0]), eval(c.v[1])); }
+            if (c.str == "-") { return sub(eval(c.v[0]), eval(c.v[1])); }
+            if (c.str == ">") { return double(eval(c.v[0])) > double(eval(c.v[1])); }
+            if (c.str == "<") { return double(eval(c.v[0])) < double(eval(c.v[1])); }
+            if (c.str == ">=") { return double(eval(c.v[0])) >= double(eval(c.v[1])); }
+            if (c.str == "<=") { return double(eval(c.v[0])) <= double(eval(c.v[1])); }
+            if (c.str == "==") { return double(eval(c.v[0])) == double(eval(c.v[1])); }
+            if (c.str == "!=") { return double(eval(c.v[0])) != double(eval(c.v[1])); }
+            if (c.str == "&") { return int(eval(c.v[0])) & int(eval(c.v[1])); }
+            if (c.str == "|") { return int(eval(c.v[0])) | int(eval(c.v[1])); }
+            if (c.str == "&&") { return bool(eval(c.v[0])) && bool(eval(c.v[1])); }
+            if (c.str == "||") { return bool(eval(c.v[0])) || bool(eval(c.v[1])); }
             if (c.str == "=") { return parameters[c.v[0].str] = eval(c.v[1]); }
-            if (c.str == "+=") { return parameters[c.v[0].str] += eval(c.v[1]); }
-            if (c.str == "-=") { return parameters[c.v[0].str] -= eval(c.v[1]); }
-            if (c.str == "*=") { return parameters[c.v[0].str] *= eval(c.v[1]); }
-            if (c.str == "/=") { return parameters[c.v[0].str] /= eval(c.v[1]); }
+            if (c.str == "+=") { return parameters[c.v[0].str] = add(parameters[c.v[0].str], eval(c.v[1])); }
+            if (c.str == "-=") { return parameters[c.v[0].str] = sub(parameters[c.v[0].str], eval(c.v[1])); }
+            if (c.str == "*=") { return parameters[c.v[0].str] = mul(parameters[c.v[0].str], eval(c.v[1])); }
+            if (c.str == "/=") { return parameters[c.v[0].str] = div(parameters[c.v[0].str], eval(c.v[1])); }
             if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
         }
         add_error(c, "unknown operator using %s with %zu operands", c.str.c_str(), c.v.size());
@@ -651,7 +623,11 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
         }
         it = ppp.erase(it);
         auto c1 = combine_all_cal(ppp2, true, true, false);
-        if (c1.v.size() == 1)
+        if (c1.v.size() == 0)
+        {
+            it->type = CalUnitType::None;
+        }
+        else if (c1.v.size() == 1)
         {
             *it = std::move(c1.v[0]);
         }
@@ -885,6 +861,43 @@ Object Cifa::run_script(std::string str)
         }
     }
     return result;
+}
+
+Object print(ObjectVector& d)
+{
+    for (auto& d1 : d)
+    {
+        if (d1.type == "string")
+        {
+            std::cout << d1.content;
+        }
+        else
+        {
+            std::cout << d1.value;
+        }
+    }
+    std::cout << "\n";
+    return Object(double(d.size()));
+}
+
+Object to_string(ObjectVector& d)
+{
+    if (d.empty())
+    {
+        return Object("");
+    }
+    std::ostringstream stream;
+    stream << d[0].value;
+    return Object(stream.str());
+}
+
+Object to_number(ObjectVector& d)
+{
+    if (d.empty())
+    {
+        return Object();
+    }
+    return Object(atof(d[0].content.c_str()));
 }
 
 }    // namespace cifa
