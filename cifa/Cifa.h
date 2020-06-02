@@ -119,7 +119,7 @@ private:
 
     struct ErrorMessage
     {
-        size_t line, col;
+        size_t line = 0, col = 0;
         std::string message;
     };
     std::vector<ErrorMessage> errors;
