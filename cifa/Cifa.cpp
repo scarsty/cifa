@@ -329,7 +329,8 @@ std::list<CalUnit> Cifa::split(std::string& str)
         }
         else if (g == CalUnitType::Constant)
         {
-            if (stat == CalUnitType::Constant || stat == CalUnitType::Operator || stat == CalUnitType::None)
+            if (stat == CalUnitType::Constant || stat == CalUnitType::Operator
+                || stat == CalUnitType::Split || stat == CalUnitType::None)
             {
                 stat = CalUnitType::Constant;
             }
@@ -567,10 +568,6 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
         }
         auto c1 = combine_all_cal(ppp2, false, true, true);    //此处合并多行
         c1.str = "{}";
-        //if (c1.v.size() > 0 && !c1.v.back().is_statement())
-        //{
-        //    add_error(*std::next(it), "missing ;");
-        //}
         it = ppp.erase(it);
         *it = std::move(c1);
     }
@@ -597,16 +594,7 @@ void Cifa::combine_square_backet(std::list<CalUnit>& ppp)
                 std::prev(it)->v = { *it };
                 ppp.erase(it);
             }
-            //else
-            //{
-            //    auto itl = std::prev(it);
-            //    add_error(*itl, "%s is not a parameter", itl->str.c_str());
-            //}
         }
-        //else
-        //{
-        //    add_error(*it, "[] has not a operand");
-        //}
     }
 }
 
@@ -645,18 +633,6 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
                 itl->v = { std::move(*it) };
                 ppp.erase(it);
             }
-            //else if ()
-            //{
-            //    add_error(*itl, "%s is not a function", itl->str.c_str());
-            //    itl->v = { std::move(*it) };
-            //    ppp.erase(it);
-            //}
-            //else if ()
-            //{
-            //    add_error(*itl, "%s is not a function", itl->str.c_str());
-            //    itl->v = { std::move(*it) };
-            //    ppp.erase(it);
-            //}
             else if (itl->type == CalUnitType::Key && vector_have(keys[2], itl->str))
             {
                 itl->v = { std::move(*it) };
@@ -677,7 +653,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                 if (it == ppp.begin() || !std::prev(it)->can_cal() || vector_have(ops1, it->str))    //退化为单目运算
                 {
                     auto itr = std::next(it);
-                    if (itr != ppp.end() && itr->can_cal())
+                    if (itr != ppp.end())
                     {
                         it->v = { std::move(*itr) };
                         it = ppp.erase(itr);
@@ -688,27 +664,17 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                         it->str = "()" + it->str;
                         it = ppp.erase(std::prev(it));
                     }
-                    //else
-                    //{
-                    //    add_error(*it, "operator %s has not enough operands", it->str.c_str());
-                    //    it = ppp.erase(it);
-                    //}
                 }
                 else
                 {
                     auto itr = std::next(it);
-                    if (itr != ppp.end() && itr->can_cal())
+                    if (itr != ppp.end())
                     {
                         it->v = { std::move(*std::prev(it)), std::move(*itr) };
                         ppp.erase(itr);
                         it = ppp.erase(std::prev(it));
                         ++it;
                     }
-                    //else
-                    //{
-                    //    add_error(*it, "operator %s has not enough operands", it->str.c_str());
-                    //    it = ppp.erase(it);
-                    //}
                 }
             }
             else
@@ -873,8 +839,13 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
     {
         if (c.str == "if")
         {
-            if (c.v.size() < 2)
+            if (c.v.size() == 0)
             {
+                add_error(c, "if has no condition");
+            }
+            if (c.v.size() == 1)
+            {
+                add_error(c, "if has no statement");
             }
         }
         if (c.str == "else")    //语法树合并后不应有单独的else
@@ -883,16 +854,21 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
         }
         if (c.str == "for")
         {
-            if (c.v[0].type != CalUnitType::Union || c.v[0].str != "()" || c.v[0].v.size() != 3 || c.v[0].v.back().is_statement())
+            if (c.v[0].type != CalUnitType::Union || c.v[0].str != "()" || c.v[0].v.size() != 3
+                || !c.v[0].v[0].is_statement() || !c.v[0].v[1].is_statement() || c.v[0].v[2].is_statement())
             {
                 add_error(c, "for loop condition is not right");
             }
-            //check_cal_unit(c.v[1], &c);
         }
         if (c.str == "while")
         {
-            if (c.v.size() < 2)
+            if (c.v.size() == 0)
             {
+                add_error(c, "while has no condition");
+            }
+            if (c.v.size() == 1)
+            {
+                add_error(c, "while has no statement");
             }
         }
         if (c.str == "return")
@@ -909,11 +885,22 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
     else if (c.type == CalUnitType::Union)
     {
         if (c.str == "{}")
-        {}
-        if (c.str == "[]")
-        {}
-        if (c.str == "()")
-        {}
+        {
+            if (father == nullptr || father->type == CalUnitType::Union || father->type == CalUnitType::Key)
+            {
+                for (auto& c1 : c.v)
+                {
+                    if (!c1.is_statement())
+                    {
+                        add_error(c1, "missing ;");
+                    }
+                }
+            }
+        }
+        //if (c.str == "[]")
+        //{}
+        //if (c.str == "()")
+        //{}
     }
     for (auto& c1 : c.v)
     {
