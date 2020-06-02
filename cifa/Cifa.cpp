@@ -86,9 +86,14 @@ Object Cifa::eval(CalUnit& c)
             if (c.str == "-=") { return parameters[c.v[0].str] = sub(parameters[c.v[0].str], eval(c.v[1])); }
             if (c.str == "*=") { return parameters[c.v[0].str] = mul(parameters[c.v[0].str], eval(c.v[1])); }
             if (c.str == "/=") { return parameters[c.v[0].str] = div(parameters[c.v[0].str], eval(c.v[1])); }
-            if (c.str == ",") { return eval(c.v[0]), eval(c.v[1]); }
+            if (c.str == ",")
+            {
+                Object o;
+                o.v.emplace_back(eval(c.v[0]));
+                o.v.emplace_back(eval(c.v[1]));
+                return o;
+            }
         }
-        add_error(c, "unknown operator using %s with %zu operands", c.str.c_str(), c.v.size());
         return Object();
     }
     else if (c.type == CalUnitType::Constant)
@@ -140,9 +145,9 @@ Object Cifa::eval(CalUnit& c)
             //此处v[0]应是一个组合语句
             for (eval(c.v[0].v[0]); eval(c.v[0].v[1]); eval(c.v[0].v[2]))
             {
-                o = eval(c.v[1]);
-                if (o.type == "__" && o.content == "break") { break; }
-                if (o.type == "__" && o.content == "continue") { continue; }
+                o.v.emplace_back(eval(c.v[1]));
+                if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+                if (o.v.back().type == "__" && o.v.back().content == "continue") { continue; }
                 if (force_return) { return Object(); }
             }
             o.type = "";
@@ -153,9 +158,9 @@ Object Cifa::eval(CalUnit& c)
             Object o;
             while (eval(c.v[0]))
             {
-                o = eval(c.v[1]);
-                if (o.type == "__" && o.content == "break") { break; }
-                if (o.type == "__" && o.content == "continue") { continue; }
+                o.v.emplace_back(eval(c.v[1]));
+                if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+                if (o.v.back().type == "__" && o.v.back().content == "continue") { continue; }
                 if (force_return) { return Object(); }
             }
             o.type = "";
@@ -189,9 +194,9 @@ Object Cifa::eval(CalUnit& c)
         Object o;
         for (auto& c1 : c.v)
         {
-            o = eval(c1);
-            if (o.type == "__" && o.content == "break") { break; }
-            if (o.type == "__" && o.content == "continue") { break; }
+            o.v.emplace_back(eval(c1));
+            if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+            if (o.v.back().type == "__" && o.v.back().content == "continue") { break; }
             if (force_return) { return Object(); }
         }
         return o;
@@ -442,13 +447,6 @@ std::list<CalUnit> Cifa::split(std::string& str)
             }
         }
     }
-    for (auto it = rv.begin(); it != rv.end(); ++it)
-    {
-        if (it->type == CalUnitType::Operator && !vector_have(ops, it->str))
-        {
-            add_error(*it, "unknown operator %s", it->str.c_str());
-        }
-    }
 
     //不处理类型符号
     for (auto it = rv.begin(); it != rv.end();)
@@ -568,6 +566,7 @@ void Cifa::combine_curly_backet(std::list<CalUnit>& ppp)
             break;
         }
         auto c1 = combine_all_cal(ppp2, false, true, true);    //此处合并多行
+        c1.str = "{}";
         if (c1.v.size() > 0 && !c1.v.back().is_statement())
         {
             add_error(*std::next(it), "missing ;");
@@ -588,6 +587,7 @@ void Cifa::combine_square_backet(std::list<CalUnit>& ppp)
             break;
         }
         auto c1 = combine_all_cal(ppp2, true, false, true);
+        c1.str = "[]";
         it = ppp.erase(it);
         *it = std::move(c1);
         if (it != ppp.begin())
@@ -623,6 +623,7 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
         }
         it = ppp.erase(it);
         auto c1 = combine_all_cal(ppp2, true, true, false);
+        c1.str = "()";
         if (c1.v.size() == 0)
         {
             it->type = CalUnitType::None;
@@ -817,6 +818,16 @@ void Cifa::register_function(const std::string& name, func_type func)
     functions[name] = func;
 }
 
+void Cifa::register_user_data(const std::string& name, void* p)
+{
+    user_data[name] = p;
+}
+
+void* Cifa::get_user_data(const std::string& name)
+{
+    return user_data[name];
+}
+
 Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc)
 {
     if (functions.count(name))
@@ -827,12 +838,132 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc)
         {
             v.emplace_back(eval(c));
         }
-        return p(v);
+        return p(*this, v);
     }
     else
     {
         return Object();
     }
+}
+
+void Cifa::check_cal_unit(CalUnit& c)
+{
+    if (c.type == CalUnitType::Operator)
+    {
+        if (c.v.size() == 1 && vector_have(ops1, c.str))
+            ;
+        else if (c.v.size() == 2 && vector_have(ops, c.str))
+            ;        
+        else
+        {
+            add_error(c, "unknown operator %s", c.str.c_str());
+            add_error(c, "unknown operator using %s with %zu operands", c.str.c_str(), c.v.size());
+        }
+    }
+    else if (c.type == CalUnitType::Constant)
+    {
+
+    }
+    else if (c.type == CalUnitType::String)
+    {
+
+    }
+    else if (c.type == CalUnitType::Parameter)
+    {
+        if (parameters.count(c.str))
+        {
+
+        }
+        else
+        {
+            //parameters[c.str] = Object(0);
+
+        }
+    }
+    else if (c.type == CalUnitType::Function)
+    {
+        std::vector<CalUnit> v;
+        if (!c.v.empty())
+        {
+            expand_comma(c.v[0], v);
+        }
+
+    }
+    else if (c.type == CalUnitType::Key)
+    {
+        if (c.str == "if")
+        {
+            if (eval(c.v[0]))
+            {
+                 eval(c.v[1]);
+            }
+            else if (c.v.size() >= 3)
+            {
+                 eval(c.v[2]);
+            }
+
+        }
+        if (c.str == "for")
+        {
+            Object o;
+            //此处v[0]应是一个组合语句
+            for (eval(c.v[0].v[0]); eval(c.v[0].v[1]); eval(c.v[0].v[2]))
+            {
+                o.v.emplace_back(eval(c.v[1]));
+                if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+                if (o.v.back().type == "__" && o.v.back().content == "continue") { continue; }
+                if (force_return) {  }
+            }
+            o.type = "";
+
+        }
+        if (c.str == "while")
+        {
+            Object o;
+            while (eval(c.v[0]))
+            {
+                o.v.emplace_back(eval(c.v[1]));
+                if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+                if (o.v.back().type == "__" && o.v.back().content == "continue") { continue; }
+                if (force_return) {  }
+            }
+            o.type = "";
+        }
+        if (c.str == "return")
+        {
+            result = eval(c.v[0]);
+            force_return = true;
+
+        }
+        if (c.str == "break")
+        {
+            //return Object("break", "__");
+        }
+        if (c.str == "continue")
+        {
+          //  return Object("continue", "__");
+        }
+        if (c.str == "true")
+        {
+          //  return Object(1, "__");
+        }
+        if (c.str == "false")
+        {
+          //  return Object(0, "__");
+        }
+    }
+    else if (c.type == CalUnitType::Union)
+    {
+        Object o;
+        for (auto& c1 : c.v)
+        {
+            o.v.emplace_back(eval(c1));
+            if (o.v.back().type == "__" && o.v.back().content == "break") { break; }
+            if (o.v.back().type == "__" && o.v.back().content == "continue") { break; }
+            }
+
+    }
+
 }
 
 Object Cifa::run_script(std::string str)
@@ -842,6 +973,7 @@ Object Cifa::run_script(std::string str)
     str += ";";    //方便处理仅有一行的情况
     auto rv = split(str);
     auto c = combine_all_cal(rv);    //结果必定是一个Union
+    check_cal_unit(c);
     if (errors.empty())
     {
         auto o = eval(c);
@@ -863,7 +995,7 @@ Object Cifa::run_script(std::string str)
     return result;
 }
 
-Object print(ObjectVector& d)
+Object print(Cifa& c, ObjectVector& d)
 {
     for (auto& d1 : d)
     {
@@ -880,7 +1012,7 @@ Object print(ObjectVector& d)
     return Object(double(d.size()));
 }
 
-Object to_string(ObjectVector& d)
+Object to_string(Cifa& c, ObjectVector& d)
 {
     if (d.empty())
     {
@@ -891,7 +1023,7 @@ Object to_string(ObjectVector& d)
     return Object(stream.str());
 }
 
-Object to_number(ObjectVector& d)
+Object to_number(Cifa& c, ObjectVector& d)
 {
     if (d.empty())
     {

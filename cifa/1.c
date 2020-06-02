@@ -33,5 +33,8 @@ for (int i = 1; i <= 10; i++)
         sum += (i * j) * x;
     }
 }
+auto a={
+    5, 3
+};
 //sum.print();
 return sum;

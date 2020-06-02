@@ -25,6 +25,7 @@ struct Object
     double value = nan("");
     std::string content;
     std::string type;
+    std::vector<Object> v;
     operator bool() { return value; }
     operator int() { return value; }
     operator double() { return value; }
@@ -108,8 +109,9 @@ private:
     std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
+    std::map<std::string, void*> user_data;
     std::map<std::string, Object> parameters;
-    using func_type = Object (*)(std::vector<Object>&);
+    using func_type = Object (*)(Cifa&, std::vector<Object>&);
     std::map<std::string, func_type> functions;
 
     bool force_return = false;
@@ -143,9 +145,11 @@ public:
     void combine_types(std::list<CalUnit>& ppp);
 
     void register_function(const std::string& name, func_type func);
+    void register_user_data(const std::string& name, void* p);
+    void* get_user_data(const std::string& name);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 
-    //void check_cal_unit(CalUnit& c);
+    void check_cal_unit(CalUnit& c);
 
     Object run_script(std::string str);
 
@@ -170,11 +174,11 @@ public:
     } \
     if (op2) \
     { \
-        return op2(o1, o2); \
+        return op2(*this, o1, o2); \
     } \
     return Object(o1.value op o2.value);
 
-    std::function<Object(const Object&, const Object&)> user_add, user_sub, user_mul, user_div;
+    std::function<Object(Cifa&c, const Object&, const Object&)> user_add, user_sub, user_mul, user_div;
 
     Object mul(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, user_mul); }
     Object div(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, user_div); }
@@ -189,8 +193,8 @@ public:
     Object sub(const Object& o1, const Object& o2) { OPERATOR(o1, o2, -, user_sub); }
 };
 
-Object print(ObjectVector& d);
-Object to_string(ObjectVector& d);
-Object to_number(ObjectVector& d);
+Object print(Cifa& c, ObjectVector& d);
+Object to_string(Cifa& c, ObjectVector& d);
+Object to_number(Cifa& c, ObjectVector& d);
 
 }    // namespace cifa
