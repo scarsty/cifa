@@ -300,9 +300,11 @@ std::list<CalUnit> Cifa::split(std::string& str)
 
     CalUnitType stat = CalUnitType::None;
     char in_string = 0;
+    char c0 = 0;
     size_t line = 1, col = 0;
     for (size_t i = 0; i < str.size(); i++)
     {
+        if (i > 1) { c0 = str[i - 1]; }
         auto c = str[i];
         col++;
         auto pre_stat = stat;
@@ -344,6 +346,9 @@ std::list<CalUnit> Cifa::split(std::string& str)
             if (c == '.' && stat == CalUnitType::Constant)
             {
             }
+            else if ((c == '+' || c == '-') && (c0 == 'E' || c0 == 'e') && stat == CalUnitType::Constant)
+            {
+            }
             else
             {
                 stat = CalUnitType::Operator;
@@ -355,7 +360,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
         }
         else if (g == CalUnitType::Parameter)
         {
-            if (c == 'E' || c == 'e' && stat == CalUnitType::Constant)
+            if ((c == 'E' || c == 'e') && stat == CalUnitType::Constant)
             {
             }
             else
