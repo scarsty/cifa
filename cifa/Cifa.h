@@ -104,7 +104,7 @@ class Cifa
 private:
     //运算符，大部分为双目，此处的顺序即优先级
     std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
-    std::vector<std::string> ops1 = { "++", "--", "!" };    //单目
+    std::vector<std::string> ops1 = { "++", "--", "!", "()++", "()--" };    //单目
     //关键字，在表中的位置为其所需参数个数
     std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
@@ -149,7 +149,7 @@ public:
     void* get_user_data(const std::string& name);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 
-    void check_cal_unit(CalUnit& c);
+    void check_cal_unit(CalUnit& c, CalUnit* father);
 
     Object run_script(std::string str);
 
