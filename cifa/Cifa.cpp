@@ -702,15 +702,10 @@ void Cifa::combine_semi(std::list<CalUnit>& ppp)
                 it->suffix = true;
                 it = ppp.erase(itr);
             }
-            else if (itr == ppp.end())
+            else
             {
                 ++it;
             }
-            //else
-            //{
-            //    add_error(*itr, "missing ;");
-            //    ++it;
-            //}
         }
         else
         {
@@ -734,26 +729,22 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
                 auto itr = std::next(it);
                 if (itr != ppp.end())
                 {
-                    //if (!itr->is_statement())
-                    //{
-                    //    add_error(*itr, "%s is not a statement", itr->str.c_str());
-                    //}
                     it->v.emplace_back(std::move(*itr));
                     itr = ppp.erase(itr);
                 }
-                //else
-                //{
-                //    add_error(*it, "%s need content", it->str.c_str());
-                //    break;
-                //}
             }
             if (it->str == "if" && it->v.size() == 2 && std::next(it) != ppp.end())
             {
                 auto itr = std::next(it);
                 if (itr->str == "else")
                 {
-                    it->v.emplace_back(std::move(itr->v[0]));
+                    it->v.emplace_back(std::move(*itr));
                     ppp.erase(itr);
+                    if (it->v[2].v.size() > 0)
+                    {
+                        auto c = std::move(it->v[2].v[0]);
+                        it->v[2] = std::move(c);
+                    }
                 }
             }
         }
@@ -852,6 +843,21 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
             {
                 add_error(c, "if has no statement");
             }
+            if (c.v.size() >= 2 && !c.v[1].is_statement())
+            {
+                add_error(c.v[1], "missing ;");
+            }
+            if (c.v.size() >= 3)
+            {
+                if (c.v[2].str == "else")
+                {
+                    add_error(c.v[2], "else has no if");
+                }
+                else if (!c.v[2].is_statement())
+                {
+                    add_error(c.v[2], "missing ;");
+                }
+            }
         }
         if (c.str == "else")    //语法树合并后不应有单独的else
         {
@@ -864,6 +870,10 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
             {
                 add_error(c, "for loop condition is not right");
             }
+            if (c.v.size() >= 2 && !c.v[1].is_statement())
+            {
+                add_error(c.v[1], "missing ;");
+            }
         }
         if (c.str == "while")
         {
@@ -875,9 +885,17 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
             {
                 add_error(c, "while has no statement");
             }
+            if (c.v.size() >= 2 && !c.v[1].is_statement())
+            {
+                add_error(c.v[1], "missing ;");
+            }
         }
         if (c.str == "return")
         {
+            if (c.v.size() == 0 || !c.v[0].is_statement())
+            {
+                add_error(c, "%s missing ;", c.str.c_str());
+            }
         }
         if (c.str == "break" || c.str == "continue")
         {
