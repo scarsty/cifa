@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <list>
@@ -159,8 +160,15 @@ public:
         ErrorMessage e;
         e.line = c.line;
         e.col = c.col;
-        char buffer[1024];
-        snprintf(buffer, 1024, args...);
+        char buffer[1024] = { '\0' };
+        if (sizeof...(args) == 1)
+        {
+            snprintf(buffer, 1024, "%s", args...);
+        }
+        else if (sizeof...(args) >= 2)
+        {
+            snprintf(buffer, 1024, args...);
+        }
         e.message = buffer;
         errors.emplace_back(std::move(e));
     }

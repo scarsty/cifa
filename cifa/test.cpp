@@ -1,5 +1,4 @@
 #include "Cifa.h"
-#include <cmath>
 #include <fstream>
 #include <iostream>
 
@@ -11,7 +10,7 @@ using namespace cifa;
 
 double test()
 {
-//#include "1.c"
+#include "1.c"
     ;
     return nan("");
 }

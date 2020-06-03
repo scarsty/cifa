@@ -8,7 +8,7 @@ if (sum == 1)
     else
         sum = 9;
     ;
-};
+}
 else
 {
     sum = 2;
