@@ -649,42 +649,73 @@ void Cifa::combine_round_backet(std::list<CalUnit>& ppp)
 
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
-    for (auto& op : ops)
+    for (const auto& ops1 : ops)
     {
-        for (auto it = ppp.begin(); it != ppp.end();)
+        for (auto& op : ops1)
         {
-            if (it->type == CalUnitType::Operator && it->v.size() == 0 && vector_have(op, it->str))    //已经能计算的不需再算
+            bool is_right = false;
+            if (vector_have(ops_single, op) || vector_have(ops_right, op) || op == "+" || op == "-")    //右结合
             {
-                if (it == ppp.begin() || !std::prev(it)->can_cal() || vector_have(ops1, it->str))    //退化为单目运算
+                auto it = ppp.end();
+                for (; it != ppp.begin();)
                 {
-                    auto itr = std::next(it);
-                    if (itr != ppp.end())
+                    --it;
+                    if (it->type == CalUnitType::Operator && it->str == op && it->v.size() == 0)
                     {
-                        it->v = { std::move(*itr) };
-                        it = ppp.erase(itr);
-                    }
-                    else if (it != ppp.begin() && (it->str == "++" || it->str == "--") && std::prev(it)->type == CalUnitType::Parameter)
-                    {
-                        it->v = { std::move(*std::prev(it)) };
-                        it->str = "()" + it->str;
-                        it = ppp.erase(std::prev(it));
-                    }
-                }
-                else
-                {
-                    auto itr = std::next(it);
-                    if (itr != ppp.end())
-                    {
-                        it->v = { std::move(*std::prev(it)), std::move(*itr) };
-                        ppp.erase(itr);
-                        it = ppp.erase(std::prev(it));
-                        ++it;
+                        if (it->str == "++")
+                        {
+                            int i = 0;
+                        }
+                        if (it == ppp.begin() || vector_have(ops_single, it->str)
+                            || !std::prev(it)->can_cal() && (op == "+" || op == "-"))    //+-退化为单目运算的情况
+                        {
+                            is_right = true;
+                            auto itr = std::next(it);
+                            if (itr != ppp.end())
+                            {
+                                it->v = { std::move(*itr) };
+                                it = ppp.erase(itr);
+                            }
+                            else if (it != ppp.begin() && (it->str == "++" || it->str == "--") && std::prev(it)->type == CalUnitType::Parameter)
+                            {
+                                it->v = { std::move(*std::prev(it)) };
+                                it->str = "()" + it->str;
+                                it = ppp.erase(std::prev(it));
+                            }
+                        }
+                        else
+                        {
+                            if (it->str != "+" && it->str != "-")
+                            {
+                                is_right = true;
+                                auto itr = std::next(it);
+                                if (itr != ppp.end())
+                                {
+                                    it->v = { std::move(*std::prev(it)), std::move(*itr) };
+                                    ppp.erase(itr);
+                                    it = ppp.erase(std::prev(it));
+                                }
+                            }
+                        }
                     }
                 }
             }
-            else
+            if (!is_right)    //未能成功右结合则判断为左结合
             {
-                ++it;
+                for (auto it = ppp.begin(); it != ppp.end();)
+                {
+                    if (it->type == CalUnitType::Operator && it->str == op && it->v.size() == 0 && it != ppp.begin())
+                    {
+                        auto itr = std::next(it);
+                        if (itr != ppp.end())
+                        {
+                            it->v = { std::move(*std::prev(it)), std::move(*itr) };
+                            ppp.erase(itr);
+                            it = ppp.erase(std::prev(it));
+                        }
+                    }
+                    ++it;
+                }
             }
         }
     }
@@ -778,7 +809,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc)
         {
             v.emplace_back(eval(c));
         }
-        return p(*this, v);
+        return p(v);
     }
     else
     {
@@ -791,19 +822,22 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
     //若提前return，表示不再检查其下的结构
     if (c.type == CalUnitType::Operator)
     {
-        if (vector_have(ops1, c.str))
+        if (vector_have(ops_single, c.str))
         {
             if (c.v.size() != 1)
             {
                 add_error(c, "operator %s has wrong operands", c.str.c_str());
             }
         }
-        else if (vector_have(ops, c.str) && !vector_have(ops1, c.str))
+        else if (vector_have(ops, c.str) && !vector_have(ops_single, c.str))
         {
-            if (c.str == "="
-                && c.v[0].type == CalUnitType::Parameter && parameters[c.v[0].str].type == "__")
+            if (c.str == "=")
             {
-                add_error(c, "%s cannot be assigned", c.v[0].str.c_str());
+                if (c.v[0].type == CalUnitType::Parameter && parameters[c.v[0].str].type == "__"
+                    || c.v[0].type != CalUnitType::Parameter)
+                {
+                    add_error(c, "%s cannot be assigned", c.v[0].str.c_str());
+                }
             }
             if (c.v.size() == 1 && (c.str == "+" || c.str == "-"))
             {}
@@ -960,7 +994,7 @@ Object Cifa::run_script(std::string str)
     return result;
 }
 
-Object print(Cifa& c, ObjectVector& d)
+Object print(ObjectVector& d)
 {
     for (auto& d1 : d)
     {
@@ -977,7 +1011,7 @@ Object print(Cifa& c, ObjectVector& d)
     return Object(double(d.size()));
 }
 
-Object to_string(Cifa& c, ObjectVector& d)
+Object to_string(ObjectVector& d)
 {
     if (d.empty())
     {
@@ -988,7 +1022,7 @@ Object to_string(Cifa& c, ObjectVector& d)
     return Object(stream.str());
 }
 
-Object to_number(Cifa& c, ObjectVector& d)
+Object to_number(ObjectVector& d)
 {
     if (d.empty())
     {

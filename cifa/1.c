@@ -13,7 +13,7 @@ else
 {
     sum = 2;
 }
-
+int c = sum = (-sum);
 for (int i = 1; i <= 10; i++)
 {
     if (i == 5) continue;
@@ -32,5 +32,5 @@ for (int i = 1; i <= 10; i++)
         sum += (i * j) * x;
     }
 }
-//auto a = print(5, { 5, 5 });
+c.print();
 return sum;

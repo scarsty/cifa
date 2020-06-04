@@ -103,16 +103,17 @@ bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
 class Cifa
 {
 private:
-    //运算符，大部分为双目，此处的顺序即优先级
+    //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
     std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
-    std::vector<std::string> ops1 = { "++", "--", "!", "()++", "()--" };    //单目
+    std::vector<std::string> ops_single = { "++", "--", "!", "()++", "()--" };    //单目全部是右结合
+    std::vector<std::string> ops_right = { "=", "*=", "/=", "+=", "-=" };         //右结合
     //关键字，在表中的位置为其所需参数个数
     std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return" }, { "if", "for", "while" } };
     std::vector<std::string> types = { "auto", "int", "float", "double" };
 
     std::map<std::string, void*> user_data;
     std::map<std::string, Object> parameters;
-    using func_type = Object (*)(Cifa&, std::vector<Object>&);
+    using func_type = std::function<Object(ObjectVector&)>;
     std::map<std::string, func_type> functions;
 
     bool force_return = false;
@@ -182,11 +183,11 @@ public:
     } \
     if (op2) \
     { \
-        return op2(*this, o1, o2); \
+        return op2(o1, o2); \
     } \
     return Object(o1.value op o2.value);
 
-    std::function<Object(Cifa&c, const Object&, const Object&)> user_add, user_sub, user_mul, user_div;
+    std::function<Object(const Object&, const Object&)> user_add, user_sub, user_mul, user_div;
 
     Object mul(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, user_mul); }
     Object div(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, user_div); }
@@ -201,8 +202,8 @@ public:
     Object sub(const Object& o1, const Object& o2) { OPERATOR(o1, o2, -, user_sub); }
 };
 
-Object print(Cifa& c, ObjectVector& d);
-Object to_string(Cifa& c, ObjectVector& d);
-Object to_number(Cifa& c, ObjectVector& d);
+Object print(ObjectVector& d);
+Object to_string(ObjectVector& d);
+Object to_number(ObjectVector& d);
 
 }    // namespace cifa
