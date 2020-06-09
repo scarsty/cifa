@@ -941,16 +941,13 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father)
     }
     else if (c.type == CalUnitType::Union)
     {
-        if (c.str == "{}")
+        if (father == nullptr || c.str == "{}" && (father->type == CalUnitType::Union || father->type == CalUnitType::Key))
         {
-            if (father == nullptr || father->type == CalUnitType::Union || father->type == CalUnitType::Key)
+            for (auto& c1 : c.v)
             {
-                for (auto& c1 : c.v)
+                if (!c1.is_statement())
                 {
-                    if (!c1.is_statement())
-                    {
-                        add_error(c1, "missing ;");
-                    }
+                    add_error(c1, "missing ;");
                 }
             }
         }
