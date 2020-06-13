@@ -36,3 +36,92 @@
 - []算符和数组操作，目前可以产生语法树，还不能正确执行，而且很可能语法树也不正确。
 - 若支持自定义函数，则需为每个函数都构造语法树，且必须类似C语言在使用之前声明或定义，暂时搁置。
 - 遍历最终语法树可以生成执行码，不再处理。
+
+## 使用方法
+
+### 基本用法
+
+在自己的工程中加入Cifa.h和Cifa.cpp，例程如下：
+
+```c++
+#include "Cifa.h"
+#include <fstream>
+#include <iostream>
+
+using namespace cifa;
+
+int main()
+{
+    Cifa c1;
+    std::ifstream ifs;
+    ifs.open("1.c");
+    std::string str;
+    getline(ifs, str, '\0');
+    auto o = c1.run_script(str);
+    std::cout << "Cifa value is: " << o.value << "\n";
+}
+```
+
+其中1.c文件即为脚本内容，一个例子为：
+
+```c++
+int sum = 1;
+for (int i = 1; i <= 10; i++)
+{
+    for (int j = 1; j <= 10; j++)
+    {
+        int x = 0;
+        if ((i + j) % 2 == 0)
+        {
+            x = -1;
+        }
+        else
+            x = 1;
+        sum += (i * j) * x;
+    }
+}
+return sum;
+```
+
+计算的结果为-24。
+
+若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值。
+
+### 自定义函数
+
+自定义函数必须可以转化为`std::function<cifa::Object(cifa::ObjectVector&)>`，其中`cifa::ObjectVector`即`std::vector<cifa::Object>`。
+
+例如以下自定义3个数学函数（省略了检测越界）：
+```c++
+Object sin1(ObjectVector& d) { return sin(d[0]); }
+Object cos1(ObjectVector& d) { return cos(d[0]); }
+Object pow1(ObjectVector& d) { return pow(d[0].value, d[1].value); }
+```
+注册自定义函数的方法为：
+```c++
+    Cifa c1;
+    c1.register_function("sin", sin1);
+    c1.register_function("cos", cos1);
+    c1.register_function("pow", pow1);
+```
+这里函数原型写成了xxx1的形式，其实只是为了避免与原先的数学函数同名，造成一些麻烦。
+
+其实更推荐lambda表达式的形式，例如：
+
+```c++
+    c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
+```
+此时再运行如下脚本：
+```c++
+auto pi = 3.1415927;
+print(sin(pi / 6));
+print(cos(pi / 6));
+print(pow(2, 10));
+```
+输出应是：
+```
+0.5
+0.866025
+1024
+```
+需注意语言已经内置了3个函数：print，to_number和to_string。

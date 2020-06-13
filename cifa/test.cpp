@@ -4,9 +4,9 @@
 
 using namespace cifa;
 
-//Object sin(ObjectVector& d) { return sin(d[0]); }
-//Object cos(ObjectVector& d) { return cos(d[0]); }
-//Object pow(ObjectVector& d) { return pow(d[0].value, d[1].value); }
+Object sin1(ObjectVector& d) { return sin(d[0]); }
+Object cos1(ObjectVector& d) { return cos(d[0]); }
+Object pow1(ObjectVector& d) { return pow(d[0].value, d[1].value); }
 
 double test()
 {
@@ -18,8 +18,9 @@ double test()
 int main()
 {
     Cifa c1;
-    //c1.register_function("sin", &sin);
-    //c1.register_function("cos", &cos);
+    c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
+    c1.register_function("cos", cos1);
+    c1.register_function("pow", pow1);
     std::ifstream ifs;
     ifs.open("1.c");
     std::string str;
