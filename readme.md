@@ -85,7 +85,7 @@ return sum;
 
 计算的结果为-24。
 
-若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值。
+若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值，否则返回值是nan。
 
 ### 自定义函数
 
@@ -93,24 +93,30 @@ return sum;
 
 例如以下自定义3个数学函数（省略了检测越界）：
 ```c++
+using namespace cifa;
+
 Object sin1(ObjectVector& d) { return sin(d[0]); }
 Object cos1(ObjectVector& d) { return cos(d[0]); }
 Object pow1(ObjectVector& d) { return pow(d[0].value, d[1].value); }
-```
-注册自定义函数的方法为：
-```c++
+
+int main()
+{
     Cifa c1;
     c1.register_function("sin", sin1);
     c1.register_function("cos", cos1);
     c1.register_function("pow", pow1);
+    //....
+}
 ```
-这里函数原型写成了xxx1的形式，其实只是为了避免与原先的数学函数同名，造成一些麻烦。
+这里函数原型写成了xxx1的形式，只是为了避免与cmath中的数学函数同名，造成一些麻烦。
 
-其实更推荐lambda表达式的形式，例如：
+其实更推荐lambda表达式的形式，例如将上面正弦函数的注册修改为：
 
 ```c++
     c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
 ```
+这样也不必再定义sin1这个函数。
+
 此时再运行如下脚本：
 ```c++
 auto pi = 3.1415927;
@@ -125,3 +131,16 @@ print(pow(2, 10));
 1024
 ```
 需注意语言已经内置了3个函数：print，to_number和to_string。
+
+### 预定义变量
+
+通过预定义变量可以模拟一些外置函数的效果。下面这个例子中，将pi预先定义好，并将degree视作一个C++送到Cifa的参数:
+```c++
+    c1.register_parameter("degree", 30);
+    c1.register_parameter("pi", 3.14159265358979323846);
+```
+脚本为：
+```c++
+print(sin(degree*pi/180));
+```
+输出应为0.5。

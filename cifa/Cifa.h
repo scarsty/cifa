@@ -148,6 +148,7 @@ public:
 
     void register_function(const std::string& name, func_type func);
     void register_user_data(const std::string& name, void* p);
+    void register_parameter(const std::string& name, Object o);
     void* get_user_data(const std::string& name);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 

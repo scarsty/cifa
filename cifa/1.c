@@ -33,7 +33,7 @@ for (int i = 1; i <= 10; i++)
     }
 }
 c.print();
-auto pi = 3.1415927;
-print(sin(pi / 6));
+//auto pi = 3.1415927;
+print(sin(degree*pi/180));
 print(cos(pi / 6));
 print(pow(2, 10));

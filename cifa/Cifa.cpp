@@ -794,6 +794,11 @@ void Cifa::register_user_data(const std::string& name, void* p)
     user_data[name] = p;
 }
 
+void Cifa::register_parameter(const std::string& name, Object o)
+{
+    parameters[name] = o;
+}
+
 void* Cifa::get_user_data(const std::string& name)
 {
     return user_data[name];
