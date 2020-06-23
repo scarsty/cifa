@@ -10,7 +10,7 @@ Object pow1(ObjectVector& d) { return pow(d[0].value, d[1].value); }
 
 double test()
 {
-    //#include "1.c"
+    #include "1.c"
     ;
     return nan("");
 }
