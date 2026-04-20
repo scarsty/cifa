@@ -112,7 +112,7 @@ print(pow(2, 10));
 0.866025
 1024
 ```
-需注意语言已经内置了3个函数：print，to_number和to_string。
+需注意语言已经内置了一些函数，如下面的表格所示。如果想覆盖掉内置函数，可以直接注册同名函数即可。
 
 ### 脚本中的自定义函数
 
@@ -201,12 +201,14 @@ print(sin(degree*pi/180));
         });
 ```
 
+因为变量作用域的关系，用户自定义类型会按照RAII的原则进行管理，无需手动释放资源，即没有必要进行垃圾收集。但是用户原则上不应使用非RAII的类型。
+
 
 ### 语法上的注意事项
 
 - auto、int、float、double等类型名会被忽略，若想无脑复制可以在C++部分使用auto。
 - 未经初始化即出现在赋值号右侧的变量值为nan，相当于强制要求显式初始化。
-- 函数调用时，a.func(c)等价于func(a, c)。
+- 函数调用时，a.func(c)等价于func(a, c)。但对于内置数组/map方法（push_back、erase等），仅能通过 `.` 语法调用，不能写成 `push_back(arr, x)` 的形式——这是因为内置方法需要直接修改原始变量，而普通函数调用传的是值的副本，无法修改原始对象。
 - 自加算符不支持++++或----这种写法，请不要瞎折腾。
 - 没有goto。
 
@@ -237,6 +239,22 @@ print(sin(degree*pi/180));
 ```
 
 ### 数组
+
+#### 空数组初始化
+
+有两种方式创建空数组：
+
+```c++
+int a[];        // 类型声明方式
+b = {};         // 赋值方式
+```
+
+两种写法均会产生一个长度为 0 的数组，之后可以用 `push_back` 等方法添加元素。
+
+#### 数组越界行为
+
+- **写入越界**：自动扩展数组大小，中间元素为空值。
+- **读取越界**：同样自动扩展，返回的空值在后续数值运算中可能产生运行时错误。
 
 #### 数组字面量
 
@@ -304,6 +322,59 @@ double a = dict["age"];  // a = 30
 `size(dict)` 返回 map 中的元素个数。
 
 访问不存在的 key 后使用该值会触发运行时错误。
+
+#### Map 越界行为
+
+访问不存在的 key 会自动创建该 key 并赋空值（与 C++ `std::map::operator[]` 行为一致）。
+
+### 数组和 Map 的内置方法
+
+数组和 Map 支持通过 `.` 语法调用内置方法，对自身进行原地修改。
+
+#### 数组方法
+
+| 方法 | 说明 | 返回值 |
+|------|------|--------|
+| `arr.push_back(x)` | 在末尾追加元素 `x`（支持多个参数） | 新的数组大小 |
+| `arr.pop_back()` | 移除最后一个元素 | 新的数组大小 |
+| `arr.resize(n)` | 将数组大小调整为 `n` | 新的数组大小 |
+| `arr.insert(i, x)` | 在下标 `i` 处插入元素 `x` | 新的数组大小 |
+| `arr.erase(i)` | 删除下标 `i` 处的元素 | 新的数组大小 |
+| `arr.clear()` | 清空所有元素 | 0 |
+| `arr.contains(x)` | 检查数组中是否存在值 `x` | 1（存在）或 0（不存在） |
+
+示例：
+
+```c++
+a = {};
+a.push_back(10);
+a.push_back(20);
+a.push_back(30);
+a.insert(1, 15);    // a = {10, 15, 20, 30}
+a.erase(0);          // a = {15, 20, 30}
+int has = a.contains(20);  // has = 1
+a.clear();           // a = {}
+```
+
+#### Map 方法
+
+| 方法 | 说明 | 返回值 |
+|------|------|--------|
+| `m.erase("key")` | 删除指定 key | 新的 map 大小 |
+| `m.clear()` | 清空所有键值对 | 0 |
+| `m.contains("key")` | 检查 key 是否存在 | 1（存在）或 0（不存在） |
+| `m.keys()` | 返回所有 key 组成的数组 | 字符串数组 |
+
+示例：
+
+```c++
+m["name"] = "Alice";
+m["age"] = 30;
+int has = m.contains("name");  // has = 1
+k = m.keys();                  // k = {"age", "name"}（按字典序）
+m.erase("age");
+int n = size(m);               // n = 1
+```
 
 ### 字符串
 
@@ -374,6 +445,31 @@ Syntax Error: parameter arr is at right of = but not been initialized
                         ^
 ```
 
+静态检查可检出的语法错误列表：
+
+| 错误 | 说明 |
+|------|------|
+| unpaired right bracket | 右括号 `)` / `]` / `}` 无对应左括号 |
+| unpaired left bracket | 左括号 `(` / `[` / `{` 无对应右括号 |
+| parameter ... is at right of = but not been initialized | 使用了未经赋值的变量 |
+| ... cannot be assigned | 赋值左侧是常量或字符串字面量 |
+| function ... is not defined | 调用了未注册/未定义的函数 |
+| function ... has no operands | 函数缺少参数列表 |
+| operator ? has no : | 三元运算符 `?` 缺少 `:` 分支 |
+| if/while has empty condition | `if()` 或 `while()` 条件为空 |
+| if has no condition/statement | `if` 缺少条件或语句体 |
+| else has no if | `else` 无对应 `if` |
+| while has constant true condition, may cause infinite loop | `while(1)` / `while(true)` 静态检测到潜在死循环 |
+| for loop may cause infinite loop | `for(;;)` 等无终止条件 |
+| for loop condition is not right | `for` 循环条件格式不正确 |
+| while/do while has no statement/condition | 循环缺少必要部分 |
+| switch has no condition/statement | `switch` 缺少条件或语句体 |
+| case has no condition / case missing : | `case` 格式不正确 |
+| default missing : | `default` 后缺少冒号 |
+| missing ; | 语句末尾缺少分号 |
+| no parameters inside [] | 下标表达式为空（数组声明 `int a[];` 除外） |
+| wrong parameters inside [] / () | 括号内参数格式不正确 |
+
 #### 运行时错误
 
 执行阶段的错误（如类型不兼容、访问不存在的 map 键等），`run_script` 的返回值会携带错误标记：
@@ -392,12 +488,24 @@ if (result.getSpecialType() == "Error")
 
 运行时错误输出示例（含调用栈）：
 ```
-Runtime Error: <empty> to double
-  at line 3, col 17:     return sqrt(bad);
-                                     ^
+Runtime Error: type conversion failed: variable 'bad' from <empty> to double
+Call Stack (most recent call last):
+  at func sqrt()
   at line 3, col 12:     return sqrt(bad);
-                                 ^
+                                ^
 ```
+
+运行时错误列表：
+
+| 错误 | 说明 |
+|------|------|
+| type conversion failed: variable '...' from ... to double | 将非数值类型（空值、字符串等）转换为 double 时失败 |
+| type conversion failed: variable '...' from ... to string | 将非字符串类型转换为 string 时失败 |
+| max call depth exceeded (possible infinite recursion) | 函数递归调用过深，超过最大调用深度 |
+| for/while/do-while loop exceeded max iterations | 循环次数超过最大限制 |
+| function ... is not defined | 调用了运行时未找到的函数 |
+| ...() is not supported on arrays/maps | 对数组或 map 调用了不支持的内置方法 |
+| ...() requires an array or map | 对非数组、非 map 的变量调用了内置方法 |
 
 ## 其他
 

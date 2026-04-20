@@ -688,19 +688,161 @@ bool infinite_loop_protection_test()
     return true;
 }
 
+bool array_methods_test()
+{
+    // empty array via {}
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {};
+            a.push_back(10);
+            a.push_back(20);
+            a.push_back(30);
+            return size(a);
+        )");
+        if (!o.hasValue() || o.toInt() != 3) return false;
+    }
+    // empty array via int a[]
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            int a[];
+            a.push_back(1);
+            a.push_back(2);
+            return size(a);
+        )");
+        if (!o.hasValue() || o.toInt() != 2) return false;
+    }
+    // pop_back
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {1, 2, 3, 4, 5};
+            a.pop_back();
+            a.pop_back();
+            return size(a);
+        )");
+        if (!o.hasValue() || o.toInt() != 3) return false;
+    }
+    // insert
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {1, 3, 4};
+            a.insert(1, 2);
+            return a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3];
+        )");
+        if (!o.hasValue() || o.toInt() != 1234) return false;
+    }
+    // erase
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {10, 20, 30, 40};
+            a.erase(1);
+            return a[0] * 100 + a[1] * 10 + a[2];
+        )");
+        if (!o.hasValue() || o.toInt() != 1340) return false;
+    }
+    // resize
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {1, 2, 3};
+            a.resize(5);
+            return size(a);
+        )");
+        if (!o.hasValue() || o.toInt() != 5) return false;
+    }
+    // clear
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {1, 2, 3};
+            a.clear();
+            return size(a);
+        )");
+        if (!o.hasValue() || o.toInt() != 0) return false;
+    }
+    // contains
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {10, 20, 30};
+            int r1 = a.contains(20);
+            int r2 = a.contains(99);
+            return r1 * 10 + r2;
+        )");
+        if (!o.hasValue() || o.toInt() != 10) return false;
+    }
+    return true;
+}
+
+bool map_methods_test()
+{
+    // contains
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            m["a"] = 1;
+            m["b"] = 2;
+            int r1 = m.contains("a");
+            int r2 = m.contains("z");
+            return r1 * 10 + r2;
+        )");
+        if (!o.hasValue() || o.toInt() != 10) return false;
+    }
+    // erase
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            m["x"] = 10;
+            m["y"] = 20;
+            m["z"] = 30;
+            m.erase("y");
+            return size(m) * 100 + m.contains("x") * 10 + m.contains("y");
+        )");
+        if (!o.hasValue() || o.toInt() != 210) return false;
+    }
+    // clear
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            m["a"] = 1;
+            m["b"] = 2;
+            m.clear();
+            return size(m);
+        )");
+        if (!o.hasValue() || o.toInt() != 0) return false;
+    }
+    // keys
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            m["alpha"] = 1;
+            m["beta"] = 2;
+            k = m.keys();
+            return size(k);
+        )");
+        if (!o.hasValue() || o.toInt() != 2) return false;
+    }
+    return true;
+}
+
 int main()
 {
-    int i = 0;
-    auto run_test = [&i](std::string name, bool (*func)())
+    int total = 0, ok = 0;
+    auto run_test = [&total, &ok](std::string name, bool (*func)())
     {
-        i++;
+        total++;
         if (func())
         {
-            std::cout << "\xe2\x9c\x85 " << i << ". " << name << " success" << std::endl;
+            ok++;
+            std::cout << "\xe2\x9c\x85 " << total << ". " << name << " success" << std::endl;
         }
         else
         {
-            std::cerr << "\xe2\x9d\x8c " << i << ". " << name << " failed" << std::endl;
+            std::cerr << "\xe2\x9d\x8c " << total << ". " << name << " failed" << std::endl;
         }
     };
 
@@ -728,5 +870,9 @@ int main()
     run_test("string_key_map_test", string_key_map_test);
     run_test("static_syntax_error_test", static_syntax_error_test);
     run_test("infinite_loop_protection_test", infinite_loop_protection_test);
+    run_test("array_methods_test", array_methods_test);
+    run_test("map_methods_test", map_methods_test);
+
+    std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;
 }

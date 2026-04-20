@@ -246,6 +246,123 @@ Object Cifa::eval(CalUnit& c, std::unordered_map<std::string, Object>& p)
     return o;
 }
 
+//对数组或 map 对象执行内置方法（push_back / erase / contains 等）
+//obj 必须是对原始变量的引用；args 是已展开的参数列表（CalUnit）
+Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes)
+{
+    if (obj.isType<std::vector<Object>>())
+    {
+        auto& arr = obj.ref<std::vector<Object>>();
+        if (method_name == "push_back")
+        {
+            for (auto& a : args) { arr.push_back(eval_scoped(a, scopes)); }
+            return Object(double(arr.size()));
+        }
+        if (method_name == "pop_back")
+        {
+            if (!arr.empty()) { arr.pop_back(); }
+            return Object(double(arr.size()));
+        }
+        if (method_name == "resize")
+        {
+            if (!args.empty()) { arr.resize(size_t(eval_scoped(args[0], scopes).toInt())); }
+            return Object(double(arr.size()));
+        }
+        if (method_name == "insert")
+        {
+            if (args.size() >= 2)
+            {
+                int idx = eval_scoped(args[0], scopes).toInt();
+                if (idx < 0) idx = 0;
+                if (idx > (int)arr.size()) idx = (int)arr.size();
+                arr.insert(arr.begin() + idx, eval_scoped(args[1], scopes));
+            }
+            return Object(double(arr.size()));
+        }
+        if (method_name == "erase")
+        {
+            if (!args.empty())
+            {
+                int idx = eval_scoped(args[0], scopes).toInt();
+                if (idx >= 0 && idx < (int)arr.size())
+                {
+                    arr.erase(arr.begin() + idx);
+                }
+            }
+            return Object(double(arr.size()));
+        }
+        if (method_name == "clear")
+        {
+            arr.clear();
+            return Object(0.0);
+        }
+        if (method_name == "contains")
+        {
+            if (!args.empty())
+            {
+                auto val = eval_scoped(args[0], scopes);
+                for (auto& e : arr)
+                {
+                    if (equal(e, val)) { return Object(1.0); }
+                }
+            }
+            return Object(0.0);
+        }
+        if (method_name == "keys")
+        {
+            set_runtime_error("keys() is not supported on arrays");
+            return Object();
+        }
+    }
+    else if (obj.isType<ObjectMap>())
+    {
+        auto& m = obj.ref<ObjectMap>();
+        if (method_name == "erase")
+        {
+            if (!args.empty())
+            {
+                auto key = eval_scoped(args[0], scopes).toString();
+                m.erase(key);
+            }
+            return Object(double(m.size()));
+        }
+        if (method_name == "clear")
+        {
+            m.clear();
+            return Object(0.0);
+        }
+        if (method_name == "contains")
+        {
+            if (!args.empty())
+            {
+                auto key = eval_scoped(args[0], scopes).toString();
+                return Object(m.count(key) ? 1.0 : 0.0);
+            }
+            return Object(0.0);
+        }
+        if (method_name == "keys")
+        {
+            std::vector<Object> keys;
+            for (auto& [k, v] : m)
+            {
+                keys.push_back(Object(k));
+            }
+            return Object(std::move(keys));
+        }
+        if (method_name == "push_back" || method_name == "pop_back"
+            || method_name == "resize" || method_name == "insert")
+        {
+            set_runtime_error(method_name + "() is not supported on maps");
+            return Object();
+        }
+    }
+    else
+    {
+        set_runtime_error(method_name + "() requires an array or map");
+    }
+    return Object();
+}
+
 //核心求值函数：递归遍历语法树节点并执行对应操作
 Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 {
@@ -308,6 +425,20 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             {
                 if (c.v[1].type == CalUnitType::Function)
                 {
+                    //内置的数组/map方法：需要引用修改原始对象
+                    auto& method_name = c.v[1].str;
+                    if (method_name == "push_back" || method_name == "pop_back" || method_name == "resize"
+                        || method_name == "clear" || method_name == "insert" || method_name == "erase"
+                        || method_name == "contains" || method_name == "keys")
+                    {
+                        std::vector<CalUnit> args;
+                        if (c.v[1].v.size() > 0 && c.v[1].v[0].type != CalUnitType::None)
+                        {
+                            expand_comma(c.v[1].v[0], args);
+                        }
+                        auto& obj = get_parameter_for_assign(c.v[0], scopes);
+                        return eval_builtin_method(method_name, obj, args, scopes);
+                    }
                     if (c.v[1].v[0].type != CalUnitType::None)
                     {
                         std::vector<CalUnit> v = { c.v[0] };
@@ -345,7 +476,15 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             if (c.str == "||") { return logic_or(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "<<") { return shift_left(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == ">>") { return shift_right(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = eval_scoped(c.v[1], scopes); }
+            if (c.str == "=")
+            {
+                //空花括号 {} 在赋值右侧视为空数组字面量
+                if (c.v[1].type == CalUnitType::Union && c.v[1].str == "{}" && c.v[1].v.empty())
+                {
+                    return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = Object(std::vector<Object>{});
+                }
+                return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = eval_scoped(c.v[1], scopes);
+            }
             if (c.str == "+=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = add(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "-=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = sub(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "*=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = mul(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
@@ -788,9 +927,9 @@ std::list<CalUnit> Cifa::split(std::string& str)
             if (pre_stat != CalUnitType::None)
             {
                 //操作符替代词
-                if (pre_stat == CalUnitType::Parameter && op_representations.count(r))
+                if (pre_stat == CalUnitType::Parameter && op_representations.contains(r))
                 {
-                    r = op_representations[r];
+                    r = op_representations.at(r);
                     pre_stat = CalUnitType::Operator;
                 }
                 CalUnit c(pre_stat, r);
@@ -2010,13 +2149,20 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         {
             add_error(c, "function %s has no operands", c.str.c_str());
         }
+        //内置方法名不视为未定义函数
         if (!functions.contains(c.str) && !functions2.contains(c.str))
         {
-            add_error(c, "function %s is not defined", c.str.c_str());
+            if (!builtin_methods.contains(c.str))
+            {
+                add_error(c, "function %s is not defined", c.str.c_str());
+            }
         }
         else if (!functions.contains(c.str) && functions2.contains(c.str) && functions2.at(c.str).body.type == CalUnitType::None)
         {
-            add_error(c, "function %s is not defined", c.str.c_str());
+            if (!builtin_methods.contains(c.str))
+            {
+                add_error(c, "function %s is not defined", c.str.c_str());
+            }
         }
     }
     else if (c.type == CalUnitType::Key)
@@ -2193,7 +2339,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         {
             if (c.v.size() == 0)
             {
-                add_error(c, "no parameters inside []");
+                //int a[]; 声明空数组时允许空下标
+                if (!(father && father->with_type))
+                {
+                    add_error(c, "no parameters inside []");
+                }
             }
             else if (c.v[0].str == ",")
             {

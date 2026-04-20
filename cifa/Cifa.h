@@ -270,15 +270,21 @@ public:
 
 private:
     //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
-    std::vector<std::vector<std::string>> ops = { { "::", ".", "++", "--" }, { "~", "!" }, { "*", "/", "%" }, { "+", "-" }, { "<<", ">>" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "^" }, { "|" }, { "&&" }, { ":", "?" }, { "||" }, { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" }, { "," } };
-    std::vector<std::string> ops_single = { "++", "--", "~", "!", "()++", "()--" };                                //单目全部是右结合
-    std::vector<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };    //右结合
+    inline static const std::vector<std::vector<std::string>> ops = { { "::", ".", "++", "--" }, { "~", "!" }, { "*", "/", "%" }, { "+", "-" }, { "<<", ">>" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "^" }, { "|" }, { "&&" }, { ":", "?" }, { "||" }, { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" }, { "," } };
+    //单目运算符全部是右结合
+    inline static const std::vector<std::string> ops_single = { "++", "--", "~", "!", "()++", "()--" };       
+    //右结合的运算符，注意+-既有单目又有双目，因此不能简单地放在单目列表中
+    inline static const std::vector<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };    
     //关键字，在表中的位置为其所需参数个数
-    std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default" }, { "if", "for", "while", "do", "switch", "case" } };
-    std::vector<std::string> types = { "auto", "int", "float", "double", "string", "char" };
-    std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
-    //两个函数表都是全局的
+    inline static const std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default" }, { "if", "for", "while", "do", "switch", "case" } };
+    //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
+    inline static const std::vector<std::string> types = { "auto", "int", "float", "double", "string", "char" };
+    //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
+    inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
+    //内置的数组/map方法列表
+    inline static const std::set<std::string> builtin_methods = { "push_back", "pop_back", "resize", "insert", "erase", "clear", "contains", "keys" };
 
+    //两个函数表都是全局的
     std::unordered_map<std::string, func_type> functions;     //在宿主程序中注册的函数
     std::unordered_map<std::string, Function2> functions2;    //在cifa程序中定义的函数
 
@@ -374,6 +380,7 @@ private:
     Object eval(CalUnit& c, std::unordered_map<std::string, Object>& p);
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
+    Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
 
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
     CalUnit& find_right_side(CalUnit& c1);
