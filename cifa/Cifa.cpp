@@ -169,6 +169,8 @@ Cifa::Cifa()
     REGISTER_FUNCTION(exp);
     REGISTER_FUNCTION(log);
     REGISTER_FUNCTION(log10);
+    REGISTER_FUNCTION(ceil);
+    REGISTER_FUNCTION(floor);
 }
 
 //从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
@@ -209,7 +211,8 @@ Object& Cifa::return_value(ScopeStack& scopes)
 struct RuntimeFrameGuard
 {
     std::vector<std::string>& stack;
-    RuntimeFrameGuard(std::vector<std::string>& s) : stack(s) {}
+    RuntimeFrameGuard(std::vector<std::string>& s) :
+        stack(s) {}
     ~RuntimeFrameGuard()
     {
         if (!stack.empty())
@@ -240,8 +243,6 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     runtime_call_stack.push_back(format_runtime_frame(c));
     RuntimeFrameGuard frame_guard(runtime_call_stack);
 
-    try
-    {
     if (has_return_value(scopes))
     {
         return return_value(scopes);
@@ -516,17 +517,6 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         return o;
     }
     return Object();
-    }
-    catch (const std::exception& e)
-    {
-        set_runtime_error(e.what());
-        return Object("RuntimeError", "Error");
-    }
-    catch (...)
-    {
-        set_runtime_error("unknown runtime exception");
-        return Object("RuntimeError", "Error");
-    }
 }
 
 //判断一个 {} 节点是否为数组字面量（而非代码块）
@@ -1017,7 +1007,8 @@ void Cifa::combine_square_bracket(std::list<CalUnit>& ppp)
         {
             if (std::prev(it)->type == CalUnitType::Parameter)
             {
-                std::prev(it)->v = { *it };
+                //多维数组：如果前置变量已有 [] 子节点，追加而非覆盖
+                std::prev(it)->v.push_back(*it);
                 ppp.erase(it);
             }
         }
@@ -1224,11 +1215,24 @@ void Cifa::deal_special_keys(std::list<CalUnit>& ppp)
                 }
                 if (v.size() == 3)
                 {
+                    //将空的 for 子句（裸分号）转换为合适的节点：
+                    //  条件为空时替换为常量 1（永真），初始化和步进为空时替换为 None
                     if (v[1].type == CalUnitType::Split)
                     {
                         v[1].str = "1";
                         v[1].type = CalUnitType::Constant;
                         v[1].suffix = true;
+                    }
+                    if (v[0].type == CalUnitType::Split)
+                    {
+                        v[0].type = CalUnitType::None;
+                        v[0].str.clear();
+                        v[0].suffix = true;
+                    }
+                    if (v[2].type == CalUnitType::Split)
+                    {
+                        v[2].type = CalUnitType::None;
+                        v[2].str.clear();
                     }
                 }
             }
@@ -1387,8 +1391,6 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     runtime_call_stack.push_back("func " + name + "()");
     RuntimeFrameGuard frame_guard(runtime_call_stack);
 
-    try
-    {
     if (functions.count(name))
     {
         auto f = functions[name];
@@ -1413,17 +1415,6 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     {
         set_runtime_error("function " + name + " is not defined");
         return Object();
-    }
-    }
-    catch (const std::exception& e)
-    {
-        set_runtime_error(e.what());
-        return Object("RuntimeError", "Error");
-    }
-    catch (...)
-    {
-        set_runtime_error("unknown runtime exception");
-        return Object("RuntimeError", "Error");
     }
 }
 
@@ -1591,7 +1582,41 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     return *o;
 }
 
-//解析数组下标访问（如 a[i]），返回元素引用，必要时自动扩展数组大小
+//多维数组递归索引：从 element 开始，继续按 c.v[dim_index] 及后续维度进行下标访问
+Object& Cifa::resolve_nested_index(Object& element, CalUnit& c, size_t dim_index, ScopeStack& scopes, bool only_check)
+{
+    int idx = 0;
+    if (!only_check && c.v[dim_index].v.size() > 0)
+    {
+        idx = eval_scoped(c.v[dim_index].v[0], scopes).toInt();
+        if (idx < 0)
+        {
+            idx = 0;
+        }
+    }
+
+    if (!element.isType<std::vector<Object>>())
+    {
+        //元素还不是数组，创建一个
+        std::vector<Object> arr(size_t(idx + 1));
+        element = Object(arr);
+    }
+
+    auto& arr = element.ref<std::vector<Object>>();
+    if (idx >= int(arr.size()))
+    {
+        arr.resize(size_t(idx + 1));
+    }
+    auto& sub = arr[size_t(idx)];
+
+    if (dim_index + 1 < c.v.size() && c.v[dim_index + 1].str == "[]")
+    {
+        return resolve_nested_index(sub, c, dim_index + 1, scopes, only_check);
+    }
+    return sub;
+}
+
+//解析数组下标访问（如 a[i] 或多维 a[i][j]），返回元素引用，必要时自动扩展数组大小
 Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array)
 {
     int index = 0;
@@ -1640,6 +1665,11 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
         }
         auto& element = arr[size_t(index)];
         element.name = legacy_name;
+        //多维数组：如果还有后续的 [] 下标，递归索引子数组
+        if (c.v.size() > 1)
+        {
+            return resolve_nested_index(element, c, 1, scopes, only_check);
+        }
         return element;
     }
 
@@ -1680,6 +1710,11 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
     }
     auto& element = arr[size_t(index)];
     element.name = legacy_name;
+    //多维数组：如果还有后续的 [] 下标，递归索引子数组
+    if (c.v.size() > 1)
+    {
+        return resolve_nested_index(element, c, 1, scopes, only_check);
+    }
     return element;
 }
 
@@ -2215,9 +2250,7 @@ void Cifa::print_runtime_error() const
             while (start <= rest.size())
             {
                 size_t pos = rest.find('\n', start);
-                std::string continuation = (pos == std::string::npos)
-                    ? rest.substr(start)
-                    : rest.substr(start, pos - start);
+                std::string continuation = (pos == std::string::npos) ? rest.substr(start) : rest.substr(start, pos - start);
                 if (!continuation.empty())
                 {
                     fprintf(stderr, "     %s\n", continuation.c_str());

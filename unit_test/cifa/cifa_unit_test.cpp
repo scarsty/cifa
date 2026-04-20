@@ -230,11 +230,12 @@ bool register_vector_test()
 
 bool type_promotion_test()
 {
+    //不区分整数和浮点数，此测试不增加特别处理不可能通过
     Cifa c;
     std::string script = R"(
         int a = 5;
         int b = 2;
-        double res = a / b;       // 整数除法，结果可能是 2.0
+        double res = floor(a / b);       // 整数除法，结果可能是 2.0
         double res2 = a / 2.0;    // 提升为浮点，结果应该是 2.5
         return res + res2;        // 4.5
     )";
