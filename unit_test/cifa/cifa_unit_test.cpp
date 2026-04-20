@@ -1,6 +1,6 @@
 ﻿#include "../../Cifa.h"
-
-import std;
+#include <iostream>
+#include <numeric>
 
 using namespace cifa;
 
@@ -64,6 +64,22 @@ bool loop_math_test()
     {
         return false;
     }
+}
+
+bool loop_control_test()
+{
+    Cifa c;
+    std::string script = R"(
+        int sum = 0;
+        for (int i = 0; i < 10; i++) {
+            if (i % 2 == 0) continue; // 跳过偶数
+            if (i > 7) break;         // 遇到 9 跳出
+            sum += i;
+        }
+        return sum; // 1 + 3 + 5 + 7 = 16
+    )";
+    auto o = c.run_script(script);
+    return o.toInt() == 16;
 }
 
 bool ternary_operator_test()
@@ -212,6 +228,121 @@ bool register_vector_test()
     return o.hasValue() && o.toDouble() == std::accumulate(v.begin(), v.end(), 0.0);
 }
 
+bool type_promotion_test()
+{
+    Cifa c;
+    std::string script = R"(
+        int a = 5;
+        int b = 2;
+        double res = a / b;       // 整数除法，结果可能是 2.0
+        double res2 = a / 2.0;    // 提升为浮点，结果应该是 2.5
+        return res + res2;        // 4.5
+    )";
+    auto o = c.run_script(script);
+    return std::fabs(o.toDouble() - 4.5) < 1e-9;
+}
+
+bool empty_statement_test()
+{
+    Cifa c;
+    std::string script = R"(
+        int x = 10;;;  // 多重分号
+        if (x > 5) {}
+        else ;
+        while(false){;}
+        for(;false;);
+        return x;
+    )";
+    auto o = c.run_script(script);
+    return o.toInt() == 10;
+}
+
+bool multi_dimensional_array_test()
+{
+    Cifa c;
+    // 假设你的引擎支持这种嵌套方式
+    std::string script = R"(
+        grid = {{1, 2}, {3, 4}};
+        return grid[1][0]; // 应该返回 3
+    )";
+    auto o = c.run_script(script);
+    return o.toInt() == 3;
+}
+
+bool compound_assignment_test()
+{
+    Cifa c;
+    std::string script = R"(
+        int x = 10;
+        x *= 2 + 3; // 应该是 10 * (2 + 3) = 50，而不是 10 * 2 + 3 = 23
+        x %= 7;     // 50 % 7 = 1
+        return x;
+    )";
+    auto o = c.run_script(script);
+    return o.toInt() == 1;
+}
+
+bool c_string_library_test()
+{
+    Cifa c1;
+
+    // 1. 注册 strlen: 返回字符串长度
+    c1.register_function("strlen", [](ObjectVector& d) -> Object
+        {
+            if (d.empty() || !d[0].isType<std::string>()) return 0;
+            return (double)d[0].toString().length();
+        });
+
+    // 2. 注册 strcmp: 比较字符串
+    c1.register_function("strcmp", [](ObjectVector& d) -> Object
+        {
+            if (d.size() < 2) return 0;
+            int res = d[0].toString().compare(d[1].toString());
+            // 标准化为 C 风格的 -1, 0, 1
+            return (double)((res > 0) - (res < 0));
+        });
+
+    // 3. 注册 strcat: 拼接字符串
+    c1.register_function("strcat", [](ObjectVector& d) -> Object
+        {
+            if (d.size() < 2) return "";
+            return d[0].toString() + d[1].toString();
+        });
+
+    // 4. 注册 strcpy: 模拟赋值
+    c1.register_function("strcpy", [](ObjectVector& d) -> Object
+        {
+            if (d.size() < 2) return "";
+            return d[1]; // 将第二个参数赋值给第一个
+        });
+
+    std::string script_code = R"(
+        string s1 = "Cifa";
+        string s2 = "Language";
+        // 测试 strlen
+        int len = strlen(s1); // 4
+        // 测试 strcmp
+        int cmp_res = strcmp(s1, "Cifa"); // 0
+        // 测试 strcat
+        string combined = strcat(s1, s2); // "CifaLanguage"
+        // 测试 strcpy 逻辑
+        string target = "old";
+        target = strcpy(target, "new");
+        // 期望: 4 + 0 + 12 (combined长度) + 3 (new长度) = 19
+        return len + cmp_res + strlen(combined) + strlen(target);
+    )";
+
+    auto o = c1.run_script(script_code);
+
+    if (o.hasValue() && o.isNumber())
+    {
+        // 预期 4 + 0 + 12 + 3 = 19
+        return o.toInt() == 19;
+    }
+
+    return false;
+}
+
 bool runtime_error_stack_test()
 {    // 运行时错误触发测试（类型转换失败）
     Cifa c;
@@ -239,6 +370,7 @@ int main()
 
     run_test("register_function_test", register_function_test);
     run_test("loop_math_test", loop_math_test);
+    run_test("loop_control_test", loop_control_test);
     run_test("ternary_operator_test", ternary_operator_test);
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
@@ -250,6 +382,11 @@ int main()
     run_test("array_literal_assignment_test", array_literal_assignment_test);
     run_test("size_of_array_test", size_of_array_test);
     run_test("register_vector_test", register_vector_test);
+    run_test("type_promotion_test", type_promotion_test);
+    run_test("empty_statement_test", empty_statement_test);
+    run_test("multi_dimensional_array_test", multi_dimensional_array_test);
+    run_test("compound_assignment_test", compound_assignment_test);
+    run_test("c_string_library_test", c_string_library_test);
     run_test("runtime_error_stack_test", runtime_error_stack_test);
     return 0;
 }
