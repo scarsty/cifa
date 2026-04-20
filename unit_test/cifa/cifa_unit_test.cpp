@@ -355,17 +355,56 @@ bool runtime_error_stack_test()
     return o.getSpecialType() == "Error";
 }
 
+bool mixed_array_literal_test()
+{   // 混合类型数组字面量：数字、字符串混存
+    Cifa c;
+    std::string script = R"(
+        arr = {1, "hello", 3.14, "world"};
+        int i = 2;
+        double n = arr[0];
+        string s = arr[1];
+        double f = arr[i];
+        string s2 = arr[3];
+        println(s + " " + s2, " ", to_string(f)); // 输出 "hello world 3.14"
+        return n + f;  // 1 + 3.14 = 4.14
+    )";
+    auto o = c.run_script(script);
+    return o.hasValue() && std::fabs(o.toDouble() - 4.14) < 1e-9;
+}
+
+bool string_key_map_test()
+{   // 字符串下标（map 语义）测试
+    Cifa c;
+    std::string script = R"(
+        dict["name"] = "Alice";
+        dict["age"] = 30;
+        dict["score"] = 95.5;
+        string name = "name";
+        string n = dict[name];
+        string age = "age";
+        double a = dict[age];
+        string score = "score";
+        double s = dict[score];
+        println("Name: ", n, ", Age: ", a, ", Score: ", s); // 输出 "Name: Alice, Age: 30, Score: 95.5"
+        return a + s;  // 30 + 95.5 = 125.5
+    )";
+    auto o = c.run_script(script);
+    return o.hasValue() && std::fabs(o.toDouble() - 125.5) < 1e-9;
+}
+
 int main()
 {
-    auto run_test = [](std::string name, bool (*func)())
+    int i = 0;
+    auto run_test = [&i](std::string name, bool (*func)())
     {
+        i++;
         if (func())
         {
-            std::cout << "✅ " << name << " success\n";
+            std::cout << "✅ " << i << ". " << name << " success\n";
         }
         else
         {
-            std::cerr << "❌ " << name << " failed\n";
+            std::cerr << "❌ " << i << ". " << name << " failed\n";
         }
     };
 
@@ -389,5 +428,7 @@ int main()
     run_test("compound_assignment_test", compound_assignment_test);
     run_test("c_string_library_test", c_string_library_test);
     run_test("runtime_error_stack_test", runtime_error_stack_test);
+    run_test("mixed_array_literal_test", mixed_array_literal_test);
+    run_test("string_key_map_test", string_key_map_test);
     return 0;
 }

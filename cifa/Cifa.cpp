@@ -145,6 +145,10 @@ Cifa::Cifa()
                 {
                     return Object(double(x[0].ref<std::vector<Object>>().size()));
                 }
+                if (x[0].isType<ObjectMap>())
+                {
+                    return Object(double(x[0].ref<ObjectMap>().size()));
+                }
             }
         });
 #define REGISTER_FUNCTION(func) \
@@ -1616,13 +1620,73 @@ Object& Cifa::resolve_nested_index(Object& element, CalUnit& c, size_t dim_index
     return sub;
 }
 
+//解析字符串下标访问（map 语义），如 dict["name"]，返回元素引用
+Object& Cifa::resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, const std::string& key, bool only_check, bool declare_current)
+{
+    if (scopes.empty())
+    {
+        scopes.emplace_back();
+    }
+
+    Object* base = nullptr;
+    if (declare_current)
+    {
+        base = &scopes.back()[c.str];
+        base->name = c.str;
+    }
+    else
+    {
+        base = find_object_from_inner(scopes, c.str);
+    }
+
+    //已有 map 对象
+    if (base != nullptr && base->isType<ObjectMap>())
+    {
+        auto& m = base->ref<ObjectMap>();
+        auto& element = m[key];
+        element.name = c.str + "[\"" + key + "\"]";
+        return element;
+    }
+
+    //不存在则创建新的 map
+    if (base == nullptr)
+    {
+        base = &scopes.back()[c.str];
+        base->name = c.str;
+    }
+
+    if (!base->isType<ObjectMap>())
+    {
+        *base = Object(ObjectMap());
+        base->name = c.str;
+    }
+
+    auto& m = base->ref<ObjectMap>();
+    auto& element = m[key];
+    element.name = c.str + "[\"" + key + "\"]";
+    return element;
+}
+
 //解析数组下标访问（如 a[i] 或多维 a[i][j]），返回元素引用，必要时自动扩展数组大小
 Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array)
 {
-    int index = 0;
+    //先求值下标表达式，判断是整数下标（数组）还是字符串下标（map）
+    Object index_val;
     if (!only_check && c.v[0].v.size() > 0)
     {
-        index = eval_scoped(c.v[0].v[0], scopes).toInt();
+        index_val = eval_scoped(c.v[0].v[0], scopes);
+    }
+
+    //字符串下标：使用 map<string, Object> 语义
+    if (index_val.isType<std::string>())
+    {
+        return resolve_string_indexed_parameter(c, scopes, index_val.toString(), only_check, declare_current);
+    }
+
+    int index = 0;
+    if (index_val.hasValue())
+    {
+        index = index_val.toInt();
         if (index < 0)
         {
             index = 0;
@@ -1744,10 +1808,17 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                     if (c.v[0].type == CalUnitType::Parameter)
                     {
                         check_cal_unit(c.v[1], &c, p);    //here make sure no undefined parameters at right of "="
-                        get_parameter(c.v[0], p);         //record a parameter at left of "="
-                        //this will check twice things at right of "="
+                        //带下标的参数只注册基名，下标在运行时解析
+                        if (c.v[0].v.size() > 0 && c.v[0].v[0].str == "[]")
+                        {
+                            p[c.v[0].str];
+                        }
+                        else
+                        {
+                            get_parameter(c.v[0], p);
+                        }
                     }
-                    if (c.v[0].type == CalUnitType::Parameter && get_parameter(c.v[0], p).type1 == "__"
+                    if (c.v[0].type == CalUnitType::Parameter && get_parameter(c.v[0].str, p).type1 == "__"
                         || c.v[0].type != CalUnitType::Parameter)
                     {
                         add_error(c, "%s cannot be assigned", c.v[0].str.c_str());
@@ -1827,9 +1898,19 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             }
             else if (father->str == "=")
             {
-                if (!check_parameter(c, p))
+                //带下标的参数只检查基名是否已注册
+                bool ok;
+                if (c.v.size() > 0 && c.v[0].str == "[]")
                 {
-                    add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());    //parameters at left of "=" have been added
+                    ok = check_parameter(c.str, p);
+                }
+                else
+                {
+                    ok = check_parameter(c, p);
+                }
+                if (!ok)
+                {
+                    add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
                 }
             }
         }

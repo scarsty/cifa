@@ -181,6 +181,7 @@ private:
 };
 
 using ObjectVector = std::vector<Object>;
+using ObjectMap = std::map<std::string, Object>;
 
 enum class CalUnitType
 {
@@ -398,6 +399,7 @@ private:
     bool check_parameter(const std::string& name, ScopeStack& scopes);
     Object& get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool declare_current = false);
     Object& resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array);
+    Object& resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, const std::string& key, bool only_check, bool declare_current);
     Object& resolve_nested_index(Object& element, CalUnit& c, size_t dim_index, ScopeStack& scopes, bool only_check);
     bool try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out);
     bool is_array_literal_candidate(CalUnit& c) const;
