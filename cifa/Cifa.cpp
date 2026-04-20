@@ -6,6 +6,7 @@
 namespace cifa
 {
 
+//构造函数：注册内置函数（print, println, 数学函数等）
 Cifa::Cifa()
 {
     register_function("print", [](ObjectVector& d)
@@ -170,6 +171,7 @@ Cifa::Cifa()
     REGISTER_FUNCTION(log10);
 }
 
+//从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
 Object* Cifa::find_object_from_inner(ScopeStack& scopes, const std::string& name)
 {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
@@ -183,6 +185,7 @@ Object* Cifa::find_object_from_inner(ScopeStack& scopes, const std::string& name
     return nullptr;
 }
 
+//检查作用域栈中是否已存在返回值
 bool Cifa::has_return_value(const ScopeStack& scopes) const
 {
     if (scopes.empty())
@@ -192,6 +195,7 @@ bool Cifa::has_return_value(const ScopeStack& scopes) const
     return scopes.front().count("return") > 0;
 }
 
+//获取作用域栈中的返回值引用
 Object& Cifa::return_value(ScopeStack& scopes)
 {
     if (scopes.empty())
@@ -201,6 +205,21 @@ Object& Cifa::return_value(ScopeStack& scopes)
     return scopes.front()["return"];
 }
 
+//RAII 守卫：在作用域退出时自动弹出运行时调用栈的栈帧
+struct RuntimeFrameGuard
+{
+    std::vector<std::string>& stack;
+    RuntimeFrameGuard(std::vector<std::string>& s) : stack(s) {}
+    ~RuntimeFrameGuard()
+    {
+        if (!stack.empty())
+        {
+            stack.pop_back();
+        }
+    }
+};
+
+//求值适配器：将平面变量表包装为作用域栈后调用 eval_scoped
 Object Cifa::eval(CalUnit& c, std::unordered_map<std::string, Object>& p)
 {
     ScopeStack scopes;
@@ -210,6 +229,7 @@ Object Cifa::eval(CalUnit& c, std::unordered_map<std::string, Object>& p)
     return o;
 }
 
+//核心求值函数：递归遍历语法树节点并执行对应操作
 Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 {
     if (has_runtime_error())
@@ -218,18 +238,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
 
     runtime_call_stack.push_back(format_runtime_frame(c));
-    struct RuntimeFrameGuard
-    {
-        std::vector<std::string>& stack;
-        RuntimeFrameGuard(std::vector<std::string>& s) : stack(s) {}
-        ~RuntimeFrameGuard()
-        {
-            if (!stack.empty())
-            {
-                stack.pop_back();
-            }
-        }
-    } frame_guard(runtime_call_stack);
+    RuntimeFrameGuard frame_guard(runtime_call_stack);
 
     try
     {
@@ -520,6 +529,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
 }
 
+//判断一个 {} 节点是否为数组字面量（而非代码块）
 bool Cifa::is_array_literal_candidate(CalUnit& c) const
 {
     if (c.type != CalUnitType::Union || c.str != "{}")
@@ -542,6 +552,7 @@ bool Cifa::is_array_literal_candidate(CalUnit& c) const
     return true;
 }
 
+//尝试将 {} 节点按数组字面量求值，成功则写入 out 并返回 true
 bool Cifa::try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out)
 {
     if (!is_array_literal_candidate(c))
@@ -563,6 +574,7 @@ bool Cifa::try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out)
     return true;
 }
 
+//递归展开逗号表达式为参数列表
 void Cifa::expand_comma(CalUnit& c1, std::vector<CalUnit>& v)
 {
     if (c1.str == ",")
@@ -581,6 +593,7 @@ void Cifa::expand_comma(CalUnit& c1, std::vector<CalUnit>& v)
     }
 }
 
+//查找语法树最右侧叶节点
 CalUnit& Cifa::find_right_side(CalUnit& c1)
 {
     CalUnit* p = &c1;
@@ -591,6 +604,7 @@ CalUnit& Cifa::find_right_side(CalUnit& c1)
     return *p;
 }
 
+//根据字符推断词法类型（数字、运算符、标识符、分隔符、字符串）
 CalUnitType Cifa::guess_char(char c)
 {
     if (std::string("0123456789").find(c) != std::string::npos)
@@ -962,6 +976,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     return itl0;
 }
 
+//合并花括号 {} 为语法树节点
 void Cifa::combine_curly_bracket(std::list<CalUnit>& ppp)
 {
     while (true)
@@ -981,6 +996,7 @@ void Cifa::combine_curly_bracket(std::list<CalUnit>& ppp)
     }
 }
 
+//合并方括号 [] 为语法树节点，并关联到前置变量名
 void Cifa::combine_square_bracket(std::list<CalUnit>& ppp)
 {
     while (true)
@@ -1008,6 +1024,7 @@ void Cifa::combine_square_bracket(std::list<CalUnit>& ppp)
     }
 }
 
+//合并圆括号 () 为语法树节点，并关联到前置函数名或关键字
 void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
 {
     while (true)
@@ -1054,6 +1071,7 @@ void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
     }
 }
 
+//按优先级合并运算符到语法树，处理左结合和右结合
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
     for (const auto& ops1 : ops)
@@ -1141,6 +1159,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
     }
 }
 
+//处理分号：将分号前的表达式标记为语句并移除分号节点
 void Cifa::combine_semi(std::list<CalUnit>& ppp)
 {
     for (auto it = ppp.begin(); it != ppp.end();)
@@ -1165,6 +1184,7 @@ void Cifa::combine_semi(std::list<CalUnit>& ppp)
     }
 }
 
+//处理 case/default 后的冒号，以及 for 语句的特殊结构
 void Cifa::deal_special_keys(std::list<CalUnit>& ppp)
 {
     //实际上仅处理case, default的冒号
@@ -1216,6 +1236,7 @@ void Cifa::deal_special_keys(std::list<CalUnit>& ppp)
     }
 }
 
+//合并关键字（if/for/while/do/switch/case/else 等）及其子节点
 void Cifa::combine_keys(std::list<CalUnit>& ppp)
 {
     //需注意此时的ppp中已经没有()，因此if, for, while, switch等关键字后面的括号已经被合并
@@ -1309,8 +1330,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
     }
 }
 
-void Cifa::combine_types(std::list<CalUnit>& ppp) {}
-
+//合并脚本中定义的函数：将函数名+参数+函数体合为 Function2 并注册到 functions2
 void Cifa::combine_functions2(std::list<CalUnit>& ppp)
 {
     //合并关键字，从右向左
@@ -1337,69 +1357,35 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp)
     }
 }
 
+//注册宿主程序中的 C++ 函数
 void Cifa::register_function(const std::string& name, func_type func)
 {
     functions[name] = func;
 }
 
+//注册用户自定义数据指针
 void Cifa::register_user_data(const std::string& name, void* p)
 {
     user_data[name] = p;
 }
 
+//注册一个全局参数变量
 void Cifa::register_parameter(const std::string& name, Object o)
 {
     parameters[name] = o;
 }
 
+//获取用户自定义数据指针
 void* Cifa::get_user_data(const std::string& name)
 {
     return user_data[name];
 }
 
-Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, std::unordered_map<std::string, Object>& p)
-{
-    if (functions.count(name))
-    {
-        auto f = functions[name];
-        std::vector<Object> v;
-        for (auto& c : vc)
-        {
-            v.emplace_back(eval(c, p));
-        }
-        return f(v);
-    }
-    else if (functions2.count(name))
-    {
-        auto& f = functions2[name];
-        auto p1 = parameters;    //新的变量表
-        for (int i = 0; i < std::min(vc.size(), f.arguments.size()); i++)
-        {
-            p1[f.arguments[i]] = eval(vc[i], p);
-        }
-        return eval(f.body, p1);
-    }
-    else
-    {
-        return Object();
-    }
-}
-
+//执行函数调用：查找已注册函数或脚本定义函数并执行
 Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes)
 {
     runtime_call_stack.push_back("func " + name + "()");
-    struct RuntimeFrameGuard
-    {
-        std::vector<std::string>& stack;
-        RuntimeFrameGuard(std::vector<std::string>& s) : stack(s) {}
-        ~RuntimeFrameGuard()
-        {
-            if (!stack.empty())
-            {
-                stack.pop_back();
-            }
-        }
-    } frame_guard(runtime_call_stack);
+    RuntimeFrameGuard frame_guard(runtime_call_stack);
 
     try
     {
@@ -1441,6 +1427,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     }
 }
 
+//从平面变量表中获取变量引用（用于语法检查阶段）
 Object& Cifa::get_parameter(CalUnit& c, std::unordered_map<std::string, Object>& p, bool only_check)
 {
     //return p[convert_parameter_name(c, p)];
@@ -1450,6 +1437,7 @@ Object& Cifa::get_parameter(CalUnit& c, std::unordered_map<std::string, Object>&
     return o;
 }
 
+//从作用域栈中获取变量引用（用于运行时求值）
 Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
 {
     if (c.v.size() > 0 && c.v[0].str == "[]")
@@ -1471,6 +1459,7 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     return *o;
 }
 
+//将语法节点转换为变量名字符串（平面变量表版本，处理数组下标）
 std::string Cifa::convert_parameter_name(CalUnit& c, std::unordered_map<std::string, Object>& p, bool only_check)
 {
     std::string parameter_name = c.str;
@@ -1498,6 +1487,7 @@ std::string Cifa::convert_parameter_name(CalUnit& c, std::unordered_map<std::str
     return parameter_name;
 }
 
+//将语法节点转换为变量名字符串（作用域栈版本，处理数组下标）
 std::string Cifa::convert_parameter_name(CalUnit& c, ScopeStack& scopes, bool only_check)
 {
     std::string parameter_name = c.str;
@@ -1525,21 +1515,25 @@ std::string Cifa::convert_parameter_name(CalUnit& c, ScopeStack& scopes, bool on
     return parameter_name;
 }
 
+//检查变量是否存在于平面变量表中
 bool Cifa::check_parameter(CalUnit& c, std::unordered_map<std::string, Object>& p)
 {
     return p.count(convert_parameter_name(c, p));
 }
 
+//检查变量是否存在于作用域栈中
 bool Cifa::check_parameter(CalUnit& c, ScopeStack& scopes)
 {
     return check_parameter(convert_parameter_name(c, scopes), scopes);
 }
 
+//按名称从平面变量表获取变量引用
 Object& Cifa::get_parameter(const std::string& name, std::unordered_map<std::string, Object>& p)
 {
     return p[name];
 }
 
+//按名称从作用域栈获取变量引用
 Object& Cifa::get_parameter(const std::string& name, ScopeStack& scopes)
 {
     auto* o = find_object_from_inner(scopes, name);
@@ -1555,16 +1549,19 @@ Object& Cifa::get_parameter(const std::string& name, ScopeStack& scopes)
     return *o;
 }
 
+//按名称检查变量是否存在于平面变量表中
 bool Cifa::check_parameter(const std::string& name, std::unordered_map<std::string, Object>& p)
 {
     return p.count(name);
 }
 
+//按名称检查变量是否存在于作用域栈中
 bool Cifa::check_parameter(const std::string& name, ScopeStack& scopes)
 {
     return find_object_from_inner(scopes, name) != nullptr;
 }
 
+//获取赋值目标的变量引用，必要时在当前作用域创建新变量
 Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool declare_current)
 {
     if (c.v.size() > 0 && c.v[0].str == "[]")
@@ -1594,6 +1591,7 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     return *o;
 }
 
+//解析数组下标访问（如 a[i]），返回元素引用，必要时自动扩展数组大小
 Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array)
 {
     int index = 0;
@@ -1685,6 +1683,7 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
     return element;
 }
 
+//语法检查：递归检查语法树节点的合法性（运算符、变量、函数、关键字等）
 void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p)
 {
     //若提前return，表示不再检查其下的结构
@@ -2008,12 +2007,14 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
 }
 
+//运行脚本（简化版，使用空变量表）
 Object Cifa::run_script(std::string str)
 {
     std::unordered_map<std::string, Object> p;
     return run_script(str, p);
 }
 
+//运行脚本主入口：词法分析→语法树构建→语法检查→求值执行
 Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>& p)
 {
     errors.clear();
@@ -2089,6 +2090,7 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
     return result;
 }
 
+//获取所有编译期错误的列表
 std::vector<Cifa::ErrorMessage> Cifa::get_errors() const
 {
     std::vector<Cifa::ErrorMessage> es;
@@ -2099,6 +2101,7 @@ std::vector<Cifa::ErrorMessage> Cifa::get_errors() const
     return es;
 }
 
+//将所有错误格式化为字符串
 std::string Cifa::get_errors_str() const
 {
     std::string str;
@@ -2109,6 +2112,7 @@ std::string Cifa::get_errors_str() const
     return str;
 }
 
+//将编译期错误信息输出到 stderr
 void Cifa::print_errors() const
 {
     for (auto& e : errors)
@@ -2117,6 +2121,7 @@ void Cifa::print_errors() const
     }
 }
 
+//格式化一个运行时调用栈帧：显示行号、源码行和插入符位置
 std::string Cifa::format_runtime_frame(const CalUnit& c) const
 {
     std::string label = c.str.empty() ? "<none>" : c.str;
@@ -2146,6 +2151,7 @@ std::string Cifa::format_runtime_frame(const CalUnit& c) const
     return header + line_text + "\n" + caret_line;
 }
 
+//设置运行时错误消息（仅记录第一个错误，后续错误忽略）
 void Cifa::set_runtime_error(const std::string& message)
 {
     if (has_runtime_error())
@@ -2160,6 +2166,7 @@ void Cifa::set_runtime_error(const std::string& message)
     }
 }
 
+//清除运行时错误状态（调用栈、源码行缓存、错误消息）
 void Cifa::clear_runtime_error()
 {
     runtime_call_stack.clear();
@@ -2168,6 +2175,7 @@ void Cifa::clear_runtime_error()
     runtime_error_reported = false;
 }
 
+//输出运行时错误信息和调用栈到 stderr（相同源码行的栈帧会去重）
 void Cifa::print_runtime_error() const
 {
     fprintf(stderr, "Runtime Error: %s\n", runtime_error_message.c_str());

@@ -369,7 +369,6 @@ public:
 private:
     Object eval(CalUnit& c, std::unordered_map<std::string, Object>& p);
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
-    Object run_function(const std::string& name, std::vector<CalUnit>& vc, std::unordered_map<std::string, Object>& p);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
 
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
@@ -385,7 +384,6 @@ private:
     void combine_semi(std::list<CalUnit>& ppp);
     void deal_special_keys(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
-    void combine_types(std::list<CalUnit>& ppp);
     void combine_functions2(std::list<CalUnit>& ppp);
 
     Object& get_parameter(CalUnit& c, std::unordered_map<std::string, Object>& p, bool only_check = false);
