@@ -415,12 +415,14 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "for")    //for(语句1;条件1;语句2){语句3}
         {
             Object o;
+            int loop_count = 0;
             for (
                 eval_scoped(c.v[0].v[0], scopes);    //执行 [语句1]
                 eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
                 eval_scoped(c.v[0].v[2], scopes)     //执行 [语句2]
             )
             {
+                if (++loop_count > max_loop_iterations) { set_runtime_error("for loop exceeded max iterations"); break; }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -431,8 +433,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "while")    //while (条件1) {语句1}
         {
             Object o;
+            int loop_count = 0;
             while (eval_scoped(c.v[0], scopes))    //判断 [条件1]
             {
+                if (++loop_count > max_loop_iterations) { set_runtime_error("while loop exceeded max iterations"); break; }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -443,8 +447,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "do")    //do {语句1} while (条件1);
         {
             Object o;
+            int loop_count = 0;
             do
             {
+                if (++loop_count > max_loop_iterations) { set_runtime_error("do-while loop exceeded max iterations"); break; }
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -970,6 +976,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     if (it->str == br)
     {
         add_error(*it, "unpaired right bracket %s", it->str.c_str());
+        ppp.erase(it);
         return ppp.end();
     }
     auto itl0 = it, itr0 = ppp.end();
@@ -992,6 +999,7 @@ std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::
     if (itr0 == ppp.end())
     {
         add_error(*it, "unpaired left bracket %s", it->str.c_str());
+        ppp.erase(it);
         return ppp.end();
     }
     ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
@@ -1420,6 +1428,11 @@ void* Cifa::get_user_data(const std::string& name)
 //执行函数调用：查找已注册函数或脚本定义函数并执行
 Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes)
 {
+    if ((int)runtime_call_stack.size() > max_call_depth)
+    {
+        set_runtime_error("max call depth exceeded (possible infinite recursion)");
+        return Object();
+    }
     runtime_call_stack.push_back("func " + name + "()");
     RuntimeFrameGuard frame_guard(runtime_call_stack);
 
@@ -1845,11 +1858,21 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                         {
                             get_parameter(c.v[0], p);
                         }
+                        //赋值左侧的下标表达式也需要递归检查
+                        for (auto& sub : c.v[0].v)
+                        {
+                            check_cal_unit(sub, &c.v[0], p);
+                        }
+                    }
+                    else
+                    {
+                        //左侧不是参数（如常量、字符串），仍需递归检查右侧
+                        check_cal_unit(c.v[1], &c, p);
                     }
                     if (c.v[0].type == CalUnitType::Parameter && get_parameter(c.v[0].str, p).type1 == "__"
                         || c.v[0].type != CalUnitType::Parameter)
                     {
-                        add_error(c, "%s cannot be assigned", c.v[0].str.c_str());
+                        add_error(c.v[0], "%s cannot be assigned", c.v[0].str.c_str());
                     }
                 }
             }
@@ -1859,7 +1882,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 {
                     if (c.v[0].type == CalUnitType::Parameter && !check_parameter(c.v[0], p))
                     {
-                        add_error(c, "parameter %s is at right of = but not been initialized", c.v[0].str.c_str());
+                        add_error(c.v[0], "parameter %s is at right of = but not been initialized", c.v[0].str.c_str());
                     }
                     else if (c.v[1].type == CalUnitType::Parameter)
                     {
@@ -1918,15 +1941,53 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         {
             add_error(c, "cannot calculate parameter %s with operands", c.str.c_str());
         }
-        if (father && father->type == CalUnitType::Operator)
+        //带类型前缀的独立声明（如 int i;），注册变量到作用域
+        if (c.with_type)
+        {
+            if (c.v.size() > 0 && c.v[0].str == "[]")
+            {
+                p[c.str];
+            }
+            else
+            {
+                get_parameter(c, p);
+            }
+        }
+        else if (father && father->type == CalUnitType::Operator)
         {
             if (father->str == "::" || father->str == ".")
             {
                 // do nothings
             }
-            else if (father->str == "=")
+            else if (father->str == "=" && father->v.size() >= 1 && &father->v[0] == &c)
             {
-                //带下标的参数只检查基名是否已注册
+                //赋值左侧不需要初始化检查（这是定义/写入）
+            }
+            else
+            {
+                //所有表达式上下文中的参数都需要初始化检查
+                bool ok;
+                if (c.v.size() > 0 && c.v[0].str == "[]")
+                {
+                    ok = check_parameter(c.str, p);
+                }
+                else
+                {
+                    ok = check_parameter(c, p);
+                }
+                if (!ok)
+                {
+                    add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
+                }
+            }
+        }
+        //非运算符子节点中的参数（如 return、函数调用参数等）也检查
+        else if (father && father->type != CalUnitType::Operator && !c.with_type)
+        {
+            if (father->type == CalUnitType::Function
+                || father->type == CalUnitType::Key
+                || father->type == CalUnitType::Union)
+            {
                 bool ok;
                 if (c.v.size() > 0 && c.v[0].str == "[]")
                 {
@@ -1951,12 +2012,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         }
         if (!functions.contains(c.str) && !functions2.contains(c.str))
         {
-            // seems will not happen, functions2 will hold it
             add_error(c, "function %s is not defined", c.str.c_str());
         }
-        if (!functions.contains(c.str) && functions2[c.str].body.type == CalUnitType::None)
+        else if (!functions.contains(c.str) && functions2.contains(c.str) && functions2.at(c.str).body.type == CalUnitType::None)
         {
-            add_error(c, "function %s has no body", c.str.c_str());
+            add_error(c, "function %s is not defined", c.str.c_str());
         }
     }
     else if (c.type == CalUnitType::Key)
@@ -1966,6 +2026,10 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() == 0)
             {
                 add_error(c, "if has no condition");
+            }
+            if (c.v.size() >= 1 && c.v[0].type == CalUnitType::None)
+            {
+                add_error(c, "if has empty condition");
             }
             if (c.v.size() == 1)
             {
@@ -1998,6 +2062,18 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 add_error(c, "for loop condition is not right");
             }
+            //检测 for(;; ) 和 for(; true/1; ) 形式的潜在死循环
+            if (c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 3)
+            {
+                auto& cond = c.v[0].v[1];
+                bool is_always_true = (cond.type == CalUnitType::None)
+                    || (cond.type == CalUnitType::Constant && cond.str == "1")
+                    || (cond.type == CalUnitType::Key && cond.str == "true");
+                if (is_always_true)
+                {
+                    add_error(c, "for loop may cause infinite loop");
+                }
+            }
             if (c.v.size() >= 2 && !c.v[1].is_statement())
             {
                 add_error(c.v[1], "missing ;");
@@ -2008,6 +2084,20 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() == 0)
             {
                 add_error(c, "while has no condition");
+            }
+            if (c.v.size() >= 1 && c.v[0].type == CalUnitType::None)
+            {
+                add_error(c, "while has empty condition");
+            }
+            //检测 while(1)/while(true) 形式的潜在死循环
+            if (c.v.size() >= 1 && !(father && father->str == "do"))
+            {
+                auto& cond = c.v[0];
+                if ((cond.type == CalUnitType::Constant && cond.str == "1")
+                    || (cond.type == CalUnitType::Key && cond.str == "true"))
+                {
+                    add_error(c, "while has constant true condition, may cause infinite loop");
+                }
             }
             if (c.v.size() == 1 && !(father && father->str == "do"))
             {
@@ -2147,6 +2237,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
     for (auto& c1 : c.v)
     {
+        //=的子节点已在上方显式处理过，跳过避免重复检查
+        if (c.type == CalUnitType::Operator && c.str == "=" && c.un_combine == false)
+        {
+            continue;
+        }
         check_cal_unit(c1, &c, p);
     }
 }
@@ -2187,7 +2282,7 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
             auto p1 = parameters;
             for (auto& a : func2.arguments)
             {
-                p[a] = Object();
+                p1[a] = Object();
             }
             check_cal_unit(func2.body, nullptr, p1);
         }
@@ -2245,24 +2340,40 @@ std::vector<Cifa::ErrorMessage> Cifa::get_errors() const
     return es;
 }
 
-//将所有错误格式化为字符串
+//将所有错误格式化为字符串（带源码行和插入符）
 std::string Cifa::get_errors_str() const
 {
     std::string str;
     for (auto& e : errors)
     {
-        str += "Error (" + std::to_string(e.line) + ", " + std::to_string(e.col) + "): " + e.message + "\n";
+        str += "Syntax Error: " + e.message + "\n";
+        if (e.line > 0 && e.line <= runtime_source_lines.size())
+        {
+            const std::string& line_text = runtime_source_lines[e.line - 1];
+            std::string header = "  at line " + std::to_string(e.line) + ", col " + std::to_string(e.col) + ": ";
+            str += header + line_text + "\n";
+            size_t arrow_col = e.col > 0 ? (e.col - 1) : 0;
+            std::string caret_line(header.size(), ' ');
+            const size_t prefix_len = std::min(arrow_col, line_text.size());
+            for (size_t i = 0; i < prefix_len; ++i)
+            {
+                caret_line += (line_text[i] == '\t') ? '\t' : ' ';
+            }
+            caret_line += "^";
+            str += caret_line + "\n";
+        }
+        else
+        {
+            str += "  at line " + std::to_string(e.line) + ", col " + std::to_string(e.col) + "\n";
+        }
     }
     return str;
 }
 
-//将编译期错误信息输出到 stderr
+//将编译期错误信息输出到 stderr（委托 get_errors_str() 避免重复逻辑）
 void Cifa::print_errors() const
 {
-    for (auto& e : errors)
-    {
-        fprintf(stderr, "Error (%zu, %zu): %s\n", e.line, e.col, e.message.c_str());
-    }
+    fprintf(stderr, "%s", get_errors_str().c_str());
 }
 
 //格式化一个运行时调用栈帧：显示行号、源码行和插入符位置

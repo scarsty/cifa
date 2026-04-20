@@ -218,13 +218,11 @@ print(sin(degree*pi/180));
     auto c = cifa.run_script(str1);
     if (cifa.has_error())    //检查语法错误
     {
-        //可以选择输出语法错误
-        //一般错误也会在stderr输出
-        auto errors = cifa.get_errors();
-        for (auto e : errors)
-        {
-            std::print("error({}, {}): {}\n", e.line, e.col, e.message);
-        }
+        //可以选择输出语法错误字符串（已包含源码行和错误位置指示）
+        std::string err_str = cifa.get_errors_str();
+        std::cerr << err_str;
+        //也可以直接打印到 stderr
+        //cifa.print_errors();
     }
     //无语法错误，判断结果是否是一个数值
     if (c.isNumber())
@@ -238,6 +236,168 @@ print(sin(degree*pi/180));
     }
 ```
 
+### 数组
+
+#### 数组字面量
+
+使用 `{}` 花括号构造数组，元素之间用逗号分隔。元素类型可以混合（数字、字符串等）：
+
+```c++
+arr = {1, 2, 3, 4, 5};
+mixed = {1, "hello", 3.14, "world"};
+```
+
+#### 数组下标访问
+
+使用整数下标访问元素，下标从 0 开始：
+
+```c++
+arr = {10, 20, 30};
+int x = arr[0];    // x = 10
+arr[1] = 99;       // 修改元素
+
+int i = 2;
+double v = arr[i]; // 变量作为下标
+```
+
+#### 多维数组
+
+数组元素本身也可以是数组（嵌套）：
+
+```c++
+grid = {{1, 2}, {3, 4}};
+int v = grid[1][0];    // v = 3
+```
+
+#### 数组大小
+
+使用内置函数 `size()` 获取数组元素个数：
+
+```c++
+arr = {1, 2, 3, 4, 5};
+int n = size(arr);    // n = 5
+```
+
+#### 从宿主注册向量
+
+宿主程序可以将 `std::vector<double>` 注册为脚本内的数组变量：
+
+```c++
+c1.register_vector("v", std::vector<double>{1.2, 1.45, 77.3});
+```
+
+脚本中即可 `v[0]`、`v[1]` 访问。
+
+### 字符串键映射（Map）
+
+变量可通过字符串下标使用，此时它会变成一个 `string → Object` 的映射。
+
+```c++
+dict["name"] = "Alice";
+dict["age"]  = 30;
+
+string key = "name";
+string n = dict[key];    // n = "Alice"
+double a = dict["age"];  // a = 30
+```
+
+`size(dict)` 返回 map 中的元素个数。
+
+访问不存在的 key 后使用该值会触发运行时错误。
+
+### 字符串
+
+字符串长度可用 `size()` 获取：
+
+```c++
+string s = "hello";
+int n = size(s);    // n = 5
+```
+
+字符串拼接用 `+`：
+
+```c++
+string s = "hello" + " " + "world";
+```
+
+类型转换：
+- `to_string(3.14)` → 将数值转为字符串
+- `to_number("3.14")` → 将字符串转为数值
+
+### 内置函数汇总
+
+| 函数 | 说明 |
+|------|------|
+| `print(...)` | 输出一个或多个值，不换行 |
+| `println(...)` | 输出一个或多个值，最后换行 |
+| `to_string(x)` | 将数值转为字符串 |
+| `to_number(s)` | 将字符串转为数值 |
+| `size(x)` | 返回数组、map 或字符串的大小 |
+| `pow(x, y)` | x 的 y 次方 |
+| `max(a, b, ...)` | 多个数中的最大值 |
+| `min(a, b, ...)` | 多个数中的最小值 |
+| `random()` | `[0, 1)` 均匀随机数；`random(n)` 返回 `[0, n)`；`random(a, b)` 返回 `[a, b)` |
+| `ifv(cond, a, b)` | 三元选择，等价于 `cond ? a : b` |
+| `abs / sqrt / round / floor / ceil` | 常见数学函数 |
+| `sin / cos / tan / asin / acos / atan` | 三角函数 |
+| `sinh / cosh / tanh` | 双曲函数 |
+| `exp / log / log10` | 指数对数函数 |
+
+### 错误处理
+
+Cifa 将错误分为两类：**语法错误**（静态检查阶段）和**运行时错误**（执行阶段）。
+
+#### 语法错误
+
+```c++
+if (c.has_error())
+{
+    // 返回带源码行和位置指示的错误字符串
+    std::string err = c.get_errors_str();
+    std::cerr << err;
+
+    // 或者直接打印到 stderr
+    // c.print_errors();
+
+    // 也可逐条访问
+    for (auto& e : c.get_errors())
+    {
+        // e.line, e.col, e.message
+    }
+}
+```
+
+错误输出示例：
+```
+Syntax Error: parameter arr is at right of = but not been initialized
+  at line 3, col 5:     arr[0] = 1;
+                        ^
+```
+
+#### 运行时错误
+
+执行阶段的错误（如类型不兼容、访问不存在的 map 键等），`run_script` 的返回值会携带错误标记：
+
+```c++
+auto result = c.run_script(script);
+if (result.getSpecialType() == "Error")
+{
+    // 运行时错误，可打印调用栈
+    c.print_runtime_error();
+
+    // 或者获取错误字符串
+    std::string err = c.get_runtime_error_str();
+}
+```
+
+运行时错误输出示例（含调用栈）：
+```
+Runtime Error: <empty> to double
+  at line 3, col 17:     return sqrt(bad);
+                                     ^
+  at line 3, col 12:     return sqrt(bad);
+                                 ^
+```
 
 ## 其他
 

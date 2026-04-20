@@ -313,6 +313,9 @@ private:
     bool output_error = true;
 
 public:
+    int max_loop_iterations = 10000000;    //循环最大迭代次数，防止死循环
+    int max_call_depth = 1000;             //函数最大调用深度，防止无限递归
+
     Cifa();
 
     void register_function(const std::string& name, func_type func);

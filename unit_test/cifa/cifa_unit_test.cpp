@@ -372,6 +372,245 @@ bool mixed_array_literal_test()
     return o.hasValue() && std::fabs(o.toDouble() - 4.14) < 1e-9;
 }
 
+bool static_syntax_error_test()
+{
+    // 辅助 lambda：运行脚本并返回错误字符串（禁止 stderr 输出避免干扰测试输出）
+    auto get_errors = [](const std::string& script) -> std::string
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script(script);
+        return c.get_errors_str();
+    };
+
+    // 检查 get_errors() 返回的错误列表是否包含某关键词
+    auto get_error_messages = [](const std::string& script) -> std::vector<Cifa::ErrorMessage>
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script(script);
+        return c.get_errors();
+    };
+
+    auto expect_error = [&](const std::string& label, const std::string& script, const std::string& keyword) -> bool
+    {
+        std::string err = get_errors(script);
+        std::cerr << "  [" << label << "]:\n";
+        if (err.find("Syntax Error:") == std::string::npos || err.find(keyword) == std::string::npos)
+        {
+            std::cerr << "    FAIL: expected keyword \"" << keyword << "\" in error output\n";
+            if (!err.empty()) { std::cerr << "    Got:\n" << err; }
+            else { std::cerr << "    (no error produced)\n"; }
+            return false;
+        }
+        // 确认错误字符串包含源码行指示 (^ caret)
+        if (err.find("^") == std::string::npos)
+        {
+            std::cerr << "    FAIL: missing caret (^) in error output\n";
+            return false;
+        }
+        std::cerr << err;
+        return true;
+    };
+
+    auto expect_no_error = [&](const std::string& label, const std::string& script) -> bool
+    {
+        std::string err = get_errors(script);
+        std::cerr << "  [" << label << "]: ";
+        if (!err.empty())
+        {
+            std::cerr << "FAIL unexpected error:\n" << err;
+            return false;
+        }
+        std::cerr << "OK\n";
+        return true;
+    };
+
+    bool ok = true;
+
+    // ==== 应触发静态错误的场景 ====
+
+    // 1. 赋值右侧使用未初始化变量
+    ok &= expect_error("uninitialized var in assign",
+        R"(int y = undef;)",
+        "not been initialized");
+
+    // 2. 赋值右侧使用未初始化变量（多行，验证行号定位）
+    ok &= expect_error("uninitialized var multiline",
+        "int x = 10;\nint y = undef;\n",
+        "not been initialized");
+
+    // 3. 调用未定义的函数
+    ok &= expect_error("undefined function",
+        R"(return foo(1, 2);)",
+        "not defined");
+
+    // 4. 括号不匹配（右括号多余）
+    ok &= expect_error("unpaired right paren",
+        R"(int x = (1 + 2));)",
+        "unpaired");
+
+    // 5. 括号不匹配（左括号多余）
+    ok &= expect_error("unpaired left paren",
+        R"(int x = ((1 + 2);)",
+        "unpaired");
+
+    // 6. 赋值给常量
+    ok &= expect_error("assign to constant",
+        R"(123 = 5;)",
+        "cannot be assigned");
+
+    // 7. 赋值给字符串字面量
+    ok &= expect_error("assign to string literal",
+        "\"hello\" = 5;",
+        "cannot be assigned");
+
+    // 8. 独立的 else（没有对应的 if）
+    ok &= expect_error("else without if",
+        R"(else { int x = 1; })",
+        "else has no if");
+
+    // 9. 三元运算符缺少 :
+    ok &= expect_error("ternary missing colon",
+        R"(int x = 1; int y = x ? 10;)",
+        "no :");
+
+    // 10. 错误定位验证：检查 ErrorMessage 的行列号
+    {
+        // 第2行第9列（"y = undef" 的 "undef"）
+        auto errs = get_error_messages("int x = 10;\nint y = undef;\n");
+        bool found_line2 = false;
+        for (auto& e : errs)
+        {
+            if (e.line == 2 && e.message.find("undef") != std::string::npos)
+            {
+                found_line2 = true;
+                break;
+            }
+        }
+        if (!found_line2)
+        {
+            std::cerr << "  FAIL [error line number]: expected error at line 2 mentioning 'undef'\n";
+            for (auto& e : errs)
+            {
+                std::cerr << "    Got line " << e.line << ", col " << e.col << ": " << e.message << "\n";
+            }
+            ok = false;
+        }
+    }
+
+    // ==== 不应触发静态错误的场景 ====
+
+    // 11. 正常脚本
+    ok &= expect_no_error("valid script",
+        R"(int x = 10; int y = x + 5; return y;)");
+
+    // 12. 正常 for 循环
+    ok &= expect_no_error("valid for loop",
+        R"(int s = 0; for (int i = 0; i < 5; i++) { s += i; } return s;)");
+
+    // 13. 正常函数调用
+    ok &= expect_no_error("valid function call",
+        R"(return abs(-5);)");
+
+    // 14. 正常数组操作
+    ok &= expect_no_error("valid array",
+        R"(arr = {1,2,3}; return arr[0] + arr[2];)");
+
+    // 15. 正常字符串 Map
+    ok &= expect_no_error("valid map",
+        R"(dict["k"] = 42; return dict["k"];)");
+
+    // 16. 正常三元运算符
+    ok &= expect_no_error("valid ternary",
+        R"(int x = 1; return x ? 10 : 20;)");
+
+    // 17. 正常自定义函数
+    ok &= expect_no_error("valid user function",
+        "myfun(i) { return i * i; }\nreturn myfun(5);");
+
+    // 18. 正常嵌套块
+    ok &= expect_no_error("valid nested block",
+        R"(int x = 1; { int y = x + 1; x = y; } return x;)");
+
+    // ==== 深层未初始化变量检测 ====
+
+    // 19. 表达式中嵌套使用未初始化变量（加法右侧）
+    ok &= expect_error("uninitialized var in expr",
+        R"(int x = 1; int y = x + undef;)",
+        "not been initialized");
+
+    // 20. 函数调用参数中使用未初始化变量
+    ok &= expect_error("uninitialized var in func arg",
+        R"(return abs(undef);)",
+        "not been initialized");
+
+    // 21. return 语句中使用未初始化变量
+    ok &= expect_error("uninitialized var in return",
+        R"(return undef;)",
+        "not been initialized");
+
+    // 22. 条件表达式中使用未初始化变量
+    ok &= expect_error("uninitialized var in condition",
+        R"(if (undef) { int x = 1; })",
+        "not been initialized");
+
+    // 23. 复合表达式中使用未初始化变量
+    ok &= expect_error("uninitialized var in complex expr",
+        R"(int x = 1; int y = (x * 2) + undef;)",
+        "not been initialized");
+
+    // 24. 正常：已初始化变量在表达式中使用不应报错
+    ok &= expect_no_error("valid var in expr",
+        R"(int x = 1; int y = 2; int z = x + y; return z;)");
+
+    // 25. 正常：数组下标中使用已初始化变量不应报错
+    ok &= expect_no_error("valid var in subscript",
+        R"(arr = {10, 20, 30}; int i = 1; return arr[i];)");
+
+    // ==== 空条件与死循环检测 ====
+
+    // 26. if 空条件
+    ok &= expect_error("if empty condition",
+        R"(if () { int x = 1; })",
+        "empty condition");
+
+    // 27. while 空条件
+    ok &= expect_error("while empty condition",
+        R"(while () { int x = 1; })",
+        "empty condition");
+
+    // 28. while(1) 死循环
+    ok &= expect_error("while(1) infinite loop",
+        R"(while (1) { int x = 1; })",
+        "infinite loop");
+
+    // 29. while(true) 死循环
+    ok &= expect_error("while(true) infinite loop",
+        R"(while (true) { int x = 1; })",
+        "infinite loop");
+
+    // 30. for(;;) 死循环
+    ok &= expect_error("for(;;) infinite loop",
+        R"(for (;;) { int x = 1; })",
+        "infinite loop");
+
+    // 31. for(;1;) 死循环
+    ok &= expect_error("for(;1;) infinite loop",
+        R"(int i = 0; for (; 1; i++) { int x = 1; })",
+        "infinite loop");
+
+    // 32. 正常 while 不应报死循环
+    ok &= expect_no_error("valid while loop",
+        R"(int i = 0; while (i < 5) { i++; } return i;)");
+
+    // 33. 正常 for 不应报死循环
+    ok &= expect_no_error("valid for loop no warning",
+        R"(int s = 0; for (int i = 0; i < 10; i++) { s += i; } return s;)");
+
+    return ok;
+}
+
 bool string_key_map_test()
 {   // 字符串下标（map 语义）测试
     Cifa c;
@@ -406,6 +645,49 @@ bool string_key_map_test()
     return o2.getSpecialType() == "Error";
 }
 
+bool infinite_loop_protection_test()
+{
+    // while loop with variable condition (checker can't detect as infinite)
+    {
+        Cifa c1;
+        c1.set_output_error(false);
+        c1.max_loop_iterations = 100;
+        auto o = c1.run_script("int x = 0; int go = 1; while(go) { x++; } return x;");
+        if (o.getSpecialType() != "Error") return false;
+    }
+    // for loop with variable condition
+    {
+        Cifa c1;
+        c1.set_output_error(false);
+        c1.max_loop_iterations = 100;
+        auto o = c1.run_script("int x = 0; int go = 1; for(; go;) { x++; } return x;");
+        if (o.getSpecialType() != "Error") return false;
+    }
+    // do-while loop with variable condition
+    {
+        Cifa c1;
+        c1.set_output_error(false);
+        c1.max_loop_iterations = 100;
+        auto o = c1.run_script("int x = 0; int go = 1; do { x++; } while(go); return x;");
+        if (o.getSpecialType() != "Error") return false;
+    }
+    // infinite recursion should be stopped
+    {
+        Cifa c1;
+        c1.max_call_depth = 10;
+        auto o = c1.run_script("f(n) { return f(n); } return f(1);");
+        if (o.getSpecialType() != "Error") return false;
+    }
+    // normal loops within limit should work fine
+    {
+        Cifa c1;
+        c1.max_loop_iterations = 1000;
+        auto o = c1.run_script("int s = 0; for(int i = 0; i < 500; i++) { s += i; } return s;");
+        if (!o.hasValue() || o.toInt() != 124750) return false;
+    }
+    return true;
+}
+
 int main()
 {
     int i = 0;
@@ -414,11 +696,11 @@ int main()
         i++;
         if (func())
         {
-            std::cout << "✅ " << i << ". " << name << " success\n";
+            std::cout << "\xe2\x9c\x85 " << i << ". " << name << " success" << std::endl;
         }
         else
         {
-            std::cerr << "❌ " << i << ". " << name << " failed\n";
+            std::cerr << "\xe2\x9d\x8c " << i << ". " << name << " failed" << std::endl;
         }
     };
 
@@ -444,5 +726,7 @@ int main()
     run_test("runtime_error_stack_test", runtime_error_stack_test);
     run_test("mixed_array_literal_test", mixed_array_literal_test);
     run_test("string_key_map_test", string_key_map_test);
+    run_test("static_syntax_error_test", static_syntax_error_test);
+    run_test("infinite_loop_protection_test", infinite_loop_protection_test);
     return 0;
 }
