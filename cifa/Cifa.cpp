@@ -9,35 +9,45 @@ namespace cifa
 //构造函数：注册内置函数（print, println, 数学函数等）
 Cifa::Cifa()
 {
-    register_function("print", [](ObjectVector& d)
+    //输出辅助：先检查数字再检查字符串，不可输出类型调 toString 使报错显示 "<empty> to string"
+    //返回 false 表示遇到了不可输出的类型（已触发 runtime error）
+    auto print_object = [](const Object& d1) -> bool
+    {
+        if (d1.isNumber())
+        {
+            std::cout << d1.toDouble();
+            return true;
+        }
+        if (d1.isType<std::string>())
+        {
+            std::cout << d1.toString();
+            return true;
+        }
+        //不可输出类型：触发运行时错误，不输出值
+        d1.toString();
+        return false;
+    };
+    register_function("print", [print_object](ObjectVector& d)
         {
             for (auto& d1 : d)
             {
-                if (d1.isType<std::string>())
-                {
-                    std::cout << d1.toString();
-                }
-                else
-                {
-                    std::cout << d1.toDouble();
-                }
+                if (!print_object(d1)) { break; }
             }
             return Object(double(d.size()));
         });
-    register_function("println", [](ObjectVector& d)
+    register_function("println", [print_object](ObjectVector& d)
         {
+            bool ok = true;
             for (auto& d1 : d)
             {
-                if (d1.isType<std::string>())
+                if (!print_object(d1))
                 {
-                    std::cout << d1.toString();
-                }
-                else
-                {
-                    std::cout << d1.toDouble();
+                    ok = false;
+                    break;
                 }
             }
-            std::cout << "\n";
+            //只有全部成功才输出换行，避免出错后多出空行
+            if (ok) { std::cout << "\n"; }
             return Object(double(d.size()));
         });
     register_function("to_string", [](ObjectVector& d)
@@ -244,8 +254,26 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         return Object("RuntimeError", "Error");
     }
 
-    runtime_call_stack.push_back(format_runtime_frame(c));
-    RuntimeFrameGuard frame_guard(runtime_call_stack);
+    //Union（代码块/数组字面量）不入调用栈，避免根块的行号污染错误报告
+    const bool push_frame = (c.type != CalUnitType::Union);
+    if (push_frame)
+    {
+        runtime_call_stack.push_back(format_runtime_frame(c));
+    }
+    struct ConditionalFrameGuard
+    {
+        std::vector<std::string>& stack;
+        bool active;
+        ConditionalFrameGuard(std::vector<std::string>& s, bool a) :
+            stack(s), active(a) {}
+        ~ConditionalFrameGuard()
+        {
+            if (active && !stack.empty())
+            {
+                stack.pop_back();
+            }
+        }
+    } frame_guard(runtime_call_stack, push_frame);
 
     if (has_return_value(scopes))
     {

@@ -385,11 +385,25 @@ bool string_key_map_test()
         double a = dict[age];
         string score = "score";
         double s = dict[score];
-        println("Name: ", n, ", Age: ", a, ", Score: ", s); // 输出 "Name: Alice, Age: 30, Score: 95.5"
+        println("Name: ", n, ", Age: ", a, ", Score: ", s);
         return a + s;  // 30 + 95.5 = 125.5
     )";
     auto o = c.run_script(script);
-    return o.hasValue() && std::fabs(o.toDouble() - 125.5) < 1e-9;
+    if (!o.hasValue() || std::fabs(o.toDouble() - 125.5) > 1e-9)
+    {
+        return false;
+    }
+
+    // 访问不存在的 key 后尝试输出，应触发 runtime error
+    Cifa c2;
+    std::string script2 = R"(
+        dict["name"] = "Alice";
+        n1 = dict["name1"];
+        println("Non-existent key: ", n1);
+        return 0;
+    )";
+    auto o2 = c2.run_script(script2);
+    return o2.getSpecialType() == "Error";
 }
 
 int main()
