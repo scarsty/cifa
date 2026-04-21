@@ -236,16 +236,6 @@ struct RuntimeFrameGuard
     }
 };
 
-//求值适配器：将平面变量表包装为作用域栈后调用 eval_scoped
-Object Cifa::eval(CalUnit& c, std::unordered_map<std::string, Object>& p)
-{
-    ScopeStack scopes;
-    scopes.emplace_back(p);
-    auto o = eval_scoped(c, scopes);
-    p = std::move(scopes.front());
-    return o;
-}
-
 //对数组或 map 对象执行内置方法（push_back / erase / contains 等）
 //obj 必须是对原始变量的引用；args 是已展开的参数列表（CalUnit）
 Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes)
@@ -273,8 +263,14 @@ Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, st
             if (args.size() >= 2)
             {
                 int idx = eval_scoped(args[0], scopes).toInt();
-                if (idx < 0) idx = 0;
-                if (idx > (int)arr.size()) idx = (int)arr.size();
+                if (idx < 0)
+                {
+                    idx = 0;
+                }
+                if (idx > (int)arr.size())
+                {
+                    idx = (int)arr.size();
+                }
                 arr.insert(arr.begin() + idx, eval_scoped(args[1], scopes));
             }
             return Object(double(arr.size()));
@@ -457,7 +453,22 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
             }
             //.和::作为取成员运算符时，目前只保证一层
-            if (c.str == "::") { return get_parameter(c.v[0].str + "::" + c.v[1].str, scopes); }
+            if (c.str == "::")
+            {
+                const auto flat_name = c.v[0].str + "::" + c.v[1].str;
+                auto* flat = find_object_from_inner(scopes, flat_name);
+                if (flat != nullptr) { return *flat; }
+                //回退到 ObjectMap 访问（register_parameter 注册的 map）
+                auto* base = find_object_from_inner(scopes, c.v[0].str);
+                if (base != nullptr && base->isType<ObjectMap>())
+                {
+                    auto& m = base->ref<ObjectMap>();
+                    auto& elem = m[c.v[1].str];
+                    elem.name = flat_name;
+                    return elem;
+                }
+                return get_parameter(flat_name, scopes);
+            }
             if (c.str == "*") { return mul(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "/") { return div(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "%") { return mod(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
@@ -561,7 +572,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 eval_scoped(c.v[0].v[2], scopes)     //执行 [语句2]
             )
             {
-                if (++loop_count > max_loop_iterations) { set_runtime_error("for loop exceeded max iterations"); break; }
+                if (++loop_count > max_loop_iterations)
+                {
+                    set_runtime_error("for loop exceeded max iterations");
+                    break;
+                }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -575,7 +590,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             int loop_count = 0;
             while (eval_scoped(c.v[0], scopes))    //判断 [条件1]
             {
-                if (++loop_count > max_loop_iterations) { set_runtime_error("while loop exceeded max iterations"); break; }
+                if (++loop_count > max_loop_iterations)
+                {
+                    set_runtime_error("while loop exceeded max iterations");
+                    break;
+                }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -589,7 +608,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             int loop_count = 0;
             do
             {
-                if (++loop_count > max_loop_iterations) { set_runtime_error("do-while loop exceeded max iterations"); break; }
+                if (++loop_count > max_loop_iterations)
+                {
+                    set_runtime_error("do-while loop exceeded max iterations");
+                    break;
+                }
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
@@ -1588,28 +1611,19 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     else if (functions2.count(name))
     {
         auto& f = functions2[name];
-        auto p1 = parameters;    //新的变量表
-        for (int i = 0; i < std::min(vc.size(), f.arguments.size()); i++)
+        ScopeStack fn_scopes;
+        fn_scopes.emplace_back(parameters);
+        for (size_t i = 0; i < std::min(vc.size(), f.arguments.size()); i++)
         {
-            p1[f.arguments[i]] = eval_scoped(vc[i], scopes);
+            fn_scopes.back()[f.arguments[i]] = eval_scoped(vc[i], scopes);
         }
-        return eval(f.body, p1);
+        return eval_scoped(f.body, fn_scopes);
     }
     else
     {
         set_runtime_error("function " + name + " is not defined");
         return Object();
     }
-}
-
-//从平面变量表中获取变量引用（用于语法检查阶段）
-Object& Cifa::get_parameter(CalUnit& c, std::unordered_map<std::string, Object>& p, bool only_check)
-{
-    //return p[convert_parameter_name(c, p)];
-    auto name = convert_parameter_name(c, p, only_check);
-    auto& o = p[name];
-    o.name = name;
-    return o;
 }
 
 //从作用域栈中获取变量引用（用于运行时求值）
@@ -1619,93 +1633,17 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     {
         return resolve_indexed_parameter(c, scopes, only_check, false, true);
     }
-
-    auto name = convert_parameter_name(c, scopes, only_check);
-    auto* o = find_object_from_inner(scopes, name);
+    auto* o = find_object_from_inner(scopes, c.str);
     if (o == nullptr)
     {
         if (scopes.empty())
         {
             scopes.emplace_back();
         }
-        o = &scopes.back()[name];
+        o = &scopes.back()[c.str];
     }
-    o->name = name;
+    o->name = c.str;
     return *o;
-}
-
-//将语法节点转换为变量名字符串（平面变量表版本，处理数组下标）
-std::string Cifa::convert_parameter_name(CalUnit& c, std::unordered_map<std::string, Object>& p, bool only_check)
-{
-    std::string parameter_name = c.str;
-    if (c.v.size() > 0 && c.v[0].str == "[]")
-    {
-        if (c.v[0].v.size() > 0)
-        {
-            //检查语法树时不处理坐标
-            if (!only_check)
-            {
-                auto e = eval(c.v[0].v[0], p);
-                std::string str;
-                if (e.isType<std::string>())
-                {
-                    str = e.toString();
-                }
-                else
-                {
-                    str = std::to_string(e.toInt());
-                }
-                parameter_name += "[" + str + "]";
-            }
-        }
-    }
-    return parameter_name;
-}
-
-//将语法节点转换为变量名字符串（作用域栈版本，处理数组下标）
-std::string Cifa::convert_parameter_name(CalUnit& c, ScopeStack& scopes, bool only_check)
-{
-    std::string parameter_name = c.str;
-    if (c.v.size() > 0 && c.v[0].str == "[]")
-    {
-        if (c.v[0].v.size() > 0)
-        {
-            //检查语法树时不处理坐标
-            if (!only_check)
-            {
-                auto e = eval_scoped(c.v[0].v[0], scopes);
-                std::string str;
-                if (e.isType<std::string>())
-                {
-                    str = e.toString();
-                }
-                else
-                {
-                    str = std::to_string(e.toInt());
-                }
-                parameter_name += "[" + str + "]";
-            }
-        }
-    }
-    return parameter_name;
-}
-
-//检查变量是否存在于平面变量表中
-bool Cifa::check_parameter(CalUnit& c, std::unordered_map<std::string, Object>& p)
-{
-    return p.count(convert_parameter_name(c, p));
-}
-
-//检查变量是否存在于作用域栈中
-bool Cifa::check_parameter(CalUnit& c, ScopeStack& scopes)
-{
-    return check_parameter(convert_parameter_name(c, scopes), scopes);
-}
-
-//按名称从平面变量表获取变量引用
-Object& Cifa::get_parameter(const std::string& name, std::unordered_map<std::string, Object>& p)
-{
-    return p[name];
 }
 
 //按名称从作用域栈获取变量引用
@@ -1724,12 +1662,6 @@ Object& Cifa::get_parameter(const std::string& name, ScopeStack& scopes)
     return *o;
 }
 
-//按名称检查变量是否存在于平面变量表中
-bool Cifa::check_parameter(const std::string& name, std::unordered_map<std::string, Object>& p)
-{
-    return p.count(name);
-}
-
 //按名称检查变量是否存在于作用域栈中
 bool Cifa::check_parameter(const std::string& name, ScopeStack& scopes)
 {
@@ -1744,7 +1676,7 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
         return resolve_indexed_parameter(c, scopes, false, declare_current, false);
     }
 
-    auto name = convert_parameter_name(c, scopes);
+    const auto& name = c.str;
     if (scopes.empty())
     {
         scopes.emplace_back();
@@ -1872,7 +1804,6 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
             index = 0;
         }
     }
-    const std::string legacy_name = c.str + "[" + std::to_string(index) + "]";
     const bool is_decl_array = declaration_as_array && c.with_type && c.suffix;
 
     if (scopes.empty())
@@ -1908,23 +1839,13 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
             arr.resize(size_t(index + 1));
         }
         auto& element = arr[size_t(index)];
-        element.name = legacy_name;
+        element.name = c.str + "[" + std::to_string(index) + "]";
         //多维数组：如果还有后续的 [] 下标，递归索引子数组
         if (c.v.size() > 1)
         {
             return resolve_nested_index(element, c, 1, scopes, only_check);
         }
         return element;
-    }
-
-    if (!declare_current)
-    {
-        auto* legacy = find_object_from_inner(scopes, legacy_name);
-        if (legacy != nullptr)
-        {
-            legacy->name = legacy_name;
-            return *legacy;
-        }
     }
 
     if (base == nullptr)
@@ -1953,7 +1874,7 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
         arr.resize(size_t(index + 1));
     }
     auto& element = arr[size_t(index)];
-    element.name = legacy_name;
+    element.name = c.str + "[" + std::to_string(index) + "]";
     //多维数组：如果还有后续的 [] 下标，递归索引子数组
     if (c.v.size() > 1)
     {
@@ -1988,15 +1909,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                     if (c.v[0].type == CalUnitType::Parameter)
                     {
                         check_cal_unit(c.v[1], &c, p);    //here make sure no undefined parameters at right of "="
-                        //带下标的参数只注册基名，下标在运行时解析
-                        if (c.v[0].v.size() > 0 && c.v[0].v[0].str == "[]")
-                        {
-                            p[c.v[0].str];
-                        }
-                        else
-                        {
-                            get_parameter(c.v[0], p);
-                        }
+                        p[c.v[0].str].name = c.v[0].str;
                         //赋值左侧的下标表达式也需要递归检查
                         for (auto& sub : c.v[0].v)
                         {
@@ -2008,7 +1921,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                         //左侧不是参数（如常量、字符串），仍需递归检查右侧
                         check_cal_unit(c.v[1], &c, p);
                     }
-                    if (c.v[0].type == CalUnitType::Parameter && get_parameter(c.v[0].str, p).type1 == "__"
+                    if (c.v[0].type == CalUnitType::Parameter && p[c.v[0].str].type1 == "__"
                         || c.v[0].type != CalUnitType::Parameter)
                     {
                         add_error(c.v[0], "%s cannot be assigned", c.v[0].str.c_str());
@@ -2019,13 +1932,23 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 if (c.v.size() == 2)
                 {
-                    if (c.v[0].type == CalUnitType::Parameter && !check_parameter(c.v[0], p))
+                    if (c.v[0].type == CalUnitType::Parameter && !p.count(c.v[0].str))
                     {
                         add_error(c.v[0], "parameter %s is at right of = but not been initialized", c.v[0].str.c_str());
                     }
                     else if (c.v[1].type == CalUnitType::Parameter)
                     {
-                        if (!check_parameter(c.v[0].str + "::" + c.v[1].str, p))
+                        bool ok = p.count(c.v[0].str + "::" + c.v[1].str);
+                        if (!ok)
+                        {
+                            //若基变量是 ObjectMap，检查 key 是否存在于 map 中
+                            auto& base_obj = p[c.v[0].str];
+                            if (base_obj.isType<ObjectMap>() && base_obj.ref<ObjectMap>().count(c.v[1].str))
+                            {
+                                ok = true;
+                            }
+                        }
+                        if (!ok)
                         {
                             add_error(c.v[0], "parameter %s in %s is at right of = but not been initialized", c.v[1].str.c_str(), c.v[0].str.c_str());
                         }
@@ -2083,14 +2006,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         //带类型前缀的独立声明（如 int i;），注册变量到作用域
         if (c.with_type)
         {
-            if (c.v.size() > 0 && c.v[0].str == "[]")
-            {
-                p[c.str];
-            }
-            else
-            {
-                get_parameter(c, p);
-            }
+            p[c.str].name = c.str;
         }
         else if (father && father->type == CalUnitType::Operator)
         {
@@ -2105,16 +2021,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             else
             {
                 //所有表达式上下文中的参数都需要初始化检查
-                bool ok;
-                if (c.v.size() > 0 && c.v[0].str == "[]")
-                {
-                    ok = check_parameter(c.str, p);
-                }
-                else
-                {
-                    ok = check_parameter(c, p);
-                }
-                if (!ok)
+                if (!p.count(c.str))
                 {
                     add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
                 }
@@ -2127,16 +2034,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 || father->type == CalUnitType::Key
                 || father->type == CalUnitType::Union)
             {
-                bool ok;
-                if (c.v.size() > 0 && c.v[0].str == "[]")
-                {
-                    ok = check_parameter(c.str, p);
-                }
-                else
-                {
-                    ok = check_parameter(c, p);
-                }
-                if (!ok)
+                if (!p.count(c.str))
                 {
                     add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
                 }
@@ -2458,7 +2356,10 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
         {
             p[name] = o;
         }
-        auto o = eval(c, p);
+        ScopeStack run_scopes;
+        run_scopes.emplace_back(p);
+        auto o = eval_scoped(c, run_scopes);
+        p = std::move(run_scopes.front());
         if (has_runtime_error())
         {
             result = std::string("");

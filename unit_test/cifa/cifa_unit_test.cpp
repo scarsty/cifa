@@ -218,7 +218,7 @@ bool size_of_array_test()
 
 bool register_vector_test()
 {
-    std::vector<double> v = {1.2, 1.45, 77.3};
+    std::vector<double> v = { 1.2, 1.45, 77.3 };
     Cifa c;
     c.register_vector("v", v);
     std::string script = R"(
@@ -226,6 +226,29 @@ bool register_vector_test()
     )";
     auto o = c.run_script(script);
     return o.hasValue() && o.toDouble() == std::accumulate(v.begin(), v.end(), 0.0);
+}
+
+bool register_map_test()
+{
+    Cifa c;
+    c.register_parameter("cfg", std::map<std::string, double>{ { "width", 640 }, { "height", 480 } });
+    // m["key"] syntax
+    {
+        auto o = c.run_script(R"( return cfg["width"] * cfg["height"]; )");
+        if (!o.hasValue() || o.toDouble() != 640 * 480)
+        {
+            return false;
+        }
+    }
+    // m::key syntax
+    {
+        auto o = c.run_script(R"( return cfg::width + cfg::height; )");
+        if (!o.hasValue() || o.toDouble() != 640 + 480)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool type_promotion_test()
@@ -290,14 +313,20 @@ bool c_string_library_test()
     // 1. 注册 strlen: 返回字符串长度
     c1.register_function("strlen", [](ObjectVector& d) -> Object
         {
-            if (d.empty() || !d[0].isType<std::string>()) return 0;
+            if (d.empty() || !d[0].isType<std::string>())
+            {
+                return 0;
+            }
             return (double)d[0].toString().length();
         });
 
     // 2. 注册 strcmp: 比较字符串
     c1.register_function("strcmp", [](ObjectVector& d) -> Object
         {
-            if (d.size() < 2) return 0;
+            if (d.size() < 2)
+            {
+                return 0;
+            }
             int res = d[0].toString().compare(d[1].toString());
             // 标准化为 C 风格的 -1, 0, 1
             return (double)((res > 0) - (res < 0));
@@ -306,15 +335,21 @@ bool c_string_library_test()
     // 3. 注册 strcat: 拼接字符串
     c1.register_function("strcat", [](ObjectVector& d) -> Object
         {
-            if (d.size() < 2) return "";
+            if (d.size() < 2)
+            {
+                return "";
+            }
             return d[0].toString() + d[1].toString();
         });
 
     // 4. 注册 strcpy: 模拟赋值
     c1.register_function("strcpy", [](ObjectVector& d) -> Object
         {
-            if (d.size() < 2) return "";
-            return d[1]; // 将第二个参数赋值给第一个
+            if (d.size() < 2)
+            {
+                return "";
+            }
+            return d[1];    // 将第二个参数赋值给第一个
         });
 
     std::string script_code = R"(
@@ -356,7 +391,7 @@ bool runtime_error_stack_test()
 }
 
 bool mixed_array_literal_test()
-{   // 混合类型数组字面量：数字、字符串混存
+{    // 混合类型数组字面量：数字、字符串混存
     Cifa c;
     std::string script = R"(
         arr = {1, "hello", 3.14, "world"};
@@ -399,7 +434,8 @@ bool static_syntax_error_test()
         if (err.find("Syntax Error:") == std::string::npos || err.find(keyword) == std::string::npos)
         {
             std::cerr << "    FAIL: expected keyword \"" << keyword << "\" in error output\n";
-            if (!err.empty()) { std::cerr << "    Got:\n" << err; }
+            if (!err.empty()) { std::cerr << "    Got:\n"
+                                          << err; }
             else { std::cerr << "    (no error produced)\n"; }
             return false;
         }
@@ -419,7 +455,8 @@ bool static_syntax_error_test()
         std::cerr << "  [" << label << "]: ";
         if (!err.empty())
         {
-            std::cerr << "FAIL unexpected error:\n" << err;
+            std::cerr << "FAIL unexpected error:\n"
+                      << err;
             return false;
         }
         std::cerr << "OK\n";
@@ -612,7 +649,7 @@ bool static_syntax_error_test()
 }
 
 bool string_key_map_test()
-{   // 字符串下标（map 语义）测试
+{    // 字符串下标（map 语义）测试
     Cifa c;
     std::string script = R"(
         dict["name"] = "Alice";
@@ -653,7 +690,10 @@ bool infinite_loop_protection_test()
         c1.set_output_error(false);
         c1.max_loop_iterations = 100;
         auto o = c1.run_script("int x = 0; int go = 1; while(go) { x++; } return x;");
-        if (o.getSpecialType() != "Error") return false;
+        if (o.getSpecialType() != "Error")
+        {
+            return false;
+        }
     }
     // for loop with variable condition
     {
@@ -661,7 +701,10 @@ bool infinite_loop_protection_test()
         c1.set_output_error(false);
         c1.max_loop_iterations = 100;
         auto o = c1.run_script("int x = 0; int go = 1; for(; go;) { x++; } return x;");
-        if (o.getSpecialType() != "Error") return false;
+        if (o.getSpecialType() != "Error")
+        {
+            return false;
+        }
     }
     // do-while loop with variable condition
     {
@@ -669,21 +712,30 @@ bool infinite_loop_protection_test()
         c1.set_output_error(false);
         c1.max_loop_iterations = 100;
         auto o = c1.run_script("int x = 0; int go = 1; do { x++; } while(go); return x;");
-        if (o.getSpecialType() != "Error") return false;
+        if (o.getSpecialType() != "Error")
+        {
+            return false;
+        }
     }
     // infinite recursion should be stopped
     {
         Cifa c1;
         c1.max_call_depth = 10;
         auto o = c1.run_script("f(n) { return f(n); } return f(1);");
-        if (o.getSpecialType() != "Error") return false;
+        if (o.getSpecialType() != "Error")
+        {
+            return false;
+        }
     }
     // normal loops within limit should work fine
     {
         Cifa c1;
         c1.max_loop_iterations = 1000;
         auto o = c1.run_script("int s = 0; for(int i = 0; i < 500; i++) { s += i; } return s;");
-        if (!o.hasValue() || o.toInt() != 124750) return false;
+        if (!o.hasValue() || o.toInt() != 124750)
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -700,7 +752,10 @@ bool array_methods_test()
             a.push_back(30);
             return size(a);
         )");
-        if (!o.hasValue() || o.toInt() != 3) return false;
+        if (!o.hasValue() || o.toInt() != 3)
+        {
+            return false;
+        }
     }
     // empty array via int a[]
     {
@@ -711,7 +766,10 @@ bool array_methods_test()
             a.push_back(2);
             return size(a);
         )");
-        if (!o.hasValue() || o.toInt() != 2) return false;
+        if (!o.hasValue() || o.toInt() != 2)
+        {
+            return false;
+        }
     }
     // pop_back
     {
@@ -722,7 +780,10 @@ bool array_methods_test()
             a.pop_back();
             return size(a);
         )");
-        if (!o.hasValue() || o.toInt() != 3) return false;
+        if (!o.hasValue() || o.toInt() != 3)
+        {
+            return false;
+        }
     }
     // insert
     {
@@ -732,7 +793,10 @@ bool array_methods_test()
             a.insert(1, 2);
             return a[0] * 1000 + a[1] * 100 + a[2] * 10 + a[3];
         )");
-        if (!o.hasValue() || o.toInt() != 1234) return false;
+        if (!o.hasValue() || o.toInt() != 1234)
+        {
+            return false;
+        }
     }
     // erase
     {
@@ -742,7 +806,10 @@ bool array_methods_test()
             a.erase(1);
             return a[0] * 100 + a[1] * 10 + a[2];
         )");
-        if (!o.hasValue() || o.toInt() != 1340) return false;
+        if (!o.hasValue() || o.toInt() != 1340)
+        {
+            return false;
+        }
     }
     // resize
     {
@@ -752,7 +819,10 @@ bool array_methods_test()
             a.resize(5);
             return size(a);
         )");
-        if (!o.hasValue() || o.toInt() != 5) return false;
+        if (!o.hasValue() || o.toInt() != 5)
+        {
+            return false;
+        }
     }
     // clear
     {
@@ -762,7 +832,10 @@ bool array_methods_test()
             a.clear();
             return size(a);
         )");
-        if (!o.hasValue() || o.toInt() != 0) return false;
+        if (!o.hasValue() || o.toInt() != 0)
+        {
+            return false;
+        }
     }
     // contains
     {
@@ -773,7 +846,10 @@ bool array_methods_test()
             int r2 = a.contains(99);
             return r1 * 10 + r2;
         )");
-        if (!o.hasValue() || o.toInt() != 10) return false;
+        if (!o.hasValue() || o.toInt() != 10)
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -790,7 +866,10 @@ bool map_methods_test()
             int r2 = m.contains("z");
             return r1 * 10 + r2;
         )");
-        if (!o.hasValue() || o.toInt() != 10) return false;
+        if (!o.hasValue() || o.toInt() != 10)
+        {
+            return false;
+        }
     }
     // erase
     {
@@ -802,7 +881,10 @@ bool map_methods_test()
             m.erase("y");
             return size(m) * 100 + m.contains("x") * 10 + m.contains("y");
         )");
-        if (!o.hasValue() || o.toInt() != 210) return false;
+        if (!o.hasValue() || o.toInt() != 210)
+        {
+            return false;
+        }
     }
     // clear
     {
@@ -813,7 +895,10 @@ bool map_methods_test()
             m.clear();
             return size(m);
         )");
-        if (!o.hasValue() || o.toInt() != 0) return false;
+        if (!o.hasValue() || o.toInt() != 0)
+        {
+            return false;
+        }
     }
     // keys
     {
@@ -824,7 +909,10 @@ bool map_methods_test()
             k = m.keys();
             return size(k);
         )");
-        if (!o.hasValue() || o.toInt() != 2) return false;
+        if (!o.hasValue() || o.toInt() != 2)
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -860,6 +948,7 @@ int main()
     run_test("array_literal_assignment_test", array_literal_assignment_test);
     run_test("size_of_array_test", size_of_array_test);
     run_test("register_vector_test", register_vector_test);
+    run_test("register_map_test", register_map_test);
     run_test("type_promotion_test", type_promotion_test);
     run_test("empty_statement_test", empty_statement_test);
     run_test("multi_dimensional_array_test", multi_dimensional_array_test);
