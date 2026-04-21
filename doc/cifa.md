@@ -14,6 +14,8 @@
 
 千万不要用它完成过于复杂的任务，正如描述所说，这只是一个非常简单的语法解析器和执行器。如果你想做更复杂的事，请选用Python或者Lua。如果你喜欢C风格的语法，请选用AngelScript或者ChaiScript，但是这两个库都不小，而且在很多Linux发行版上没有预编译包可用。
 
+有大佬做的js版：<https://github.com/whyb/cifa.js>，线上演示为：<https://whyb.github.io/cifa.js/playground/web>.
+
 ## 使用方法
 
 ### 基本用法
