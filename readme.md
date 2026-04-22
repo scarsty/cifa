@@ -16,6 +16,10 @@
 
 有大佬做的js版：<https://github.com/whyb/cifa.js>，线上演示为：<https://whyb.github.io/cifa.js/playground/web>.
 
+ps：目前经实测，Cifa已经能在一定程度上替换Lua。
+
+Cifa曾经单独开发，后来为方便改成了mlcc的一部分，目前因为AI的发展，可以迅速为其添加功能，逐渐可以实用化，因此再次转为独立的项目。
+
 ## 使用方法
 
 ### 基本用法
