@@ -24,7 +24,7 @@ Cifa曾经单独开发，后来为方便改成了mlcc的一部分，目前因为
 
 ### 基本用法
 
-在自己的工程中加入Cifa.h和Cifa.cpp，例程如下：
+在自己的工程中加入Cifa.h和Cifa.cpp即可。例程如下：
 
 ```c++
 #include "Cifa.h"
@@ -71,13 +71,14 @@ return sum;
 
 计算的结果为-24。
 
-若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值，否则返回值是nan。
+若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值，否则返回值是`<empty>`（强行当成数值则是NaN）。
 
 ### 宿主程序添加自定义函数
 
 自定义函数必须可以转化为`std::function<cifa::Object(cifa::ObjectVector&)>`，其中`cifa::ObjectVector`即`std::vector<cifa::Object>`。
 
 #### 方式一
+
 以下自定义3个数学函数（省略了检测越界）：
 ```c++
 using namespace cifa;
@@ -98,6 +99,7 @@ int main()
 这里函数原型写成了xxx1的形式，只是为了避免与cmath中的数学函数同名，造成一些麻烦。
 
 #### 方式二
+
 其实更推荐lambda表达式的形式，例如将上面正弦函数的注册修改为：
 
 ```c++
@@ -155,9 +157,9 @@ print(sin(degree*pi/180));
 
 ### 用户的数据类型
 
-一般来说，Cifa可以容纳任何类型。目前数值相关的类型实际都是double，另内置了std::string的支持。
+Cifa中Object的实现其实是std::any，故可以容纳任何类型。但目前数值相关的类型实际都是double，另内置了std::string的支持。
 
-如果用户希望使用自己的类型，一般来说需要增加一些功能函数，和对应的运算符重载。
+如果用户希望使用自己的类型，需要增加一些功能函数和对应的运算符重载。
 
 例如，增加以下几个函数支持OpenCV中cv::Mat相关的一些功能：
 
@@ -203,41 +205,6 @@ print(sin(degree*pi/180));
 ```
 
 因为变量作用域的关系，用户自定义类型会按照RAII的原则进行管理，无需手动释放资源，即没有必要进行垃圾收集。但是用户原则上不应使用非RAII的类型。
-
-
-### 语法上的注意事项
-
-- auto、int、float、double等类型名会被忽略，若想无脑复制可以在C++部分使用auto。
-- 未经初始化即出现在赋值号右侧的变量值为空，即std::any的`<empty>`，相当于强制要求显式初始化。
-- 函数调用时，a.func(c)等价于func(a, c)。但对于内置数组/map方法（push_back、erase等），仅能通过 `.` 语法调用，不能写成 `push_back(arr, x)` 的形式——这是因为内置方法需要直接修改原始变量，而普通函数调用传的是值的副本，无法修改原始对象。
-- 自加算符不支持++++或----这种写法，请不要瞎折腾。
-- 没有goto。
-
-### 一个完整的用例
-
-```c++
-    cifa::Cifa cifa;
-    std::string str1 = "a1 = 2;\na3=a1;\nreturn 5+4*9*(a1+3)/23;";
-    auto c = cifa.run_script(str1);
-    if (cifa.has_error())    //检查语法错误
-    {
-        //可以选择输出语法错误字符串（已包含源码行和错误位置指示）
-        std::string err_str = cifa.get_errors_str();
-        std::cerr << err_str;
-        //也可以直接打印到 stderr
-        //cifa.print_errors();
-    }
-    //无语法错误，判断结果是否是一个数值
-    if (c.isNumber())
-    {
-        std::print("{}\n", c.toDouble());
-    }
-    //若需正常继续计算，需要排除nan和inf
-    if (c.isEffectNumber())
-    {
-        //do something
-    }
-```
 
 ### 数组
 
@@ -507,6 +474,43 @@ Call Stack (most recent call last):
 | function ... is not defined | 调用了运行时未找到的函数 |
 | ...() is not supported on arrays/maps | 对数组或 map 调用了不支持的内置方法 |
 | ...() requires an array or map | 对非数组、非 map 的变量调用了内置方法 |
+
+### 语法上的注意事项
+
+- Cifa的变量定义其实不需要指定类型，但是为了实现“简单C（C++）代码可以直接被Cifa运行”这一目的，auto、int、float、double等类型名会被忽略。
+- 未经初始化即出现在赋值号右侧的变量值为空，即std::any的`<empty>`，相当于强制要求显式初始化。
+- 函数调用时，a.func(c)等价于func(a, c)。但对于内置数组/map方法（push_back、erase等），仅能通过 `.` 语法调用，不能写成 `push_back(arr, x)` 的形式——这是因为内置方法需要直接修改原始变量，而普通函数调用传的是值的副本，无法修改原始对象。
+- 自加算符不支持++++或----这种写法，请不要瞎折腾。
+- 没有goto。
+
+### 一个完整的用例
+
+以下是使用Cifa计算一个数值的完整用例，包含错误检查和结果处理：
+
+```c++
+    cifa::Cifa cifa;
+    std::string str1 = "a1 = 2;\na3=a1;\nreturn 5+4*9*(a1+3)/23;";
+    auto c = cifa.run_script(str1);
+    if (cifa.has_error())    //检查语法错误
+    {
+        //可以选择输出语法错误字符串（已包含源码行和错误位置指示）
+        std::string err_str = cifa.get_errors_str();
+        std::cerr << err_str;
+        //也可以直接打印到 stderr
+        //cifa.print_errors();
+    }
+    //无语法错误，判断结果是否是一个数值
+    if (c.isNumber())
+    {
+        std::print("{}\n", c.toDouble());
+    }
+    //若需正常继续计算，需要排除nan和inf
+    if (c.isEffectNumber())
+    {
+        //do something
+    }
+```
+
 
 ## 其他
 
