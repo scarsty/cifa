@@ -1,38 +1,187 @@
-#pragma once
+﻿#pragma once
+#include <any>
 #include <cmath>
-#include <cstdio>
 #include <functional>
 #include <list>
 #include <map>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cifa
 {
+struct CalUnit;
+class Cifa;
 
 struct Object
 {
+    friend CalUnit;
+    friend Cifa;
+
     Object() {}
-    Object(double v, const std::string ty = "")
+
+    Object(double v)
     {
         value = v;
-        type = ty;
     }
-    Object(const std::string& str, const std::string ty = "string")
+
+    Object(double v, const std::string& t)
     {
-        content = str;
-        type = ty;
+        value = v;
+        type1 = t;
     }
-    double value = nan("");
-    std::string content;
-    std::string type;
-    std::vector<Object> v;
-    operator bool() { return value; }
-    operator int() { return value; }
-    operator double() { return value; }
+
+    Object(const std::string& str)
+    {
+        value = str;
+    }
+
+    Object(const std::string& str, const std::string& t)
+    {
+        value = str;
+        type1 = t;
+    }
+
+    template <typename T, typename std::enable_if<!std::is_same_v<std::decay_t<T>, Object>, int>::type = 0>
+    Object(const T& v)
+    {
+        value = v;
+    }
+
+    Object(int v)
+    {
+        value = double(v);
+    }
+
+    Object(bool v)
+    {
+        value = double(v);
+    }
+
+    operator bool() const { return toDouble() != 0; }
+
+    operator int() const { return int(toDouble()); }
+
+    operator double() const { return toDouble(); }
+
+    operator std::string() const { return toString(); }
+
+    bool toBool() const { return toDouble() != 0; }
+
+    int toInt() const { return int(toDouble()); }
+
+    double toDouble() const
+    {
+        if (value.type() == typeid(double))
+        {
+            return std::any_cast<double>(value);
+        }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to double");
+        return NAN;
+    }
+
+    std::string toString() const
+    {
+        if (value.type() == typeid(std::string))
+        {
+            return std::any_cast<std::string>(value);
+        }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to string");
+        return "";
+    }
+
+    //复制，不会改变原来的值
+    template <typename T>
+    T to() const
+    {
+        if (value.type() == typeid(T))
+        {
+            return std::any_cast<T>(value);
+        }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        return T();
+    }
+
+    //const与非const版本，按需使用
+    //如果转换失败，后续使用时也不会正常，因此应谨慎使用，或者在isType()判断后使用
+    template <typename T>
+    const T& ref() const
+    {
+        if (value.type() == typeid(T))
+        {
+            return std::any_cast<const T&>(value);
+        }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        throw std::bad_any_cast();
+    }
+
+    template <typename T>
+    T& ref()
+    {
+        if (value.type() == typeid(T))
+        {
+            return std::any_cast<T&>(value);
+        }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        throw std::bad_any_cast();
+    }
+
+    template <typename T>
+    bool isType() const { return value.type() == typeid(T); }
+
+    bool isNumber() const { return value.type() == typeid(double); }
+
+    bool isEffectNumber() const { return isNumber() && !std::isnan(toDouble()) && !std::isinf(toDouble()); }
+
+    bool hasValue() const { return value.has_value(); }
+
+    const std::vector<Object>& subV() const { return v; }
+
+    const std::string& getSpecialType() const { return type1; }
+
+    std::type_info const& getType() const { return value.type(); }
+
+private:
+    static void report_runtime_error(const std::string& message)
+    {
+        if (runtime_error_reporter)
+        {
+            runtime_error_reporter(message);
+        }
+    }
+
+    static void set_runtime_error_reporter(const std::function<void(const std::string&)>& reporter)
+    {
+        runtime_error_reporter = reporter;
+    }
+
+    static void clear_runtime_error_reporter()
+    {
+        runtime_error_reporter = nullptr;
+    }
+
+    inline static std::function<void(const std::string&)> runtime_error_reporter;
+
+    std::any value;
+    std::string type1;        //特别的类型，用于Error、break、continue
+    std::vector<Object> v;    //仅用于处理逗号表达式
+    std::string name;
 };
 
 using ObjectVector = std::vector<Object>;
+using ObjectMap = std::map<std::string, Object>;
 
 enum class CalUnitType
 {
@@ -46,30 +195,42 @@ enum class CalUnitType
     Key,
     Type,
     Union,
-    //UnionRound,    //()�ϲ�ģʽ����for���ʹ��
+    //UnionRound,    //()合并模式，仅for语句使用
 };
 
 struct CalUnit
 {
     CalUnitType type = CalUnitType::None;
-    std::vector<CalUnit> v;
+    std::vector<CalUnit> v;    //语法树的节点，v.size():[0,3]
     std::string str;
     size_t line = 0, col = 0;
-    bool suffix = false;
+    bool suffix = false;        //有后缀，可视为一个语句
+    bool with_type = false;     //有前置的类型
+    bool un_combine = false;    //是否合并到语法树，目前仅case和default后面的冒号使用
+
     CalUnit(CalUnitType s, std::string s1)
     {
         type = s;
         str = s1;
     }
+
     CalUnit() {}
+
     bool can_cal()
     {
         return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter || type == CalUnitType::Function || type == CalUnitType::Operator && v.size() > 0;
     }
+
     bool is_statement()
     {
         return suffix || !can_cal();
     }
+};
+
+struct Function2
+{
+    std::vector<std::string> arguments;
+    CalUnit body;
 };
 
 template <typename T>
@@ -84,6 +245,7 @@ bool vector_have(const std::vector<T>& ops, const T& op)
     }
     return false;
 }
+
 template <typename T>
 bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
 {
@@ -102,61 +264,154 @@ bool vector_have(const std::vector<std::vector<T>>& ops, const T& op)
 
 class Cifa
 {
-private:
-    //��������˴���˳�����ȼ�����Ŀ���ҽ����������б��ж�
-    std::vector<std::vector<std::string>> ops = { { ".", "++", "--" }, { "!" }, { "*", "/", "%" }, { "+", "-" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "|" }, { "&&" }, { "||" }, { "=", "*=", "/=", "+=", "-=" }, { "," } };
-    std::vector<std::string> ops_single = { "++", "--", "!", "()++", "()--" };    //��Ŀȫ�����ҽ��
-    std::vector<std::string> ops_right = { "=", "*=", "/=", "+=", "-=" };         //�ҽ��
-    //�ؼ��֣��ڱ��е�λ��Ϊ�������������
-    std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return" }, { "if", "for", "while" } };
-    std::vector<std::string> types = { "auto", "int", "float", "double" };
-
-    std::map<std::string, void*> user_data;
-    std::map<std::string, Object> parameters;
+public:
     using func_type = std::function<Object(ObjectVector&)>;
-    std::map<std::string, func_type> functions;
+    using ScopeStack = std::vector<std::unordered_map<std::string, Object>>;
 
-    bool force_return = false;
-    Object result;
+private:
+    //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
+    inline static const std::vector<std::vector<std::string>> ops = { { "::", ".", "++", "--" }, { "~", "!" }, { "*", "/", "%" }, { "+", "-" }, { "<<", ">>" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "^" }, { "|" }, { "&&" }, { ":", "?" }, { "||" }, { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" }, { "," } };
+    //单目运算符全部是右结合
+    inline static const std::vector<std::string> ops_single = { "++", "--", "~", "!", "()++", "()--" };
+    //右结合的运算符，注意+-既有单目又有双目，因此不能简单地放在单目列表中
+    inline static const std::vector<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };
+    //关键字，在表中的位置为其所需参数个数
+    inline static const std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default" }, { "if", "for", "while", "do", "switch", "case" } };
+    //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
+    inline static const std::vector<std::string> types = { "auto", "int", "float", "double", "string", "char" };
+    //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
+    inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
+    //内置的数组/map方法列表
+    inline static const std::set<std::string> builtin_methods = { "push_back", "pop_back", "resize", "insert", "erase", "clear", "contains", "keys" };
+
+    //两个函数表都是全局的
+    std::unordered_map<std::string, func_type> functions;     //在宿主程序中注册的函数
+    std::unordered_map<std::string, Function2> functions2;    //在cifa程序中定义的函数
+
+    std::unordered_map<std::string, void*> user_data;
+    std::unordered_map<std::string, Object> parameters;    //变量表，注意每次定义的函数调用都是独立的
 
     struct ErrorMessage
     {
         size_t line = 0, col = 0;
         std::string message;
     };
-    std::vector<ErrorMessage> errors;
+
+    struct ErrorMessageComp
+    {
+        bool operator()(const ErrorMessage& l, const ErrorMessage& r) const
+        {
+            if (l.line == r.line)
+            {
+                return l.col < r.col;
+            }
+            return l.line < r.line;
+        }
+    };
+
+    std::set<ErrorMessage, ErrorMessageComp> errors;
+
+    std::vector<std::string> runtime_call_stack;
+    std::vector<std::string> runtime_source_lines;
+    std::string runtime_error_message;
+    bool runtime_error_reported = false;
 
     bool output_error = true;
 
 public:
+    int max_loop_iterations = 10000000;    //循环最大迭代次数，防止死循环
+    int max_call_depth = 1000;             //函数最大调用深度，防止无限递归
+
     Cifa();
-    Object eval(CalUnit& c);
-    void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
-    CalUnit& find_right_side(CalUnit& c1);
-    //bool need_suffix(CalUnit& c) { return c.can_cal() || vector_have(keys[0], c.str); }
-
-    CalUnitType guess_char(char c);
-    std::list<CalUnit> split(std::string& str);
-
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true);
-    std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
-    void combine_curly_backet(std::list<CalUnit>& ppp);
-    void combine_square_backet(std::list<CalUnit>& ppp);
-    void combine_round_backet(std::list<CalUnit>& ppp);
-    void combine_ops(std::list<CalUnit>& ppp);
-    void combine_semi(std::list<CalUnit>& ppp);
-    void combine_keys(std::list<CalUnit>& ppp);
-    void combine_types(std::list<CalUnit>& ppp);
 
     void register_function(const std::string& name, func_type func);
     void register_user_data(const std::string& name, void* p);
     void register_parameter(const std::string& name, Object o);
+
+    template <typename T>
+    void register_parameter(const std::string& name, std::map<std::string, T> m)
+    {
+        ObjectMap omap;
+        for (auto& [k, v] : m)
+        {
+            omap[k] = Object(v);
+        }
+        parameters[name] = Object(std::move(omap));
+    }
+
+    template <typename T>
+    void register_vector(const std::string& name, const std::vector<T>& v)
+    {
+        std::vector<Object> arr;
+        arr.reserve(v.size());
+        for (auto& o : v)
+        {
+            arr.emplace_back(Object(o));
+        }
+        parameters[name] = Object(std::move(arr));
+    }
+
     void* get_user_data(const std::string& name);
-    Object run_function(const std::string& name, std::vector<CalUnit>& vc);
 
-    void check_cal_unit(CalUnit& c, CalUnit* father);
+    Object run_script(std::string str);    //运行脚本，注意实际上使用独立的变量表
 
-    Object run_script(std::string str);
+    Object run_script(std::string str, std::unordered_map<std::string, Object>& p);    //运行脚本，使用外部传入的变量表，变量表会被修改
+
+    bool has_error() const { return !errors.empty(); }
+
+    std::vector<ErrorMessage> get_errors() const;
+
+    std::string get_errors_str() const;
+
+    void print_errors() const;
+
+    void set_output_error(bool oe) { output_error = oe; }
+
+    //用户可扩展的运算符函数列表
+    std::vector<std::function<Object(const Object&, const Object&)>> user_add, user_sub, user_mul, user_div, user_mod,
+        user_less, user_more, user_less_equal, user_more_equal,
+        user_equal, user_not_equal, user_bit_and, user_bit_or, user_bit_xor, user_logic_and, user_logic_or,
+        user_shift_left, user_shift_right;
+
+private:
+    Object eval_scoped(CalUnit& c, ScopeStack& scopes);
+    Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
+    Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
+
+    void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
+    CalUnit& find_right_side(CalUnit& c1);
+    CalUnitType guess_char(char c);
+    std::list<CalUnit> split(std::string& str);
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true);
+    std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
+    void combine_curly_bracket(std::list<CalUnit>& ppp);
+    void combine_square_bracket(std::list<CalUnit>& ppp);
+    void combine_round_bracket(std::list<CalUnit>& ppp);
+    void combine_ops(std::list<CalUnit>& ppp);
+    void combine_semi(std::list<CalUnit>& ppp);
+    void deal_special_keys(std::list<CalUnit>& ppp);
+    void combine_keys(std::list<CalUnit>& ppp);
+    void combine_functions2(std::list<CalUnit>& ppp);
+
+    Object& get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check = false);
+    Object& get_parameter(const std::string& name, ScopeStack& scopes);
+    bool check_parameter(const std::string& name, ScopeStack& scopes);
+    Object& get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool declare_current = false);
+    Object& resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array);
+    Object& resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, const std::string& key, bool only_check, bool declare_current);
+    Object& resolve_nested_index(Object& element, CalUnit& c, size_t dim_index, ScopeStack& scopes, bool only_check);
+    bool try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out);
+    bool is_array_literal_candidate(CalUnit& c) const;
+    Object* find_object_from_inner(ScopeStack& scopes, const std::string& name);
+    bool has_return_value(const ScopeStack& scopes) const;
+    Object& return_value(ScopeStack& scopes);
+    std::string format_runtime_frame(const CalUnit& c) const;
+    void set_runtime_error(const std::string& message);
+    void clear_runtime_error();
+    bool has_runtime_error() const { return !runtime_error_message.empty(); }
+    void print_runtime_error() const;
+
+    void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
 
     template <typename... Args>
     void add_error(CalUnit& c, Args... args)
@@ -174,41 +429,62 @@ public:
             snprintf(buffer, 1024, args...);
         }
         e.message = buffer;
-        errors.emplace_back(std::move(e));
+        errors.emplace(std::move(e));
     }
 
-    void setOutoutError(bool oe) { output_error = oe; }
+    //四则运算准许用户增加自定义功能
 
-    //��������׼���û������Զ��幦��
-
-#define OPERATOR(o1, o2, op, op2) \
-    if (o1.type == "" && o2.type == "") \
+#define OPERATOR(o1, o2, op, userop_v, trans_type) \
+    if (o1.isNumber() && o2.isNumber()) \
     { \
-        return Object(o1.value op o2.value); \
+        return double(trans_type(o1) op trans_type(o2)); \
     } \
-    if (op2) \
+    for (auto& f : userop_v) \
     { \
-        return op2(o1, o2); \
+        auto o = f(o1, o2); \
+        if (!o.isNumber()) \
+        { \
+            return o; \
+        } \
     } \
-    return Object(o1.value op o2.value);
+    return Object();
 
-    std::function<Object(const Object&, const Object&)> user_add, user_sub, user_mul, user_div;
+    //定义运算符函数，只支持数值操作
+#define OPERATOR_DEF(opname, op, trans_type) \
+    Object opname(const Object& o1, const Object& o2) { OPERATOR(o1, o2, op, user_##opname, trans_type); }
 
-    Object mul(const Object& o1, const Object& o2) { OPERATOR(o1, o2, *, user_mul); }
-    Object div(const Object& o1, const Object& o2) { OPERATOR(o1, o2, /, user_div); }
-    Object add(const Object& o1, const Object& o2)
-    {
-        if (o1.type == "string" && o2.type == "string")
-        {
-            return Object(o1.content + o2.content);
-        }
-        OPERATOR(o1, o2, +, user_add);
+    //定义运算符函数，支持字符串操作
+#define OPERATOR_DEF_CONTENT(opname, op, trans_type) \
+    Object opname(const Object& o1, const Object& o2) \
+    { \
+        if (o1.isType<std::string>() && o2.isType<std::string>()) \
+        { \
+            return Object(std::any_cast<std::string>(o1.value) op std::any_cast<std::string>(o2.value)); \
+        } \
+        OPERATOR(o1, o2, op, user_##opname, trans_type); \
     }
-    Object sub(const Object& o1, const Object& o2) { OPERATOR(o1, o2, -, user_sub); }
+
+    OPERATOR_DEF_CONTENT(add, +, double)
+    OPERATOR_DEF(sub, -, double)
+    OPERATOR_DEF(mul, *, double)
+    OPERATOR_DEF(div, /, double)
+    OPERATOR_DEF(mod, %, int)
+    OPERATOR_DEF_CONTENT(less, <, double)
+    OPERATOR_DEF_CONTENT(more, >, double)
+    OPERATOR_DEF_CONTENT(less_equal, <=, double)
+    OPERATOR_DEF_CONTENT(more_equal, >=, double)
+    OPERATOR_DEF_CONTENT(equal, ==, double)
+    OPERATOR_DEF_CONTENT(not_equal, !=, double)
+    OPERATOR_DEF(bit_and, &, int)
+    OPERATOR_DEF(bit_or, |, int)
+    OPERATOR_DEF(bit_xor, ^, int)
+    OPERATOR_DEF(logic_and, &&, int)
+    OPERATOR_DEF(logic_or, ||, int)
+    OPERATOR_DEF(shift_left, <<, int)
+    OPERATOR_DEF(shift_right, >>, int)
 };
 
-Object print(ObjectVector& d);
-Object to_string(ObjectVector& d);
-Object to_number(ObjectVector& d);
+//#define OPERATOR_DEF_DOUBLE(op) \
+//    Object op(const Object& o1, const Object& o2) { return Object(double(o1.value) op double(o2.value)); }
 
 }    // namespace cifa
