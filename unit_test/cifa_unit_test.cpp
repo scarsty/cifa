@@ -1,4 +1,4 @@
-﻿#include "../../Cifa.h"
+﻿#include "../Cifa.h"
 #include <iostream>
 #include <numeric>
 
