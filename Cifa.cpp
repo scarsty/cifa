@@ -1883,6 +1883,49 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
     return element;
 }
 
+//检查非花括号分支/循环/switch case 体内不允许引入新变量，并直接报告错误
+//合并了原 contains_new_var_assign 的检测逻辑与错误报告
+void Cifa::check_non_block_body(CalUnit& body, const std::unordered_map<std::string, Object>& p)
+{
+    //花括号块内定义变量合法，跳过
+    if (body.type == CalUnitType::Union && body.str == "{}")
+    {
+        return;
+    }
+    //显式声明：int x; 或 int a[];
+    if (body.type == CalUnitType::Parameter && body.with_type)
+    {
+        add_error(body, "variable declaration not allowed in non-block body");
+        return;
+    }
+    //赋值到新变量：int x = val（有类型前缀） 或 x = val（x 不在变量表中）
+    if (body.type == CalUnitType::Operator && body.str == "=")
+    {
+        if (!body.v.empty() && body.v[0].type == CalUnitType::Parameter)
+        {
+            if (body.v[0].with_type || !p.count(body.v[0].str))
+            {
+                add_error(body, "variable declaration not allowed in non-block body");
+                return;
+            }
+        }
+    }
+    //裸引用未声明变量：x;
+    if (body.type == CalUnitType::Parameter && !body.with_type && !p.count(body.str))
+    {
+        add_error(body, "variable declaration not allowed in non-block body");
+        return;
+    }
+    //逗号表达式：递归检查每一子项
+    if (body.type == CalUnitType::Operator && body.str == ",")
+    {
+        for (auto& sub : body.v)
+        {
+            check_non_block_body(sub, p);
+        }
+    }
+}
+
 //语法检查：递归检查语法树节点的合法性（运算符、变量、函数、关键字等）
 void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p)
 {
@@ -2094,6 +2137,15 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                     add_error(c.v[2], "missing ;");
                 }
             }
+            //分支体为非花括号语句时，不允许引入新变量
+            if (c.v.size() >= 2)
+            {
+                check_non_block_body(c.v[1], p);
+            }
+            if (c.v.size() >= 3 && c.v[2].type != CalUnitType::Key)    //else if(...) 不需要检查
+            {
+                check_non_block_body(c.v[2], p);
+            }
         }
         if (c.str == "else")    //语法树合并后不应有单独的else
         {
@@ -2121,6 +2173,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() >= 2 && !c.v[1].is_statement())
             {
                 add_error(c.v[1], "missing ;");
+            }
+            //分支体为非花括号语句时，不允许引入新变量
+            if (c.v.size() >= 2)
+            {
+                check_non_block_body(c.v[1], p);
             }
         }
         if (c.str == "while")
@@ -2150,6 +2207,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() >= 2 && !c.v[1].is_statement())
             {
                 add_error(c.v[1], "missing ;");
+            }
+            //分支体为非花括号语句时，不允许引入新变量（do-while 的 while 子句无体，跳过）
+            if (c.v.size() >= 2 && !(father && father->str == "do"))
+            {
+                check_non_block_body(c.v[1], p);
             }
         }
         if (c.str == "do")
@@ -2186,6 +2248,19 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() == 1)
             {
                 add_error(c, "switch has no statement");
+            }
+            //switch case 体内（非 {} 包裹的语句）不允许引入新变量
+            if (c.v.size() >= 2 && c.v[1].type == CalUnitType::Union && c.v[1].str == "{}")
+            {
+                for (auto& c1 : c.v[1].v)
+                {
+                    //跳过 case/default 标签本身
+                    if (c1.type == CalUnitType::Key && (c1.str == "case" || c1.str == "default"))
+                    {
+                        continue;
+                    }
+                    check_non_block_body(c1, p);
+                }
             }
         }
         if (c.str == "case")
@@ -2380,17 +2455,6 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
     return result;
 }
 
-//获取所有编译期错误的列表
-std::vector<Cifa::ErrorMessage> Cifa::get_errors() const
-{
-    std::vector<Cifa::ErrorMessage> es;
-    for (auto& e : errors)
-    {
-        es.push_back(e);
-    }
-    return es;
-}
-
 //将所有错误格式化为字符串（带源码行和插入符）
 std::string Cifa::get_errors_str() const
 {
@@ -2425,6 +2489,12 @@ std::string Cifa::get_errors_str() const
 void Cifa::print_errors() const
 {
     fprintf(stderr, "%s", get_errors_str().c_str());
+}
+
+//获取所有编译期错误的列表，建议优先使用 get_errors_str() 或 print_errors()
+std::vector<Cifa::ErrorMessage> Cifa::get_errors() const
+{
+    return std::vector<ErrorMessage>(errors.begin(), errors.end());
 }
 
 //格式化一个运行时调用栈帧：显示行号、源码行和插入符位置

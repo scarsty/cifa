@@ -359,9 +359,10 @@ public:
 
     bool has_error() const { return !errors.empty(); }
 
-    std::vector<ErrorMessage> get_errors() const;
-
     std::string get_errors_str() const;
+
+    //建议优先使用 get_errors_str() 或 print_errors()，直接获取带行列信息的格式化字符串
+    std::vector<ErrorMessage> get_errors() const;
 
     void print_errors() const;
 
@@ -412,6 +413,7 @@ private:
     void print_runtime_error() const;
 
     void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
+    void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
 
     template <typename... Args>
     void add_error(CalUnit& c, Args... args)

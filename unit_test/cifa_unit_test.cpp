@@ -407,60 +407,61 @@ bool mixed_array_literal_test()
     return o.hasValue() && std::fabs(o.toDouble() - 4.14) < 1e-9;
 }
 
+// ---- 共用测试辅助函数 ----
+
+// 断言脚本产生语法错误，且错误信息包含 keyword；同时验证输出带行号和 ^ 箭头
+static bool expect_syntax_error(const std::string& label, const std::string& script, const std::string& keyword)
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.run_script(script);
+    std::string err = c.get_errors_str();
+    std::cerr << "  [" << label << "]:\n";
+    if (err.find("Syntax Error:") == std::string::npos || err.find(keyword) == std::string::npos)
+    {
+        std::cerr << "    FAIL: expected keyword \"" << keyword << "\" in error output\n";
+        if (!err.empty()) { std::cerr << "    Got:\n"
+                                      << err; }
+        else { std::cerr << "    (no error produced)\n"; }
+        return false;
+    }
+    if (err.find("^") == std::string::npos)
+    {
+        std::cerr << "    FAIL: missing caret (^) in error output\n";
+        return false;
+    }
+    std::cerr << err;
+    return true;
+}
+
+// 断言脚本不产生任何语法错误
+static bool expect_no_syntax_error(const std::string& label, const std::string& script)
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.run_script(script);
+    std::string err = c.get_errors_str();
+    std::cerr << "  [" << label << "]: ";
+    if (!err.empty())
+    {
+        std::cerr << "FAIL unexpected error:\n"
+                  << err;
+        return false;
+    }
+    std::cerr << "OK\n";
+    return true;
+}
+
 bool static_syntax_error_test()
 {
-    // 辅助 lambda：运行脚本并返回错误字符串（禁止 stderr 输出避免干扰测试输出）
-    auto get_errors = [](const std::string& script) -> std::string
+    // 委托到文件级辅助函数
+    auto expect_error = [](const std::string& label, const std::string& script, const std::string& keyword) -> bool
     {
-        Cifa c;
-        c.set_output_error(false);
-        c.run_script(script);
-        return c.get_errors_str();
+        return expect_syntax_error(label, script, keyword);
     };
-
-    // 检查 get_errors() 返回的错误列表是否包含某关键词
-    auto get_error_messages = [](const std::string& script) -> std::vector<Cifa::ErrorMessage>
+    auto expect_no_error = [](const std::string& label, const std::string& script) -> bool
     {
-        Cifa c;
-        c.set_output_error(false);
-        c.run_script(script);
-        return c.get_errors();
-    };
-
-    auto expect_error = [&](const std::string& label, const std::string& script, const std::string& keyword) -> bool
-    {
-        std::string err = get_errors(script);
-        std::cerr << "  [" << label << "]:\n";
-        if (err.find("Syntax Error:") == std::string::npos || err.find(keyword) == std::string::npos)
-        {
-            std::cerr << "    FAIL: expected keyword \"" << keyword << "\" in error output\n";
-            if (!err.empty()) { std::cerr << "    Got:\n"
-                                          << err; }
-            else { std::cerr << "    (no error produced)\n"; }
-            return false;
-        }
-        // 确认错误字符串包含源码行指示 (^ caret)
-        if (err.find("^") == std::string::npos)
-        {
-            std::cerr << "    FAIL: missing caret (^) in error output\n";
-            return false;
-        }
-        std::cerr << err;
-        return true;
-    };
-
-    auto expect_no_error = [&](const std::string& label, const std::string& script) -> bool
-    {
-        std::string err = get_errors(script);
-        std::cerr << "  [" << label << "]: ";
-        if (!err.empty())
-        {
-            std::cerr << "FAIL unexpected error:\n"
-                      << err;
-            return false;
-        }
-        std::cerr << "OK\n";
-        return true;
+        return expect_no_syntax_error(label, script);
     };
 
     bool ok = true;
@@ -512,26 +513,17 @@ bool static_syntax_error_test()
         R"(int x = 1; int y = x ? 10;)",
         "no :");
 
-    // 10. 错误定位验证：检查 ErrorMessage 的行列号
+    // 10. 错误定位验证：错误输出应包含 "at line 2" 和 "undef"
     {
-        // 第2行第9列（"y = undef" 的 "undef"）
-        auto errs = get_error_messages("int x = 10;\nint y = undef;\n");
-        bool found_line2 = false;
-        for (auto& e : errs)
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("int x = 10;\nint y = undef;\n");
+        std::string err = c.get_errors_str();
+        if (err.find("at line 2") == std::string::npos || err.find("undef") == std::string::npos)
         {
-            if (e.line == 2 && e.message.find("undef") != std::string::npos)
-            {
-                found_line2 = true;
-                break;
-            }
-        }
-        if (!found_line2)
-        {
-            std::cerr << "  FAIL [error line number]: expected error at line 2 mentioning 'undef'\n";
-            for (auto& e : errs)
-            {
-                std::cerr << "    Got line " << e.line << ", col " << e.col << ": " << e.message << "\n";
-            }
+            std::cerr << "  FAIL [error line number]: expected 'at line 2' and 'undef' in error output\n";
+            std::cerr << "    Got:\n"
+                      << err;
             ok = false;
         }
     }
@@ -917,6 +909,127 @@ bool map_methods_test()
     return true;
 }
 
+bool non_block_branch_declaration_test()
+{
+    // 委托到文件级辅助函数，硬编码搜索关键词 "non-block"
+    auto expect_error = [](const std::string& label, const std::string& script) -> bool
+    {
+        return expect_syntax_error(label, script, "non-block");
+    };
+    auto expect_no_error = [](const std::string& label, const std::string& script) -> bool
+    {
+        return expect_no_syntax_error(label, script);
+    };
+
+    bool ok = true;
+
+    // ==== 应报错：非封闭体内定义变量（显式类型前缀）====
+
+    // if 体内声明并初始化
+    ok &= expect_error("if non-block init decl",
+        R"(int a = 1; if (a) int x = 0;)");
+
+    // if 体内仅声明（无初始化）
+    ok &= expect_error("if non-block bare decl",
+        R"(int a = 1; if (a) int x;)");
+
+    // else 体内声明
+    ok &= expect_error("else non-block decl",
+        R"(int a = 1; if (a) a = 0; else int x = 1;)");
+
+    // while 体内声明
+    ok &= expect_error("while non-block decl",
+        R"(int i = 5; while (i > 0) int x = i;)");
+
+    // for 体内声明
+    ok &= expect_error("for non-block decl",
+        R"(for (int i = 0; i < 5; i++) int x = i;)");
+
+    // ==== 应报错：非封闭体内引入新变量（无类型前缀，变量不在表中）====
+
+    // if 体内引入全新变量（无 int 前缀，赋值形式）
+    ok &= expect_error("if non-block new var no type",
+        R"(int a = 1; if (a) newvar = 0;)");
+
+    // if 体内裸引用未声明变量（x; 形式）
+    ok &= expect_error("if non-block bare ref undeclared",
+        R"(int a = 1; if (a) newvar;)");
+
+    // while 体内引入全新变量
+    ok &= expect_error("while non-block new var no type",
+        R"(int i = 5; while (i > 0) newvar = i;)");
+
+    // while 体内裸引用未声明变量
+    ok &= expect_error("while non-block bare ref undeclared",
+        R"(int i = 5; while (i > 0) newvar;)");
+
+    // for 体内引入全新变量
+    ok &= expect_error("for non-block new var no type",
+        R"(int s = 0; for (int i = 0; i < 5; i++) newvar = i;)");
+
+    // for 体内裸引用未声明变量
+    ok &= expect_error("for non-block bare ref undeclared",
+        R"(for (int i = 0; i < 5; i++) newvar;)");
+
+    // ==== 应报错：switch case 体内引入新变量 ====
+
+    ok &= expect_error("switch case non-block new var",
+        R"(int x = 1; switch(x) { case 1: newvar = 10; break; })");
+
+    ok &= expect_error("switch case non-block typed decl",
+        R"(int x = 1; switch(x) { case 1: int y = 10; break; })");
+
+    // ==== 不应报错：花括号体内定义变量合法 ====
+
+    // if 加花括号
+    ok &= expect_no_error("if block decl ok",
+        R"(int a = 1; if (a) { int x = 0; })");
+
+    // else 加花括号
+    ok &= expect_no_error("else block decl ok",
+        R"(int a = 1; if (a) { a = 0; } else { int x = 1; })");
+
+    // while 加花括号
+    ok &= expect_no_error("while block decl ok",
+        R"(int i = 0; while (i < 3) { int x = i; i++; })");
+
+    // for 加花括号
+    ok &= expect_no_error("for block decl ok",
+        R"(int s = 0; for (int i = 0; i < 5; i++) { int x = i; s += x; } return s;)");
+
+    // switch case 内用 {} 包裹合法
+    ok &= expect_no_error("switch case block decl ok",
+        R"(int x = 1; switch(x) { case 1: { int y = 10; } break; })");
+
+    // ==== 不应报错：非封闭体内赋值/引用已有变量合法 ====
+
+    ok &= expect_no_error("if non-block assign ok",
+        R"(int x = 0; int a = 1; if (a) x = 1; return x;)");
+
+    // if 体内裸引用已声明变量：合法
+    ok &= expect_no_error("if non-block bare ref declared ok",
+        R"(int x = 0; int a = 1; if (a) x; return x;)");
+
+    ok &= expect_no_error("else non-block assign ok",
+        R"(int x = 0; int a = 0; if (a) x = 1; else x = 2; return x;)");
+
+    ok &= expect_no_error("while non-block assign ok",
+        R"(int i = 0; while (i < 3) i++; return i;)");
+
+    ok &= expect_no_error("for non-block assign ok",
+        R"(int s = 0; for (int i = 0; i < 5; i++) s += i; return s;)");
+
+    // switch case 内赋值已有变量合法
+    ok &= expect_no_error("switch case assign existing ok",
+        R"(int x = 1; int r = 0; switch(x) { case 1: r = 10; break; default: r = 20; } return r;)");
+
+    // else if 链（仅2层，无悬空 else）不应误报非封闭声明错误
+    ok &= expect_no_error("else if chain ok",
+        R"(int a = 2; int r = 0; if (a == 1) r = 10; else if (a == 2) r = 20; return r;)");
+
+    return ok;
+}
+
 int main()
 {
     int total = 0, ok = 0;
@@ -930,7 +1043,7 @@ int main()
         }
         else
         {
-            std::cerr << "\xe2\x9d\x8c " << total << ". " << name << " failed" << std::endl;
+            std::cout << "\xe2\x9d\x8c " << total << ". " << name << " failed" << std::endl;
         }
     };
 
@@ -961,6 +1074,7 @@ int main()
     run_test("infinite_loop_protection_test", infinite_loop_protection_test);
     run_test("array_methods_test", array_methods_test);
     run_test("map_methods_test", map_methods_test);
+    run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;

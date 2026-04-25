@@ -391,14 +391,14 @@ Cifa 将错误分为两类：**语法错误**（静态检查阶段）和**运行
 ```c++
 if (c.has_error())
 {
-    // 返回带源码行和位置指示的错误字符串
+    // 推荐：返回带源码行和位置指示的错误字符串
     std::string err = c.get_errors_str();
     std::cerr << err;
 
     // 或者直接打印到 stderr
     // c.print_errors();
 
-    // 也可逐条访问
+    // 也可逐条访问（建议优先使用上面的字符串接口）
     for (auto& e : c.get_errors())
     {
         // e.line, e.col, e.message
@@ -412,6 +412,12 @@ Syntax Error: parameter arr is at right of = but not been initialized
   at line 3, col 5:     arr[0] = 1;
                         ^
 ```
+
+**位置信息**：下表所有语法错误均记录了精确的行列位置，`get_errors_str()` / `print_errors()` 输出时均会附带原始源码行与 `^` 位置指示。
+
+> 若某个错误节点未能记录位置（内部极少见情况），则仅输出 `at line 0, col 0`，不附原始行文本。
+
+语法错误在 `run_script` 返回前会自动打印到 stderr（`output_error` 为 `true` 时，这是默认行为），也可手动调用 `print_errors()` 或 `get_errors_str()` 获取。
 
 静态检查可检出的语法错误列表：
 
@@ -437,22 +443,28 @@ Syntax Error: parameter arr is at right of = but not been initialized
 | missing ; | 语句末尾缺少分号 |
 | no parameters inside [] | 下标表达式为空（数组声明 `int a[];` 除外） |
 | wrong parameters inside [] / () | 括号内参数格式不正确 |
+| variable declaration not allowed in non-block body | 在无 `{}` 的分支/循环/case 体中定义或引入了新变量 |
 
 #### 运行时错误
 
-执行阶段的错误（如类型不兼容、访问不存在的 map 键等），`run_script` 的返回值会携带错误标记：
+执行阶段的错误（如类型不兼容、访问不存在的 map 键等）：
+
+- 运行时错误在**触发时立即自动打印**到 stderr（`output_error` 为 `true` 时，这是默认行为）。
+- 若要关闭自动输出，可在 `run_script` 前调用 `c.set_output_error(false)`。
+- `run_script` 的返回值会携带错误标记，可用于程序逻辑判断：
 
 ```c++
+// 运行时错误发生时会自动打印到 stderr
+// 若要关闭自动输出：c.set_output_error(false);
+
 auto result = c.run_script(script);
 if (result.getSpecialType() == "Error")
 {
-    // 运行时错误，可打印调用栈
-    c.print_runtime_error();
-
-    // 或者获取错误字符串
-    std::string err = c.get_runtime_error_str();
+    // 运行时发生了错误（已自动打印到 stderr）
 }
 ```
+
+**位置信息**：自动输出的运行时错误包含完整调用栈，每个调用帧均附带原始源码行与 `^` 位置指示。
 
 运行时错误输出示例（含调用栈）：
 ```
