@@ -1,5 +1,6 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
+#include <format>
 #include <iostream>
 #include <sstream>
 
@@ -162,51 +163,40 @@ Cifa::Cifa()
             }
         });
     // 按 printf 格式说明符将一个 Object 转为字符串
-    auto fmt_spec = [](const Object& arg, const std::string& spec, char tc) -> std::string
+    // spec 含用户原始长度修饰符（如 %llu），此处统一剥离后按类型重新添加
+    auto sprintf_sub = [](const Object& arg, const std::string& spec, char tc) -> std::string
     {
         char buf[512] = {};
+        // 剥离用户写的长度修饰符（hlLzjtq），保留 %、flags、width、.prec
+        static const std::string len_mods = "hlLzjtq";
+        std::string base;    // '%' + flags + width + .prec，不含长度修饰符和类型字符
+        base += spec[0];     // '%'
+        for (size_t k = 1; k + 1 < spec.size(); ++k)
+        {
+            if (len_mods.find(spec[k]) == std::string::npos)
+            {
+                base += spec[k];
+            }
+        }
         if (tc == 's')
         {
-            snprintf(buf, sizeof(buf), spec.c_str(), arg.toString().c_str());
+            snprintf(buf, sizeof(buf), (base + 's').c_str(), arg.toString().c_str());
         }
         else if (tc == 'd' || tc == 'i')
         {
-            std::string ls = spec.substr(0, spec.size() - 1) + (tc == 'd' ? "lld" : "lli");
-            snprintf(buf, sizeof(buf), ls.c_str(), (long long)arg.toDouble());
+            snprintf(buf, sizeof(buf), (base + (tc == 'd' ? "lld" : "lli")).c_str(), (long long)arg.toDouble());
         }
         else if (tc == 'u' || tc == 'o' || tc == 'x' || tc == 'X')
         {
-            std::string ls = spec.substr(0, spec.size() - 1) + "ll" + tc;
-            snprintf(buf, sizeof(buf), ls.c_str(), (unsigned long long)arg.toDouble());
+            snprintf(buf, sizeof(buf), (base + "ll" + tc).c_str(), (unsigned long long)arg.toDouble());
         }
-        else    // %f %e %E %g %G %a
+        else    // %f %e %E %g %G %a（cifa 数值均为 double，忽略 L 修饰符）
         {
-            snprintf(buf, sizeof(buf), spec.c_str(), arg.toDouble());
+            snprintf(buf, sizeof(buf), (base + tc).c_str(), arg.toDouble());
         }
         return buf;
     };
-
-    // format() 的默认转换：整数不带小数点，浮点用 %g，非数值用 toString()
-    auto obj_str = [](const Object& arg) -> std::string
-    {
-        if (!arg.isNumber())
-        {
-            return arg.toString();
-        }
-        double v = arg.toDouble();
-        char buf[64] = {};
-        if (v == std::floor(v) && std::abs(v) < 1e15)
-        {
-            snprintf(buf, sizeof(buf), "%lld", (long long)v);
-        }
-        else
-        {
-            snprintf(buf, sizeof(buf), "%g", v);
-        }
-        return buf;
-    };
-
-    register_function("sprintf", [fmt_spec](ObjectVector& x) -> Object
+    register_function("sprintf", [sprintf_sub](ObjectVector& x) -> Object
         {
             if (x.empty())
             {
@@ -247,6 +237,11 @@ Cifa::Cifa()
                         ++i;
                     }
                 }    // .prec
+                // 跳过长度修饰符（h hh l ll L z j t q），tc 取真正的转换字符
+                while (i < fmt.size() && std::string("hlLzjtq").find(fmt[i]) != std::string::npos)
+                {
+                    ++i;
+                }
                 if (i >= fmt.size())
                 {
                     break;
@@ -254,12 +249,55 @@ Cifa::Cifa()
                 char tc = fmt[i++];
                 if (arg_idx < x.size())
                 {
-                    result += fmt_spec(x[arg_idx++], fmt.substr(spec_start, i - spec_start), tc);
+                    result += sprintf_sub(x[arg_idx++], fmt.substr(spec_start, i - spec_start), tc);
                 }
             }
             return Object(result);
         });
-    register_function("format", [fmt_spec, obj_str](ObjectVector& x) -> Object
+
+    // 将 Object 转为字符串
+    // fspec 为空：用 std::format "{}"（编译期字面量），double 自动省略多余零（如 42.0→4 2）
+    // fspec 非空：格式字串是运行时値，必须用 std::vformat；按末尾字符选择传入的原生类型
+    auto format_sub = [](const Object& arg, const std::string& fspec = {}) -> std::string
+    {
+        if (fspec.empty())
+        {
+            if (arg.isNumber())
+            {
+                double v = arg.toDouble();
+                return std::format("{}", v);
+            }
+            std::string s = arg.toString();
+            return std::format("{}", s);
+        }
+        std::string fmt_str = "{:" + fspec + "}";
+        try
+        {
+            char last = fspec.back();
+            if (!arg.isNumber() || last == 's')
+            {
+                std::string sv = arg.toString();
+                return std::vformat(fmt_str, std::make_format_args(sv));
+            }
+            if (std::string_view("diouxXbB").find(last) != std::string_view::npos)
+            {
+                long long iv = (long long)arg.toDouble();
+                return std::vformat(fmt_str, std::make_format_args(iv));
+            }
+            double dv = arg.toDouble();
+            return std::vformat(fmt_str, std::make_format_args(dv));
+        } catch (const std::format_error&)
+        {
+            if (arg.isNumber())
+            {
+                double v = arg.toDouble();
+                return std::format("{}", v);
+            }
+            std::string s = arg.toString();
+            return std::format("{}", s);
+        }
+    };
+    register_function("format", [format_sub](ObjectVector& x) -> Object
         {
             if (x.empty())
             {
@@ -321,33 +359,7 @@ Cifa::Cifa()
                     size_t arg_pos = idx + 1;
                     if (arg_pos < x.size())
                     {
-                        if (!fspec.empty())
-                        {
-                            // 若 fspec 末尾不是字母，按参数类型自动补 s / g
-                            char last = fspec.back();
-                            bool has_type = (last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z');
-                            std::string full_spec = "%" + fspec;
-                            char tc;
-                            if (has_type)
-                            {
-                                tc = last;
-                            }
-                            else if (x[arg_pos].isNumber())
-                            {
-                                tc = 'g';
-                                full_spec += 'g';
-                            }
-                            else
-                            {
-                                tc = 's';
-                                full_spec += 's';
-                            }
-                            result += fmt_spec(x[arg_pos], full_spec, tc);
-                        }
-                        else
-                        {
-                            result += obj_str(x[arg_pos]);
-                        }
+                        result += format_sub(x[arg_pos], fspec);
                     }
                     i = end + 1;
                 }

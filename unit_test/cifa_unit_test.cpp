@@ -1069,6 +1069,24 @@ bool sprintf_format_test()
             return false;
         }
     }
+    // %llu 多字母长度修饰符（用户显式写 ll，应正常工作）
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("%llu", 12345);)");
+        if (!o.isType<std::string>() || o.toString() != "12345")
+        {
+            return false;
+        }
+    }
+    // %05.1f 宽度+精度（浮点，无长度修饰符）
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("%08.2f", 3.14);)");
+        if (!o.isType<std::string>() || o.toString() != "00003.14")
+        {
+            return false;
+        }
+    }
     // --- format ---
     // 自动 {}
     {
