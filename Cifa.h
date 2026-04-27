@@ -368,6 +368,8 @@ public:
 
     void set_output_error(bool oe) { output_error = oe; }
 
+    std::string get_runtime_error() const { return runtime_error_message; }
+
     //用户可扩展的运算符函数列表
     std::vector<std::function<Object(const Object&, const Object&)>> user_add, user_sub, user_mul, user_div, user_mod,
         user_less, user_more, user_less_equal, user_more_equal,
