@@ -161,6 +161,210 @@ Cifa::Cifa()
                 }
             }
         });
+    // 按 printf 格式说明符将一个 Object 转为字符串
+    auto fmt_spec = [](const Object& arg, const std::string& spec, char tc) -> std::string
+    {
+        char buf[512] = {};
+        if (tc == 's')
+        {
+            snprintf(buf, sizeof(buf), spec.c_str(), arg.toString().c_str());
+        }
+        else if (tc == 'd' || tc == 'i')
+        {
+            std::string ls = spec.substr(0, spec.size() - 1) + (tc == 'd' ? "lld" : "lli");
+            snprintf(buf, sizeof(buf), ls.c_str(), (long long)arg.toDouble());
+        }
+        else if (tc == 'u' || tc == 'o' || tc == 'x' || tc == 'X')
+        {
+            std::string ls = spec.substr(0, spec.size() - 1) + "ll" + tc;
+            snprintf(buf, sizeof(buf), ls.c_str(), (unsigned long long)arg.toDouble());
+        }
+        else    // %f %e %E %g %G %a
+        {
+            snprintf(buf, sizeof(buf), spec.c_str(), arg.toDouble());
+        }
+        return buf;
+    };
+
+    // format() 的默认转换：整数不带小数点，浮点用 %g，非数值用 toString()
+    auto obj_str = [](const Object& arg) -> std::string
+    {
+        if (!arg.isNumber())
+        {
+            return arg.toString();
+        }
+        double v = arg.toDouble();
+        char buf[64] = {};
+        if (v == std::floor(v) && std::abs(v) < 1e15)
+        {
+            snprintf(buf, sizeof(buf), "%lld", (long long)v);
+        }
+        else
+        {
+            snprintf(buf, sizeof(buf), "%g", v);
+        }
+        return buf;
+    };
+
+    register_function("sprintf", [fmt_spec](ObjectVector& x) -> Object
+        {
+            if (x.empty())
+            {
+                return Object(std::string(""));
+            }
+            std::string fmt = x[0].toString();
+            std::string result;
+            size_t arg_idx = 1;
+            for (size_t i = 0; i < fmt.size();)
+            {
+                if (fmt[i] != '%')
+                {
+                    result += fmt[i++];
+                    continue;
+                }
+                // %% -> 字面 %
+                if (i + 1 < fmt.size() && fmt[i + 1] == '%')
+                {
+                    result += '%';
+                    i += 2;
+                    continue;
+                }
+                // 解析: %[flags][width][.prec]type
+                size_t spec_start = i++;
+                while (i < fmt.size() && std::string("-+ #0").find(fmt[i]) != std::string::npos)
+                {
+                    ++i;    // flags
+                }
+                while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9')
+                {
+                    ++i;    // width
+                }
+                if (i < fmt.size() && fmt[i] == '.')
+                {
+                    ++i;
+                    while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9')
+                    {
+                        ++i;
+                    }
+                }    // .prec
+                if (i >= fmt.size())
+                {
+                    break;
+                }
+                char tc = fmt[i++];
+                if (arg_idx < x.size())
+                {
+                    result += fmt_spec(x[arg_idx++], fmt.substr(spec_start, i - spec_start), tc);
+                }
+            }
+            return Object(result);
+        });
+    register_function("format", [fmt_spec, obj_str](ObjectVector& x) -> Object
+        {
+            if (x.empty())
+            {
+                return Object(std::string(""));
+            }
+            std::string fmt = x[0].toString();
+            std::string result;
+            size_t auto_idx = 0;
+            for (size_t i = 0; i < fmt.size();)
+            {
+                if (fmt[i] == '{')
+                {
+                    // {{ -> 字面 {
+                    if (i + 1 < fmt.size() && fmt[i + 1] == '{')
+                    {
+                        result += '{';
+                        i += 2;
+                        continue;
+                    }
+                    size_t end = fmt.find('}', i + 1);
+                    if (end == std::string::npos)
+                    {
+                        result += fmt[i++];
+                        continue;
+                    }
+                    std::string inner = fmt.substr(i + 1, end - i - 1);
+                    // 分离 [index][:format_spec]
+                    std::string idx_part = inner;
+                    std::string fspec;
+                    size_t colon = inner.find(':');
+                    if (colon != std::string::npos)
+                    {
+                        idx_part = inner.substr(0, colon);
+                        fspec = inner.substr(colon + 1);
+                    }
+                    size_t idx;
+                    if (idx_part.empty())
+                    {
+                        idx = auto_idx++;
+                    }
+                    else
+                    {
+                        bool is_num = true;
+                        for (char c : idx_part)
+                        {
+                            if (c < '0' || c > '9')
+                            {
+                                is_num = false;
+                                break;
+                            }
+                        }
+                        if (!is_num)
+                        {
+                            result += fmt[i++];
+                            continue;
+                        }    // 未知说明符，逐字输出
+                        idx = (size_t)std::stoul(idx_part);
+                    }
+                    size_t arg_pos = idx + 1;
+                    if (arg_pos < x.size())
+                    {
+                        if (!fspec.empty())
+                        {
+                            // 若 fspec 末尾不是字母，按参数类型自动补 s / g
+                            char last = fspec.back();
+                            bool has_type = (last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z');
+                            std::string full_spec = "%" + fspec;
+                            char tc;
+                            if (has_type)
+                            {
+                                tc = last;
+                            }
+                            else if (x[arg_pos].isNumber())
+                            {
+                                tc = 'g';
+                                full_spec += 'g';
+                            }
+                            else
+                            {
+                                tc = 's';
+                                full_spec += 's';
+                            }
+                            result += fmt_spec(x[arg_pos], full_spec, tc);
+                        }
+                        else
+                        {
+                            result += obj_str(x[arg_pos]);
+                        }
+                    }
+                    i = end + 1;
+                }
+                else if (fmt[i] == '}' && i + 1 < fmt.size() && fmt[i + 1] == '}')
+                {
+                    // }} -> 字面 }
+                    result += '}';
+                    i += 2;
+                }
+                else
+                {
+                    result += fmt[i++];
+                }
+            }
+            return Object(result);
+        });
+
 #define REGISTER_FUNCTION(func) \
     register_function(#func, [](ObjectVector& x) -> Object \
         { \

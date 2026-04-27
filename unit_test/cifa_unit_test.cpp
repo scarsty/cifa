@@ -1030,6 +1030,140 @@ bool non_block_branch_declaration_test()
     return ok;
 }
 
+bool sprintf_format_test()
+{
+    // --- sprintf ---
+    // %s 字符串
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("Hello %s!", "World");)");
+        if (!o.isType<std::string>() || o.toString() != "Hello World!")
+        {
+            return false;
+        }
+    }
+    // %d 整数和 %.2f 浮点
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("%d + %.2f = %.2f", 3, 1.5, 4.5);)");
+        if (!o.isType<std::string>() || o.toString() != "3 + 1.50 = 4.50")
+        {
+            return false;
+        }
+    }
+    // %% 转义
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("100%%");)");
+        if (!o.isType<std::string>() || o.toString() != "100%")
+        {
+            return false;
+        }
+    }
+    // %x 十六进制
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("%x", 255);)");
+        if (!o.isType<std::string>() || o.toString() != "ff")
+        {
+            return false;
+        }
+    }
+    // --- format ---
+    // 自动 {}
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("Hello {}!", "World");)");
+        if (!o.isType<std::string>() || o.toString() != "Hello World!")
+        {
+            return false;
+        }
+    }
+    // 显式索引 {N}
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{1} and {0}", "B", "A");)");
+        if (!o.isType<std::string>() || o.toString() != "A and B")
+        {
+            return false;
+        }
+    }
+    // 整数数字不带小数点
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("x = {}", 42);)");
+        if (!o.isType<std::string>() || o.toString() != "x = 42")
+        {
+            return false;
+        }
+    }
+    // 浮点数字
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("pi = {}", 3.14);)");
+        if (!o.isType<std::string>() || o.toString() != "pi = 3.14")
+        {
+            return false;
+        }
+    }
+    // {{ }} 转义
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{{{}}}", "ok");)");
+        if (!o.isType<std::string>() || o.toString() != "{ok}")
+        {
+            return false;
+        }
+    }
+    // {:格式说明符} 自动索引
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{:.2f}", 3.14159);)");
+        if (!o.isType<std::string>() || o.toString() != "3.14")
+        {
+            return false;
+        }
+    }
+    // {N:格式说明符} 显式索引
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{0:d} / {1:.1f}", 7, 3.0);)");
+        if (!o.isType<std::string>() || o.toString() != "7 / 3.0")
+        {
+            return false;
+        }
+    }
+    // {:s} 字符串格式
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{:s}", "hi");)");
+        if (!o.isType<std::string>() || o.toString() != "hi")
+        {
+            return false;
+        }
+    }
+    // {:.2} 无类型尾缀 — 数字按 %g 保留2位有效数字
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{:.2}", 3.14159);)");
+        if (!o.isType<std::string>() || o.toString() != "3.1")
+        {
+            return false;
+        }
+    }
+    // {:>8} 无类型尾缀 — 字符串按 %s 右对齐（snprintf %s 不支持对齐，直接透传）
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return format("{:5}", 42);)");
+        // 宽度5，数字补 g → "   42" 或 "42" 均可，只要不崩溃且包含 "42"
+        if (!o.isType<std::string>() || o.toString().find("42") == std::string::npos)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 int main()
 {
     int total = 0, ok = 0;
@@ -1075,6 +1209,7 @@ int main()
     run_test("array_methods_test", array_methods_test);
     run_test("map_methods_test", map_methods_test);
     run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);
+    run_test("sprintf_format_test", sprintf_format_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;

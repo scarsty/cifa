@@ -381,6 +381,8 @@ string s = "hello" + " " + "world";
 | `sin / cos / tan / asin / acos / atan` | 三角函数 |
 | `sinh / cosh / tanh` | 双曲函数 |
 | `exp / log / log10` | 指数对数函数 |
+| `sprintf(fmt, ...)` | C printf 风格格式化，支持 `%s %d %f %g %x` 等；`%%` 输出字面 `%` |
+| `format(fmt, ...)` | `{}` / `{N}` 占位符风格格式化；整数不带小数点，`{{` / `}}` 转义为字面括号 |
 
 ### 错误处理
 
