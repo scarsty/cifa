@@ -665,6 +665,14 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 if (c.v[1].type == CalUnitType::Parameter)
                 {
+                    auto* base = find_object_from_inner(scopes, c.v[0].str);
+                    if (base != nullptr && base->isType<ObjectMap>())
+                    {
+                        auto& m = base->ref<ObjectMap>();
+                        auto& elem = m[c.v[1].str];
+                        elem.name = c.v[0].str + "." + c.v[1].str;
+                        return elem;
+                    }
                     return get_parameter(c.v[0].str + "::" + c.v[1].str, scopes);
                 }
             }
@@ -753,6 +761,23 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
     else if (c.type == CalUnitType::Parameter)
     {
+        // struct 类型声明：初始化为含所有字段的 ObjectMap
+        if (c.with_type && !c.type_name.empty() && struct_defs.count(c.type_name))
+        {
+            auto* existing = find_object_from_inner(scopes, c.str);
+            if (existing == nullptr || !existing->isType<ObjectMap>())
+            {
+                auto& o = get_parameter_for_assign(c, scopes, true);
+                ObjectMap m;
+                for (auto& field : struct_defs.at(c.type_name))
+                {
+                    m[field] = Object();
+                }
+                o = Object(std::move(m));
+                o.name = c.str;
+                return o;
+            }
+        }
         return get_parameter(c, scopes);
     }
     else if (c.type == CalUnitType::Function)
@@ -1282,6 +1307,40 @@ std::list<CalUnit> Cifa::split(std::string& str)
         }
     }
 
+    // 预扫描：注册 struct 类型名（此时 {} 尚未合并，只需检测 struct Name { 模式）
+    for (auto it = rv.begin(); it != rv.end(); ++it)
+    {
+        if (it->str == "struct" && it->type == CalUnitType::Parameter)
+        {
+            auto it1 = std::next(it);
+            if (it1 != rv.end() && it1->type == CalUnitType::Parameter)
+            {
+                auto it2 = std::next(it1);
+                if (it2 != rv.end() && it2->str == "{")
+                {
+                    struct_defs.emplace(it1->str, std::vector<std::string>{});
+                }
+            }
+        }
+    }
+
+    // 将已知 struct 类型名作为类型标记：擦除类型名并在后续变量上设置 with_type/type_name
+    for (auto it = rv.begin(); it != rv.end();)
+    {
+        if (it->type == CalUnitType::Parameter && struct_defs.count(it->str))
+        {
+            auto itr = std::next(it);
+            if (itr != rv.end() && (itr->type == CalUnitType::Parameter || itr->type == CalUnitType::Function))
+            {
+                itr->with_type = true;
+                itr->type_name = it->str;
+                it = rv.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+
     return rv;
 }
 
@@ -1295,6 +1354,9 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, 
     if (square) { combine_square_bracket(ppp); }
     //合并()
     if (round) { combine_round_bracket(ppp); }
+
+    //提取并移除 struct 定义
+    combine_structs(ppp);
 
     //合并关键字
     deal_special_keys(ppp);
@@ -1779,6 +1841,45 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp)
     }
 }
 
+//提取并注册 struct 定义，并将其从语法树中移除
+void Cifa::combine_structs(std::list<CalUnit>& ppp)
+{
+    auto it = ppp.begin();
+    while (it != ppp.end())
+    {
+        if (it->type == CalUnitType::Parameter && it->str == "struct")
+        {
+            auto it1 = std::next(it);
+            if (it1 != ppp.end() && it1->type == CalUnitType::Parameter)
+            {
+                auto it2 = std::next(it1);
+                if (it2 != ppp.end() && it2->type == CalUnitType::Union && it2->str == "{}")
+                {
+                    std::string struct_name = it1->str;
+                    std::vector<std::string> fields;
+                    for (auto& c : it2->v)
+                    {
+                        if (c.type == CalUnitType::Parameter && c.with_type)
+                        {
+                            fields.push_back(c.str);
+                        }
+                    }
+                    struct_defs[struct_name] = std::move(fields);
+                    it = ppp.erase(it);    // erase "struct"
+                    it = ppp.erase(it);    // erase struct name
+                    it = ppp.erase(it);    // erase {} body
+                    if (it != ppp.end() && it->str == ";")
+                    {
+                        it = ppp.erase(it);    // 吃掉结尾分号
+                    }
+                    continue;
+                }
+            }
+        }
+        ++it;
+    }
+}
+
 //注册宿主程序中的 C++ 函数
 void Cifa::register_function(const std::string& name, func_type func)
 {
@@ -1845,6 +1946,19 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
 //从作用域栈中获取变量引用（用于运行时求值）
 Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
 {
+    // . 操作符节点：小数点读取 ObjectMap 字段
+    if (c.type == CalUnitType::Operator && c.str == "." && c.v.size() == 2 && c.v[1].type == CalUnitType::Parameter)
+    {
+        auto* base = find_object_from_inner(scopes, c.v[0].str);
+        if (base != nullptr && base->isType<ObjectMap>())
+        {
+            auto& m = base->ref<ObjectMap>();
+            auto& elem = m[c.v[1].str];
+            elem.name = c.v[0].str + "." + c.v[1].str;
+            return elem;
+        }
+        return get_parameter(c.v[0].str + "::" + c.v[1].str, scopes);
+    }
     if (c.v.size() > 0 && c.v[0].str == "[]")
     {
         return resolve_indexed_parameter(c, scopes, only_check, false, true);
@@ -1887,6 +2001,19 @@ bool Cifa::check_parameter(const std::string& name, ScopeStack& scopes)
 //获取赋值目标的变量引用，必要时在当前作用域创建新变量
 Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool declare_current)
 {
+    // . 操作符节点：写入 ObjectMap 字段
+    if (c.type == CalUnitType::Operator && c.str == "." && c.v.size() == 2 && c.v[1].type == CalUnitType::Parameter)
+    {
+        auto* base = find_object_from_inner(scopes, c.v[0].str);
+        if (base != nullptr && base->isType<ObjectMap>())
+        {
+            auto& m = base->ref<ObjectMap>();
+            auto& elem = m[c.v[1].str];
+            elem.name = c.v[0].str + "." + c.v[1].str;
+            return elem;
+        }
+        return get_parameter(c.v[0].str + "::" + c.v[1].str, scopes);
+    }
     if (c.v.size() > 0 && c.v[0].str == "[]")
     {
         return resolve_indexed_parameter(c, scopes, false, declare_current, false);
@@ -1898,6 +2025,19 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
         scopes.emplace_back();
     }
     Object* o = nullptr;
+    // struct 类型声明：直接创建并初始化 ObjectMap
+    if (declare_current && !c.type_name.empty() && struct_defs.count(c.type_name))
+    {
+        o = &scopes.back()[name];
+        ObjectMap m;
+        for (auto& field : struct_defs.at(c.type_name))
+        {
+            m[field] = Object();
+        }
+        *o = Object(std::move(m));
+        o->name = name;
+        return *o;
+    }
     if (declare_current)
     {
         o = &scopes.back()[name];
@@ -2181,7 +2321,8 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                         check_cal_unit(c.v[1], &c, p);
                     }
                     if (c.v[0].type == CalUnitType::Parameter && p[c.v[0].str].type1 == "__"
-                        || c.v[0].type != CalUnitType::Parameter)
+                        || c.v[0].type != CalUnitType::Parameter
+                            && !(c.v[0].type == CalUnitType::Operator && c.v[0].str == "."))
                     {
                         add_error(c.v[0], "%s cannot be assigned", c.v[0].str.c_str());
                     }
@@ -2204,6 +2345,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                             auto& base_obj = p[c.v[0].str];
                             if (base_obj.isType<ObjectMap>() && base_obj.ref<ObjectMap>().count(c.v[1].str))
                             {
+                                ok = true;
+                            }
+                            else if (!base_obj.isType<ObjectMap>())
+                            {
+                                // 基变量类型在静态分析阶段未知（如函数参数），无法验证字段，放行
                                 ok = true;
                             }
                         }
@@ -2265,6 +2411,15 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         //带类型前缀的独立声明（如 int i;），注册变量到作用域
         if (c.with_type)
         {
+            if (!c.type_name.empty() && struct_defs.count(c.type_name))
+            {
+                ObjectMap m;
+                for (auto& field : struct_defs.at(c.type_name))
+                {
+                    m[field] = Object();
+                }
+                p[c.str] = Object(std::move(m));
+            }
             p[c.str].name = c.str;
         }
         else if (father && father->type == CalUnitType::Operator)

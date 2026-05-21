@@ -206,6 +206,7 @@ struct CalUnit
     size_t line = 0, col = 0;
     bool suffix = false;        //有后缀，可视为一个语句
     bool with_type = false;     //有前置的类型
+    std::string type_name;      //仅在 with_type=true 且为用户定义 struct 类型时非空
     bool un_combine = false;    //是否合并到语法树，目前仅case和default后面的冒号使用
 
     CalUnit(CalUnitType s, std::string s1)
@@ -287,6 +288,7 @@ private:
     //两个函数表都是全局的
     std::unordered_map<std::string, func_type> functions;     //在宿主程序中注册的函数
     std::unordered_map<std::string, Function2> functions2;    //在cifa程序中定义的函数
+    std::unordered_map<std::string, std::vector<std::string>> struct_defs;    //用户定义的 struct 类型及其字段列表
 
     std::unordered_map<std::string, void*> user_data;
     std::unordered_map<std::string, Object> parameters;    //变量表，注意每次定义的函数调用都是独立的
@@ -395,6 +397,7 @@ private:
     void deal_special_keys(std::list<CalUnit>& ppp);
     void combine_keys(std::list<CalUnit>& ppp);
     void combine_functions2(std::list<CalUnit>& ppp);
+    void combine_structs(std::list<CalUnit>& ppp);
 
     Object& get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check = false);
     Object& get_parameter(const std::string& name, ScopeStack& scopes);

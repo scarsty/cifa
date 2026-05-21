@@ -1030,6 +1030,58 @@ bool non_block_branch_declaration_test()
     return ok;
 }
 
+bool struct_test()
+{
+    // 基本字段读写
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            struct Point { int x; int y; };
+            Point p;
+            p.x = 10;
+            p.y = 20;
+            return p.x + p.y;
+        )");
+        if (!o.isNumber() || o.toDouble() != 30) return false;
+    }
+    // struct 多字段
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            struct Vec { int x; int y; int z; };
+            Vec v;
+            v.x = 1; v.y = 2; v.z = 3;
+            return v.x * 100 + v.y * 10 + v.z;
+        )");
+        if (!o.isNumber() || o.toDouble() != 123) return false;
+    }
+    // struct 字段复合赋值
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            struct Counter { int n; };
+            Counter cnt;
+            cnt.n = 5;
+            cnt.n += 3;
+            return cnt.n;
+        )");
+        if (!o.isNumber() || o.toDouble() != 8) return false;
+    }
+    // 函数中使用 struct
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            struct Rect { int w; int h; };
+            area(r) { return r.w * r.h; }
+            Rect r;
+            r.w = 4; r.h = 5;
+            return area(r);
+        )");
+        if (!o.isNumber() || o.toDouble() != 20) return false;
+    }
+    return true;
+}
+
 bool sprintf_format_test()
 {
     // --- sprintf ---
@@ -1228,6 +1280,7 @@ int main()
     run_test("map_methods_test", map_methods_test);
     run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);
     run_test("sprintf_format_test", sprintf_format_test);
+    run_test("struct_test", struct_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;
