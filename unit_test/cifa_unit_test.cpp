@@ -1079,6 +1079,18 @@ bool struct_test()
         )");
         if (!o.isNumber() || o.toDouble() != 20) return false;
     }
+    // 第二次 run_script 不重复写 struct 定义
+    {
+        Cifa c;
+        c.run_script(R"(struct Point { int x; int y; };)");
+        auto o = c.run_script(R"(
+            Point p;
+            p.x = 3;
+            p.y = 7;
+            return p.x + p.y;
+        )");
+        if (!o.isNumber() || o.toDouble() != 10) return false;
+    }
     return true;
 }
 

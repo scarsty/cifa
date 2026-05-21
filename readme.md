@@ -391,11 +391,25 @@ return area(r);    // 20
 
 > **注意**：传递时为值拷贝，函数内修改字段不影响外部变量。
 
+#### 跨调用复用
+
+`struct` 定义绑定在 `Cifa` 实例上，**只需定义一次**，后续对同一实例的 `run_script` 调用均可直接使用该类型，无需重复写定义：
+
+```c++
+Cifa c;
+c.run_script("struct Point { int x; int y; };");   // 第一次：定义结构体
+
+auto o = c.run_script(R"(
+    Point p;
+    p.x = 3; p.y = 7;
+    return p.x + p.y;
+)");    // 第二次：直接使用，结果为 10
+```
+
 #### 限制
 
 - 不支持嵌套 struct 定义（字段类型只能是基本类型）。
 - 不支持构造函数、成员函数、继承等 C++ OOP 特性。
-- struct 定义只在当前 `run_script` 调用期间有效；多次调用需重新定义。
 
 ### 字符串
 
