@@ -476,10 +476,40 @@ if (c.has_error())
 ```
 
 错误输出示例：
+
+**未初始化变量**（脚本：`int y = undef;`）：
 ```
-Syntax Error: parameter arr is at right of = but not been initialized
-  at line 3, col 5:     arr[0] = 1;
-                        ^
+Syntax Error: parameter undef is at right of = but not been initialized
+  at line 2, col 9: int y = undef;
+                            ^
+```
+
+**未定义函数**（脚本：`return foo(1, 2);`）：
+```
+Syntax Error: function foo is not defined
+  at line 1, col 8: return foo(1, 2);
+                           ^
+```
+
+**不可赋值的左值**（脚本：`123 = 5;`）：
+```
+Syntax Error: 123 cannot be assigned
+  at line 1, col 1: 123 = 5;
+                    ^
+```
+
+**括号不匹配**（脚本：`int x = (1 + 2));`）：
+```
+Syntax Error: unpaired right bracket )
+  at line 1, col 16: int x = (1 + 2));
+                                    ^
+```
+
+**else 无对应 if**（脚本：`int x = 1; else { x = 2; }`）：
+```
+Syntax Error: else has no if
+  at line 2, col 1: else { x = 2; }
+                    ^
 ```
 
 **位置信息**：下表所有语法错误均记录了精确的行列位置，`get_errors_str()` / `print_errors()` 输出时均会附带原始源码行与 `^` 位置指示。
@@ -536,12 +566,34 @@ if (result.getSpecialType() == "Error")
 **位置信息**：自动输出的运行时错误包含完整调用栈，每个调用帧均附带原始源码行与 `^` 位置指示。
 
 运行时错误输出示例（含调用栈）：
+
+**类型转换失败**（脚本：`int bad; return sqrt(bad);`）：
 ```
 Runtime Error: type conversion failed: variable 'bad' from <empty> to double
 Call Stack (most recent call last):
   at func sqrt()
-  at line 3, col 12:     return sqrt(bad);
-                                ^
+  at line 2, col 8: return sqrt(bad);
+                           ^
+```
+
+**无限递归**（脚本：`f(n){ return f(n); } return f(0);`）：
+```
+Runtime Error: max call depth exceeded (possible infinite recursion)
+Call Stack (most recent call last):
+  at line 1, col 14: f(n){ return f(n); }
+                                  ^
+  at func f()
+  at func f()
+  at line 2, col 8: return f(0);
+                           ^
+```
+
+**循环超限**（脚本：`for (int i = 0; i < 99999999; i++) {}`）：
+```
+Runtime Error: for loop exceeded max iterations
+Call Stack (most recent call last):
+  at line 1, col 1: for (int i = 0; i < 99999999; i++) {}
+                    ^
 ```
 
 运行时错误列表：
