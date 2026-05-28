@@ -1571,7 +1571,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                             if (itr != ppp.end())
                             {
                                 if ((it->str == "+" || it->str == "-" || it->str == "!")
-                                        && (itr->type == CalUnitType::Constant || itr->type == CalUnitType::Function || itr->type == CalUnitType::Parameter)
+                                        && (itr->can_cal() || itr->type == CalUnitType::Union)
                                     || (it->str == "++" || it->str == "--")
                                         && itr->type == CalUnitType::Parameter)
                                 {
@@ -1604,7 +1604,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                 }
             }
-            if (!is_right)    //未能成功右结合则判断为左结合
+            if (!is_right && vector_have(ops1, std::string("?")))    //三目运算符组需按固定顺序（:先?后）逐符号合并
             {
                 for (auto it = ppp.begin(); it != ppp.end();)
                 {
@@ -1625,6 +1625,51 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     ++it;
                 }
+            }
+        }
+        //同优先级运算符按源码出现顺序从左到右合并，确保左结合性（如 a/b*c 解析为 (a/b)*c 而非 a/(b*c)）
+        //三目运算符组 {":","?"} 已在上方用逐符号方式处理，此处跳过
+        if (!vector_have(ops1, std::string("?")))
+        {
+            for (auto it = ppp.begin(); it != ppp.end();)
+            {
+                if (it->un_combine)
+                {
+                    ++it;
+                    continue;
+                }
+                if (it->type == CalUnitType::Operator && it->v.size() == 0 && it != ppp.begin()
+                    && vector_have(ops1, it->str)
+                    && !vector_have(ops_single, it->str)
+                    && !vector_have(ops_right, it->str))
+                {
+                    auto prev_it = std::prev(it);
+                    auto itr = std::next(it);
+                    //左侧必须是值（Constant/String/Parameter/Function/已合并运算符/Union块）
+                    bool prev_is_val = prev_it->can_cal() || prev_it->type == CalUnitType::Union;
+                    //右侧也必须是值；若右侧是尚未合并的一元 +/−，先做前瞻合并（处理 2*-3 等情形）
+                    bool itr_is_val = itr != ppp.end() && (itr->can_cal() || itr->type == CalUnitType::Union);
+                    if (prev_is_val && !itr_is_val && itr != ppp.end()
+                        && itr->type == CalUnitType::Operator && itr->v.size() == 0
+                        && (itr->str == "+" || itr->str == "-"))
+                    {
+                        auto itr2 = std::next(itr);
+                        if (itr2 != ppp.end() && (itr2->can_cal() || itr2->type == CalUnitType::Union))
+                        {
+                            itr->v = { std::move(*itr2) };
+                            ppp.erase(itr2);
+                            itr_is_val = true;    //前瞻合并后，itr 已有子节点，can_cal() 为 true
+                        }
+                    }
+                    if (prev_is_val && itr_is_val)
+                    {
+                        it->v = { std::move(*prev_it), std::move(*itr) };
+                        ppp.erase(itr);
+                        it = ppp.erase(prev_it);
+                        continue;
+                    }
+                }
+                ++it;
             }
         }
     }

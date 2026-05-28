@@ -180,6 +180,45 @@ bool complex_math_priority_test()
     return o.toInt() == 7;
 }
 
+bool same_precedence_left_assoc_test()
+{    // 同优先级运算符应按 C++ 规则左结合，即 a/b*c == (a/b)*c，而非 a/(b*c)
+    Cifa c;
+    bool ok = true;
+    // 除后乘：100/10*2 == 20
+    ok = ok && c.run_script("return 100/10*2;").toInt() == 20;
+    // 乘后除：100*10/2 == 500
+    ok = ok && c.run_script("return 100*10/2;").toInt() == 500;
+    // 除后模：100/10%3 == 1
+    ok = ok && c.run_script("return 100/10%3;").toInt() == 1;
+    // 模后除：10%4/2 == 1
+    ok = ok && c.run_script("return 10%4/2;").toInt() == 1;
+    // 减后加：10-3+1 == 8
+    ok = ok && c.run_script("return 10-3+1;").toInt() == 8;
+    // lW/2*lH/2 应等于 (lW/2*lH)/2，即 8/2*6/2==12
+    ok = ok && c.run_script("double lW=8; double lH=6; return lW/2*lH/2;").toInt() == 12;
+    return ok;
+}
+
+bool unary_minus_test()
+{
+    Cifa c;
+    bool ok = true;
+    ok = ok && c.run_script("return -5;").toDouble() == -5;           // 前置负号 + 常量
+    ok = ok && c.run_script("return -(2+3);").toDouble() == -5;       // 前置负号 + 括号表达式
+    ok = ok && c.run_script("return -(-3);").toDouble() == 3;         // 双重前置负号
+    ok = ok && c.run_script("return 1 - -2;").toDouble() == 3;        // 二元减 + 前置负号
+    ok = ok && c.run_script("return 10 - 3 - 2;").toDouble() == 5;    // 二元减左结合
+    ok = ok && c.run_script("return -3 + 5;").toDouble() == 2;        // 前置负号 + 加法
+    ok = ok && c.run_script("return 2 * -3;").toDouble() == -6;       // 乘以前置负号
+    ok = ok && c.run_script("return -(2*3);").toDouble() == -6;       // 前置负号 + 乘法括号
+    ok = ok && c.run_script("return -2 + -3;").toDouble() == -5;      // 两个前置负号相加
+    ok = ok && c.run_script("return +5;").toDouble() == 5;            // 前置正号 + 常量
+    ok = ok && c.run_script("return +(2+3);").toDouble() == 5;        // 前置正号 + 括号表达式
+    ok = ok && c.run_script("return 2 * +3;").toDouble() == 6;        // 乘以前置正号
+    ok = ok && c.run_script("return 1 + +2;").toDouble() == 3;        // 二元加 + 前置正号
+    return ok;
+}
+
 bool array_access_test()
 {    // 数组/集合模拟测试 (假设Cifa支持类似[]的操作)
     Cifa c;
@@ -1042,7 +1081,10 @@ bool struct_test()
             p.y = 20;
             return p.x + p.y;
         )");
-        if (!o.isNumber() || o.toDouble() != 30) return false;
+        if (!o.isNumber() || o.toDouble() != 30)
+        {
+            return false;
+        }
     }
     // struct 多字段
     {
@@ -1053,7 +1095,10 @@ bool struct_test()
             v.x = 1; v.y = 2; v.z = 3;
             return v.x * 100 + v.y * 10 + v.z;
         )");
-        if (!o.isNumber() || o.toDouble() != 123) return false;
+        if (!o.isNumber() || o.toDouble() != 123)
+        {
+            return false;
+        }
     }
     // struct 字段复合赋值
     {
@@ -1065,7 +1110,10 @@ bool struct_test()
             cnt.n += 3;
             return cnt.n;
         )");
-        if (!o.isNumber() || o.toDouble() != 8) return false;
+        if (!o.isNumber() || o.toDouble() != 8)
+        {
+            return false;
+        }
     }
     // 函数中使用 struct
     {
@@ -1077,7 +1125,10 @@ bool struct_test()
             r.w = 4; r.h = 5;
             return area(r);
         )");
-        if (!o.isNumber() || o.toDouble() != 20) return false;
+        if (!o.isNumber() || o.toDouble() != 20)
+        {
+            return false;
+        }
     }
     // 第二次 run_script 不重复写 struct 定义
     {
@@ -1089,7 +1140,10 @@ bool struct_test()
             p.y = 7;
             return p.x + p.y;
         )");
-        if (!o.isNumber() || o.toDouble() != 10) return false;
+        if (!o.isNumber() || o.toDouble() != 10)
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -1273,6 +1327,8 @@ int main()
     run_test("bitwise_operator_test", bitwise_operator_test);
     run_test("scope_shadowing_test", scope_shadowing_test);
     run_test("complex_math_priority_test", complex_math_priority_test);
+    run_test("same_precedence_left_assoc_test", same_precedence_left_assoc_test);
+    run_test("unary_minus_test", unary_minus_test);
     run_test("array_access_test", array_access_test);
     run_test("array_literal_assignment_test", array_literal_assignment_test);
     run_test("size_of_array_test", size_of_array_test);
