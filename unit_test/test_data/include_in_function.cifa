@@ -1,0 +1,2 @@
+#include "lib_math.cifa"
+return square(5);

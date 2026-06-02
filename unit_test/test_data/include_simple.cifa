@@ -1,0 +1,3 @@
+#include "simple.cifa"
+int y = x + 5;
+return y;

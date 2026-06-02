@@ -1,0 +1,3 @@
+#include "lib_math.cifa"
+#include "lib_greet.cifa"
+return square(3) + cube(2);

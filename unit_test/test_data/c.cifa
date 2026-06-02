@@ -1,0 +1,2 @@
+#include "b.cifa"
+return a_val + b_val;

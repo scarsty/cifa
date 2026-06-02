@@ -1,0 +1,3 @@
+#include "self.cifa"
+int x = 1;
+return x;

@@ -1300,6 +1300,114 @@ bool sprintf_format_test()
     return true;
 }
 
+bool include_basic_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/include_simple.cifa");
+    return o.isNumber() && o.toDouble() == 15.0;
+}
+
+bool include_multi_file_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/include_multi.cifa");
+    return o.isNumber() && o.toDouble() == 17.0;
+}
+
+bool include_transitive_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/c.cifa");
+    return o.isNumber() && o.toDouble() == 201.0;
+}
+
+bool include_self_circular_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    auto o = c.run_script_from_file("unit_test/test_data/self.cifa");
+    return o.isNumber() && o.toDouble() == 1.0;
+}
+
+bool include_mutual_circular_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    auto o = c.run_script_from_file("unit_test/test_data/cycle_a.cifa");
+    return o.isNumber() && o.toDouble() == 1.0;
+}
+
+bool include_missing_file_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    auto o = c.run_script_from_file("unit_test/test_data/missing.cifa");
+    return c.has_error();
+}
+
+bool include_subdir_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/include_subdir.cifa");
+    return o.isNumber() && o.toDouble() == 42.0;
+}
+
+bool include_angle_bracket_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/angle_bracket.cifa");
+    return o.isNumber() && o.toDouble() == 10.0;
+}
+
+bool include_function_from_file_test()
+{
+    Cifa c;
+    auto o = c.run_script_from_file("unit_test/test_data/include_in_function.cifa");
+    return o.isNumber() && o.toDouble() == 25.0;
+}
+
+bool include_backward_compat_test()
+{
+    Cifa c;
+    auto o = c.run_script("return 1 + 2;");
+    return o.isNumber() && o.toDouble() == 3.0;
+}
+
+bool include_with_parameters_test()
+{
+    Cifa c;
+    std::unordered_map<std::string, Object> p;
+    p["base"] = Object(100.0);
+    auto o = c.run_script_from_file("unit_test/test_data/with_params.cifa", p);
+    return o.isNumber() && o.toDouble() == 110.0;
+}
+
+bool include_set_filename_test()
+{
+    Cifa c;
+    std::string script = "#include \"simple.cifa\"\nint y = x + 5;\nreturn y;\n";
+    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa");
+    return o.isNumber() && o.toDouble() == 15.0;
+}
+
+bool include_set_filename_multi_test()
+{
+    Cifa c;
+    std::string script = "#include \"lib_math.cifa\"\nreturn square(3) + cube(2);\n";
+    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa");
+    return o.isNumber() && o.toDouble() == 17.0;
+}
+
+bool include_set_filename_with_params_test()
+{
+    Cifa c;
+    std::unordered_map<std::string, Object> p;
+    p["base"] = Object(100.0);
+    std::string script = "return base + 10;\n";
+    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa", p);
+    return o.isNumber() && o.toDouble() == 110.0;
+}
+
 int main()
 {
     int total = 0, ok = 0;
@@ -1349,6 +1457,20 @@ int main()
     run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);
     run_test("sprintf_format_test", sprintf_format_test);
     run_test("struct_test", struct_test);
+    run_test("include_basic_test", include_basic_test);
+    run_test("include_multi_file_test", include_multi_file_test);
+    run_test("include_transitive_test", include_transitive_test);
+    run_test("include_self_circular_test", include_self_circular_test);
+    run_test("include_mutual_circular_test", include_mutual_circular_test);
+    run_test("include_missing_file_test", include_missing_file_test);
+    run_test("include_subdir_test", include_subdir_test);
+    run_test("include_angle_bracket_test", include_angle_bracket_test);
+    run_test("include_function_from_file_test", include_function_from_file_test);
+    run_test("include_backward_compat_test", include_backward_compat_test);
+    run_test("include_with_parameters_test", include_with_parameters_test);
+    run_test("include_set_filename_test", include_set_filename_test);
+    run_test("include_set_filename_multi_test", include_set_filename_multi_test);
+    run_test("include_set_filename_with_params_test", include_set_filename_with_params_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;

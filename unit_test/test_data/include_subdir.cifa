@@ -1,0 +1,2 @@
+#include "subdir/subdir_lib.cifa"
+return sub_val;

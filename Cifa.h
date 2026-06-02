@@ -355,9 +355,17 @@ public:
 
     void* get_user_data(const std::string& name);
 
-    Object run_script(std::string str);    //运行脚本，注意实际上使用独立的变量表
+    Object run_script(std::string script);    //运行脚本，注意实际上使用独立的变量表，不处理#include
 
-    Object run_script(std::string str, std::unordered_map<std::string, Object>& p);    //运行脚本，使用外部传入的变量表，变量表会被修改
+    Object run_script(std::string script, std::unordered_map<std::string, Object>& p);    //运行脚本，使用外部传入的变量表，变量表会被修改
+
+    Object run_script_from_file(const std::string& filename);    //从文件运行脚本，支持#include指令
+
+    Object run_script_from_file(const std::string& filename, std::unordered_map<std::string, Object>& p);    //从文件运行脚本，使用外部变量表
+
+    Object run_script_set_filename(std::string script, const std::string& filename);    //运行脚本，设定文件名用于解析#include
+
+    Object run_script_set_filename(std::string script, const std::string& filename, std::unordered_map<std::string, Object>& p);    //运行脚本，设定文件名，使用外部变量表
 
     bool has_error() const { return !errors.empty(); }
 
@@ -419,6 +427,11 @@ private:
 
     void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
+
+    static std::string get_directory(const std::string& filepath);
+    std::string preprocess_includes(const std::string& source, const std::string& current_dir, std::set<std::string>& visited);
+    void add_error(size_t line, size_t col, const char* fmt, ...);
+    Object run_pipeline(std::string str, std::unordered_map<std::string, Object>& p);
 
     template <typename... Args>
     void add_error(CalUnit& c, Args... args)

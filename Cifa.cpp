@@ -1,5 +1,7 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
+#include <cstdarg>
+#include <fstream>
 #include <format>
 #include <iostream>
 #include <sstream>
@@ -2785,18 +2787,104 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
 }
 
-//运行脚本（简化版，使用空变量表）
-Object Cifa::run_script(std::string str)
-{
-    std::unordered_map<std::string, Object> p;
-    return run_script(str, p);
-}
-
-//运行脚本主入口：词法分析→语法树构建→语法检查→求值执行
-Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>& p)
+//运行脚本（简化版，使用空变量表，不处理#include）
+Object Cifa::run_script(std::string script)
 {
     errors.clear();
     clear_runtime_error();
+    std::unordered_map<std::string, Object> p;
+    return run_pipeline(std::move(script), p);
+}
+
+//运行脚本（使用外部变量表，支持当前目录下的#include）
+Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p)
+{
+    errors.clear();
+    clear_runtime_error();
+    std::set<std::string> visited;
+    script = preprocess_includes(script, ".", visited);
+    return run_pipeline(std::move(script), p);
+}
+
+//从文件运行脚本（简化版，使用空变量表）
+Object Cifa::run_script_from_file(const std::string& filename)
+{
+    errors.clear();
+    clear_runtime_error();
+    std::ifstream ifs(filename);
+    if (!ifs.is_open())
+    {
+        add_error(1, 1, "cannot open file: %s", filename.c_str());
+        Object result = std::string("");
+        result.type1 = "Error";
+        if (output_error)
+        {
+            print_errors();
+        }
+        return result;
+    }
+    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    std::set<std::string> visited;
+    visited.insert(filename);
+    std::string dir = get_directory(filename);
+    str = preprocess_includes(str, dir, visited);
+    std::unordered_map<std::string, Object> p;
+    return run_pipeline(std::move(str), p);
+}
+
+//从文件运行脚本（使用外部变量表）
+Object Cifa::run_script_from_file(const std::string& filename, std::unordered_map<std::string, Object>& p)
+{
+    errors.clear();
+    clear_runtime_error();
+    std::ifstream ifs(filename);
+    if (!ifs.is_open())
+    {
+        add_error(1, 1, "cannot open file: %s", filename.c_str());
+        Object result = std::string("");
+        result.type1 = "Error";
+        if (output_error)
+        {
+            print_errors();
+        }
+        return result;
+    }
+    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    std::set<std::string> visited;
+    visited.insert(filename);
+    std::string dir = get_directory(filename);
+    str = preprocess_includes(str, dir, visited);
+    return run_pipeline(std::move(str), p);
+}
+
+//运行脚本，设定文件名用于解析#include（简化版，使用空变量表）
+Object Cifa::run_script_set_filename(std::string script, const std::string& filename)
+{
+    errors.clear();
+    clear_runtime_error();
+    std::set<std::string> visited;
+    visited.insert(filename);
+    std::string dir = get_directory(filename);
+    script = preprocess_includes(script, dir, visited);
+    std::unordered_map<std::string, Object> p;
+    return run_pipeline(std::move(script), p);
+}
+
+//运行脚本，设定文件名用于解析#include，使用外部变量表
+Object Cifa::run_script_set_filename(std::string script, const std::string& filename, std::unordered_map<std::string, Object>& p)
+{
+    errors.clear();
+    clear_runtime_error();
+    std::set<std::string> visited;
+    visited.insert(filename);
+    std::string dir = get_directory(filename);
+    script = preprocess_includes(script, dir, visited);
+    return run_pipeline(std::move(script), p);
+}
+
+//脚本执行管线：词法分析→语法树构建→语法检查→求值执行
+Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Object>& p)
+{
     Object result;
 
     {
@@ -2815,6 +2903,10 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
     //if (errors.empty())
     {
         auto p1 = parameters;
+        for (auto& [name, o] : p)
+        {
+            p1[name] = o;
+        }
         check_cal_unit(c, nullptr, p1);
         for (auto& [name, func2] : functions2)
         {
@@ -2867,6 +2959,153 @@ Object Cifa::run_script(std::string str, std::unordered_map<std::string, Object>
         {
             print_errors();
         }
+    }
+    return result;
+}
+
+//获取文件路径中的目录部分
+std::string Cifa::get_directory(const std::string& filepath)
+{
+    auto pos1 = filepath.find_last_of('/');
+    auto pos2 = filepath.find_last_of('\\');
+    size_t pos = std::string::npos;
+    if (pos1 != std::string::npos) pos = pos1;
+    if (pos2 != std::string::npos && (pos == std::string::npos || pos2 > pos)) pos = pos2;
+    if (pos != std::string::npos)
+    {
+        return filepath.substr(0, pos);
+    }
+    return ".";
+}
+
+//在语法树构建之前报告错误（无CalUnit信息）
+void Cifa::add_error(size_t line, size_t col, const char* fmt, ...)
+{
+    ErrorMessage e;
+    e.line = line;
+    e.col = col;
+    char buffer[1024] = { '\0' };
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, 1024, fmt, args);
+    va_end(args);
+    e.message = buffer;
+    errors.emplace(std::move(e));
+}
+
+//规范化路径：将\替换为/，解析.和..
+static std::string normalize_path(const std::string& path)
+{
+    std::string normalized = path;
+    for (auto& c : normalized)
+    {
+        if (c == '\\') c = '/';
+    }
+    std::vector<std::string> parts;
+    std::stringstream ss(normalized);
+    std::string part;
+    while (std::getline(ss, part, '/'))
+    {
+        if (part.empty() || part == ".") continue;
+        if (part == "..")
+        {
+            if (!parts.empty()) parts.pop_back();
+        }
+        else
+        {
+            parts.push_back(part);
+        }
+    }
+    if (parts.empty()) return ".";
+    std::string result;
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        if (i > 0) result += "/";
+        result += parts[i];
+    }
+    return result;
+}
+
+//预处理#include指令：递归展开所有包含的文件
+std::string Cifa::preprocess_includes(const std::string& source, const std::string& current_dir, std::set<std::string>& visited)
+{
+    std::stringstream source_stream(source);
+    std::string line;
+    std::string result;
+    size_t line_num = 0;
+
+    while (std::getline(source_stream, line))
+    {
+        ++line_num;
+        //查找行首的#include指令（允许前导空白）
+        std::string trimmed = line;
+        size_t first_non_space = trimmed.find_first_not_of(" \t");
+        if (first_non_space == std::string::npos || trimmed[first_non_space] != '#')
+        {
+            result += line + "\n";
+            continue;
+        }
+        std::string directive = trimmed.substr(first_non_space);
+        if (directive.substr(0, 8) != "#include")
+        {
+            result += line + "\n";
+            continue;
+        }
+        //解析文件名
+        std::string rest = directive.substr(8);
+        size_t filename_start = rest.find_first_not_of(" \t");
+        if (filename_start == std::string::npos)
+        {
+            add_error(line_num, first_non_space + 1, "#include: missing filename");
+            result += "\n";
+            continue;
+        }
+        char open_char = rest[filename_start];
+        char close_char = 0;
+        if (open_char == '"') close_char = '"';
+        else if (open_char == '<') close_char = '>';
+        else
+        {
+            add_error(line_num, first_non_space + 1, "#include: invalid syntax, expected '\"' or '<'");
+            result += "\n";
+            continue;
+        }
+        size_t filename_end = rest.find(close_char, filename_start + 1);
+        if (filename_end == std::string::npos)
+        {
+            add_error(line_num, first_non_space + 1, "#include: missing closing '%c'", close_char);
+            result += "\n";
+            continue;
+        }
+        std::string include_filename = rest.substr(filename_start + 1, filename_end - filename_start - 1);
+        //解析完整路径
+        std::string full_path = current_dir + "/" + include_filename;
+        std::string normalized = normalize_path(full_path);
+        //检查循环包含
+        if (visited.count(normalized))
+        {
+            result += "\n";    //跳过已包含的文件，插入空行保持行号
+            continue;
+        }
+        visited.insert(normalized);
+        //读取被包含的文件
+        std::ifstream ifs(full_path);
+        if (!ifs.is_open())
+        {
+            //尝试用规范化路径打开
+            ifs.open(normalized);
+        }
+        if (!ifs.is_open())
+        {
+            add_error(line_num, first_non_space + 1, "#include: cannot open file '%s'", include_filename.c_str());
+            result += "\n";
+            continue;
+        }
+        std::string included_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        //递归预处理被包含的文件
+        std::string included_dir = get_directory(full_path);
+        std::string processed = preprocess_includes(included_content, included_dir, visited);
+        result += processed;
     }
     return result;
 }

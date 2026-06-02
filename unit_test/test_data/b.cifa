@@ -1,0 +1,2 @@
+#include "a.cifa"
+int b_val = a_val + 1;
