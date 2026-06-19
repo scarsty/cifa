@@ -1985,7 +1985,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     }
     else
     {
-        set_runtime_error("function " + name + " is not defined");
+        set_runtime_error("function '" + name + "' is not defined");
         return Object();
     }
 }
@@ -2371,7 +2371,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                         || c.v[0].type != CalUnitType::Parameter
                             && !(c.v[0].type == CalUnitType::Operator && c.v[0].str == "."))
                     {
-                        add_error(c.v[0], "%s cannot be assigned", c.v[0].str.c_str());
+                        add_error(c.v[0], "'%s' cannot be assigned", c.v[0].str.c_str());
                     }
                 }
             }
@@ -2381,7 +2381,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 {
                     if (c.v[0].type == CalUnitType::Parameter && !p.count(c.v[0].str))
                     {
-                        add_error(c.v[0], "parameter %s is at right of = but not been initialized", c.v[0].str.c_str());
+                        add_error(c.v[0], "parameter '%s' is at right of = but not been initialized", c.v[0].str.c_str());
                     }
                     else if (c.v[1].type == CalUnitType::Parameter)
                     {
@@ -2402,7 +2402,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                         }
                         if (!ok)
                         {
-                            add_error(c.v[0], "parameter %s in %s is at right of = but not been initialized", c.v[1].str.c_str(), c.v[0].str.c_str());
+                            add_error(c.v[0], "parameter '%s' in '%s' is at right of = but not been initialized", c.v[1].str.c_str(), c.v[0].str.c_str());
                         }
                     }
                 }
@@ -2453,7 +2453,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     {
         if (c.v.size() > 0 && c.v[0].str != "[]")
         {
-            add_error(c, "cannot calculate parameter %s with operands", c.str.c_str());
+            add_error(c, "cannot calculate parameter '%s' with operands", c.str.c_str());
         }
         //带类型前缀的独立声明（如 int i;），注册变量到作用域
         if (c.with_type)
@@ -2484,7 +2484,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 //所有表达式上下文中的参数都需要初始化检查
                 if (!p.count(c.str))
                 {
-                    add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
+                    add_error(c, "parameter '%s' is at right of = but not been initialized", c.str.c_str());
                 }
             }
         }
@@ -2497,7 +2497,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 if (!p.count(c.str))
                 {
-                    add_error(c, "parameter %s is at right of = but not been initialized", c.str.c_str());
+                    add_error(c, "parameter '%s' is at right of = but not been initialized", c.str.c_str());
                 }
             }
         }
@@ -2506,21 +2506,21 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     {
         if (c.v.size() == 0)
         {
-            add_error(c, "function %s has no operands", c.str.c_str());
+            add_error(c, "function '%s' has no operands", c.str.c_str());
         }
         //内置方法名不视为未定义函数
         if (!functions.contains(c.str) && !functions2.contains(c.str))
         {
             if (!builtin_methods.contains(c.str))
             {
-                add_error(c, "function %s is not defined", c.str.c_str());
+                add_error(c, "function '%s' is not defined", c.str.c_str());
             }
         }
         else if (!functions.contains(c.str) && functions2.contains(c.str) && functions2.at(c.str).body.type == CalUnitType::None)
         {
             if (!builtin_methods.contains(c.str))
             {
-                add_error(c, "function %s is not defined", c.str.c_str());
+                add_error(c, "function '%s' is not defined", c.str.c_str());
             }
         }
     }
