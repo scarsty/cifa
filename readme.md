@@ -73,6 +73,65 @@ return sum;
 
 若脚本只有一个表达式，则结果就是表达式的求值。若脚本包含多行，则需用return来指定返回值，否则返回值是`<empty>`（强行当成数值则是NaN）。
 
+### include 指令
+
+Cifa 支持在脚本文件中使用 `#include` 引入其他脚本文件。include 在词法分析前预处理展开，语法形式支持双引号和尖括号两种写法：
+
+```c++
+#include "lib_math.cifa"
+#include <lib_greet.cifa>
+
+return square(3) + cube(2);
+```
+
+被包含文件中的变量和脚本函数会进入同一次脚本执行流程。例如 `lib_math.cifa` 可以定义：
+
+```c++
+square(x) { return x * x; }
+cube(x) { return x * x * x; }
+```
+
+然后主脚本中即可直接调用 `square(3)`、`cube(2)`。
+
+include 文件路径相对于当前脚本所在目录解析，也可以包含子目录：
+
+```c++
+#include "subdir/subdir_lib.cifa"
+```
+
+从文件运行脚本时，推荐使用 `run_script_from_file`，这样 include 的相对路径会以该脚本文件所在目录为基准：
+
+```c++
+Cifa c;
+auto o = c.run_script_from_file("scripts/main.cifa");
+```
+
+如果脚本内容来自字符串，但仍希望指定一个“文件名”用于解析相对 include 路径，可以使用 `run_script_set_filename`：
+
+```c++
+Cifa c;
+std::string script = R"(
+#include "lib_math.cifa"
+return square(3) + cube(2);
+)";
+auto o = c.run_script_set_filename(script, "scripts/main.cifa");
+```
+
+`run_script_from_file` 和 `run_script_set_filename` 均有接受外部变量表的重载：
+
+```c++
+std::unordered_map<std::string, Object> vars;
+vars["base"] = Object(100.0);
+auto o = c.run_script_from_file("scripts/main.cifa", vars);
+```
+
+几点限制和行为说明：
+
+- `run_script(script)` 不处理 include；`run_script(script, vars)` 会按当前目录 `.` 解析 include。若脚本来自文件，优先使用 `run_script_from_file`。
+- 重复 include 或循环 include 会被跳过，避免无限递归展开。
+- include 失败会产生语法错误，例如 `#include: cannot open file 'missing.cifa'`。
+- include 指令必须写在行首或只带前导空白；其他位置不会作为 include 处理。
+
 ### 宿主程序添加自定义函数
 
 自定义函数必须可以转化为`std::function<cifa::Object(cifa::ObjectVector&)>`，其中`cifa::ObjectVector`即`std::vector<cifa::Object>`。
