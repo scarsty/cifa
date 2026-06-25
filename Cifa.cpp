@@ -5,6 +5,12 @@
 #include <format>
 #include <iostream>
 #include <sstream>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace cifa
 {
@@ -70,6 +76,15 @@ Cifa::Cifa()
                 return Object();
             }
             return Object(atof(d[0].toString().c_str()));
+        });
+    register_function("import", [this](ObjectVector& d) -> Object
+        {
+            if (d.size() != 1)
+            {
+                set_runtime_error("function 'import' expects 1 arguments, got " + std::to_string(d.size()));
+                return Object();
+            }
+            return Object(import_module(d[0].toString()));
         });
     //parameters["true"] = Object(1, "__");
     //parameters["false"] = Object(0, "__");
@@ -410,6 +425,20 @@ Cifa::Cifa()
     REGISTER_MATH2(fmin);
 #undef REGISTER_MATH2
 #undef REGISTER_MATH1
+}
+
+Cifa::~Cifa()
+{
+    functions.clear();
+#ifdef _WIN32
+    for (void* module : imported_modules)
+    {
+        if (module != nullptr)
+        {
+            FreeLibrary(static_cast<HMODULE>(module));
+        }
+    }
+#endif
 }
 
 //从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
@@ -1940,6 +1969,70 @@ void Cifa::register_function(const std::string& name, func_type func)
     functions[name] = func;
 }
 
+bool Cifa::import_module(const std::string& path)
+{
+    if (path.empty())
+    {
+        set_runtime_error("import path is empty");
+        return false;
+    }
+
+    if (std::find(imported_module_paths.begin(), imported_module_paths.end(), path) != imported_module_paths.end())
+    {
+        return true;
+    }
+
+#ifdef _WIN32
+    HMODULE module = LoadLibraryA(path.c_str());
+    if (module == nullptr)
+    {
+        set_runtime_error("import failed: cannot load '" + path + "'");
+        return false;
+    }
+
+    auto import_func = reinterpret_cast<import_func_type>(GetProcAddress(module, "cifa_import"));
+    if (import_func == nullptr)
+    {
+        FreeLibrary(module);
+        set_runtime_error("import failed: '" + path + "' does not export cifa_import");
+        return false;
+    }
+
+    if (!import_func(this))
+    {
+        FreeLibrary(module);
+        set_runtime_error("import failed: cifa_import returned false for '" + path + "'");
+        return false;
+    }
+
+    imported_modules.push_back(module);
+    imported_module_paths.push_back(path);
+    return true;
+#else
+    (void)path;
+    set_runtime_error("import is only supported on Windows in this build");
+    return false;
+#endif
+}
+
+void Cifa::import_literal_modules(CalUnit& c)
+{
+    if (c.type == CalUnitType::Function && c.str == "import" && !c.v.empty())
+    {
+        std::vector<CalUnit> args;
+        expand_comma(c.v[0], args);
+        if (args.size() == 1 && args[0].type == CalUnitType::String)
+        {
+            import_module(args[0].str);
+        }
+    }
+
+    for (auto& child : c.v)
+    {
+        import_literal_modules(child);
+    }
+}
+
 //注册用户自定义数据指针
 void Cifa::register_user_data(const std::string& name, void* p)
 {
@@ -2864,6 +2957,7 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
     str += ";";    //方便处理仅有一行的情况
     auto rv = split(str);
     auto c = combine_all_cal(rv);    //结果必定是一个Union
+    import_literal_modules(c);
     //此处设定为在语法树检查不正确时，仍然尝试运行并检查执行时的错误
     //if (errors.empty())
     {

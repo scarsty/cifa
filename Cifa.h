@@ -17,6 +17,7 @@ namespace cifa
 {
 struct CalUnit;
 class Cifa;
+using import_func_type = int (*)(Cifa*);
 
 struct Object
 {
@@ -350,6 +351,8 @@ private:
 
     std::unordered_map<std::string, void*> user_data;
     std::unordered_map<std::string, Object> parameters;    //变量表，注意每次定义的函数调用都是独立的
+    std::vector<void*> imported_modules;                   //通过 import() 加载的动态库句柄
+    std::vector<std::string> imported_module_paths;        //避免重复加载同一个动态库
 
     struct ErrorMessage
     {
@@ -383,6 +386,7 @@ public:
     int max_call_depth = 1000;             //函数最大调用深度，防止无限递归
 
     Cifa();
+    ~Cifa();
 
     void register_function(const std::string& name, func_type func);
 
@@ -494,6 +498,8 @@ private:
     void clear_runtime_error();
     bool has_runtime_error() const { return !runtime_error_message.empty(); }
     void print_runtime_error() const;
+    bool import_module(const std::string& path);
+    void import_literal_modules(CalUnit& c);
 
     void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);

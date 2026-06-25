@@ -186,6 +186,46 @@ c1.register_function("pow", static_cast<double(*)(double, double)>(&std::pow));
 
 函数名仍需显式传入，因为 C++ 函数指针本身不携带源码中的名字。
 
+#### 通过 DLL 导入函数
+
+脚本可以调用 `import("xxx.dll")` 加载动态库。动态库需要导出固定入口 `cifa_import`，入口中使用普通 `register_function` 注册函数：
+
+```c++
+#include "../Cifa.h"
+#include <cmath>
+
+static double plugin_square(double x)
+{
+    return x * x;
+}
+
+extern "C" __declspec(dllexport) int cifa_import(cifa::Cifa* cifa)
+{
+    if (cifa == nullptr)
+    {
+        return 0;
+    }
+    cifa->register_function("plugin_square", plugin_square);
+    cifa->register_function("plugin_sin", static_cast<double (*)(double)>(&std::sin));
+    return 1;
+}
+```
+
+脚本中使用：
+
+```c++
+import("build/cifa_import_example.dll");
+return plugin_square(3) + plugin_sin(0);
+```
+
+示例源码见 `examples/cifa_import_example.cpp`。在 Windows/MSVC 下可编译为 DLL，例如：
+
+```bat
+cl /std:c++latest /EHsc /utf-8 /I./ /LD /Fe:build/cifa_import_example.dll examples/cifa_import_example.cpp Cifa.cpp
+```
+
+`import()` 当前使用同编译器 C++ ABI：DLL 应与宿主程序使用兼容的编译器、运行库和同一份 `Cifa.h`。Cifa 会保留已加载 DLL 直到 `Cifa` 对象析构，避免 DLL 中注册的函数指针提前失效。重复导入同一路径会被忽略。
+
 
 此时再运行如下脚本：
 ```c++

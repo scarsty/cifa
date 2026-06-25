@@ -88,6 +88,17 @@ bool builtin_math_function_test()
     return o.isNumber() && std::fabs(o.toDouble() - 22.0) < 1e-9;
 }
 
+bool import_dll_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        import("build/cifa_import_example.dll");
+        import("build/cifa_import_example.dll");
+        return plugin_square(3) + plugin_add(2, 4) + plugin_sin(0);
+    )");
+    return o.isNumber() && std::fabs(o.toDouble() - 15.0) < 1e-9;
+}
+
 bool loop_math_test()
 {
     Cifa c1;
@@ -1492,6 +1503,7 @@ int main()
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
+    run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
     run_test("ternary_operator_test", ternary_operator_test);
