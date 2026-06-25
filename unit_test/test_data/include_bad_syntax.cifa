@@ -1,0 +1,2 @@
+#include "bad_syntax_include.cifa"
+return 0;

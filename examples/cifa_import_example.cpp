@@ -1,6 +1,12 @@
 #include "../Cifa.h"
 #include <cmath>
 
+#ifdef _WIN32
+#define CIFA_EXPORT __declspec(dllexport)
+#else
+#define CIFA_EXPORT __attribute__((visibility("default")))
+#endif
+
 static double plugin_square(double x)
 {
     return x * x;
@@ -11,7 +17,7 @@ static double plugin_add(double a, double b)
     return a + b;
 }
 
-extern "C" __declspec(dllexport) int cifa_import(cifa::Cifa* cifa)
+extern "C" CIFA_EXPORT int cifa_import(cifa::Cifa* cifa)
 {
     if (cifa == nullptr)
     {

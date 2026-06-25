@@ -99,36 +99,39 @@ include 文件路径相对于当前脚本所在目录解析，也可以包含子
 #include "subdir/subdir_lib.cifa"
 ```
 
-从文件运行脚本时，推荐使用 `run_script_from_file`，这样 include 的相对路径会以该脚本文件所在目录为基准：
+从文件运行脚本时，推荐使用 `run_file`，这样 include 的相对路径会以该脚本文件所在目录为基准：
 
 ```c++
 Cifa c;
-auto o = c.run_script_from_file("scripts/main.cifa");
+auto o = c.run_file("scripts/main.cifa");
 ```
 
-如果脚本内容来自字符串，但仍希望指定 include 的相对目录，可以调用 `run_script` 的 include 目录重载：
+如果脚本内容来自字符串，但仍希望指定 include 的搜索目录，可以先调用 `set_include_dirs`。搜索目录可以设置多个，会按顺序查找：
 
 ```c++
 Cifa c;
+c.set_include_dirs({ "scripts", "libs" });
 std::string script = R"(
 #include "lib_math.cifa"
 return square(3) + cube(2);
 )";
-auto o = c.run_script(script, "scripts");
+auto o = c.run_script(script);
 ```
 
-`run_script` 和 `run_script_from_file` 均有接受外部变量表的重载：
+`run_script` 和 `run_file` 均有接受外部变量表的重载：
 
 ```c++
 std::unordered_map<std::string, Object> vars;
 vars["base"] = Object(100.0);
-auto o = c.run_script_from_file("scripts/main.cifa", vars);
-auto o2 = c.run_script(script, vars, "scripts");
+auto o = c.run_file("scripts/main.cifa", vars);
+auto o2 = c.run_script(script, vars);
 ```
 
 几点限制和行为说明：
 
-- `run_script(script)` 默认按当前目录 `.` 解析 include；若脚本来自文件，优先使用 `run_script_from_file`，这样相对路径会以脚本文件所在目录为基准。
+- `run_script(script)` 默认先按当前目录 `.` 解析 include，然后按 `set_include_dirs` 设置的目录继续查找。
+- `run_file(filename)` 会额外将脚本文件所在目录作为当前搜索路径，因此文件内相对 include 会以该文件所在目录为基准。
+- include 中写绝对路径时，会直接使用该路径，不会再拼接当前目录或搜索目录。
 - 重复 include 或循环 include 会被跳过，避免无限递归展开。
 - include 失败会产生语法错误，例如 `#include: cannot open file 'missing.cifa'`。
 - include 指令必须写在行首或只带前导空白；其他位置不会作为 include 处理。
@@ -186,20 +189,26 @@ c1.register_function("pow", static_cast<double(*)(double, double)>(&std::pow));
 
 函数名仍需显式传入，因为 C++ 函数指针本身不携带源码中的名字。
 
-#### 通过 DLL 导入函数
+#### 通过动态库导入函数
 
-脚本可以调用 `import("xxx.dll")` 加载动态库。动态库需要导出固定入口 `cifa_import`，入口中使用普通 `register_function` 注册函数：
+脚本可以调用 `import("动态库路径")` 加载动态库（Windows 下通常为 `.dll`，Linux 下通常为 `.so`）。动态库需要导出固定入口 `cifa_import`，入口中使用普通 `register_function` 注册函数：
 
 ```c++
 #include "../Cifa.h"
 #include <cmath>
+
+#ifdef _WIN32
+#define CIFA_EXPORT __declspec(dllexport)
+#else
+#define CIFA_EXPORT __attribute__((visibility("default")))
+#endif
 
 static double plugin_square(double x)
 {
     return x * x;
 }
 
-extern "C" __declspec(dllexport) int cifa_import(cifa::Cifa* cifa)
+extern "C" CIFA_EXPORT int cifa_import(cifa::Cifa* cifa)
 {
     if (cifa == nullptr)
     {
@@ -218,13 +227,26 @@ import("build/cifa_import_example.dll");
 return plugin_square(3) + plugin_sin(0);
 ```
 
-示例源码见 `examples/cifa_import_example.cpp`。在 Windows/MSVC 下可编译为 DLL，例如：
+Linux 下路径可写成：
+
+```c++
+import("./build/libcifa_import_example.so");
+return plugin_square(3) + plugin_sin(0);
+```
+
+示例源码见 `examples/cifa_import_example.cpp`。在 Windows/MSVC 下可编译为动态库，例如：
 
 ```bat
 cl /std:c++latest /EHsc /utf-8 /I./ /LD /Fe:build/cifa_import_example.dll examples/cifa_import_example.cpp Cifa.cpp
 ```
 
-`import()` 当前使用同编译器 C++ ABI：DLL 应与宿主程序使用兼容的编译器、运行库和同一份 `Cifa.h`。Cifa 会保留已加载 DLL 直到 `Cifa` 对象析构，避免 DLL 中注册的函数指针提前失效。重复导入同一路径会被忽略。
+在 Linux/g++ 下可编译为 `.so`，例如：
+
+```bash
+g++ -std=c++23 -fPIC -shared -I./ -o build/libcifa_import_example.so examples/cifa_import_example.cpp Cifa.cpp -ldl
+```
+
+`import()` 当前使用同编译器 C++ ABI：动态库应与宿主程序使用兼容的编译器、运行库和同一份 `Cifa.h`。Cifa 会保留已加载动态库直到 `Cifa` 对象析构，避免动态库中注册的函数指针提前失效。重复导入同一路径会被忽略。
 
 
 此时再运行如下脚本：

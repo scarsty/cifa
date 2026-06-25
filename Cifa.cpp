@@ -10,10 +10,14 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace cifa
 {
+
+static std::string normalize_path(const std::string& path);
 
 //构造函数：注册内置函数（print, println, 数学函数等）
 Cifa::Cifa()
@@ -430,15 +434,17 @@ Cifa::Cifa()
 Cifa::~Cifa()
 {
     functions.clear();
-#ifdef _WIN32
     for (void* module : imported_modules)
     {
         if (module != nullptr)
         {
+#ifdef _WIN32
             FreeLibrary(static_cast<HMODULE>(module));
+#else
+            dlclose(module);
+#endif
         }
     }
-#endif
 }
 
 //从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
@@ -2009,9 +2015,34 @@ bool Cifa::import_module(const std::string& path)
     imported_module_paths.push_back(path);
     return true;
 #else
-    (void)path;
-    set_runtime_error("import is only supported on Windows in this build");
-    return false;
+    void* module = dlopen(path.c_str(), RTLD_NOW);
+    if (module == nullptr)
+    {
+        const char* err = dlerror();
+        set_runtime_error("import failed: cannot load '" + path + "'" + (err != nullptr ? std::string(": ") + err : std::string()));
+        return false;
+    }
+
+    dlerror();
+    auto import_func = reinterpret_cast<import_func_type>(dlsym(module, "cifa_import"));
+    const char* symbol_error = dlerror();
+    if (symbol_error != nullptr)
+    {
+        dlclose(module);
+        set_runtime_error("import failed: '" + path + "' does not export cifa_import");
+        return false;
+    }
+
+    if (!import_func(this))
+    {
+        dlclose(module);
+        set_runtime_error("import failed: cifa_import returned false for '" + path + "'");
+        return false;
+    }
+
+    imported_modules.push_back(module);
+    imported_module_paths.push_back(path);
+    return true;
 #endif
 }
 
@@ -2043,6 +2074,11 @@ void Cifa::register_user_data(const std::string& name, void* p)
 void Cifa::register_parameter(const std::string& name, Object o)
 {
     parameters[name] = o;
+}
+
+void Cifa::set_include_dirs(const std::vector<std::string>& dirs)
+{
+    include_dirs = dirs;
 }
 
 //获取用户自定义数据指针
@@ -2887,36 +2923,36 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
 }
 
-//运行脚本，使用独立变量表；默认按当前目录处理#include
-Object Cifa::run_script(std::string script, const std::string& include_dir)
+//运行脚本，使用独立变量表；按当前目录和include搜索目录处理#include
+Object Cifa::run_script(std::string script)
 {
     errors.clear();
     clear_runtime_error();
     std::unordered_map<std::string, Object> local_params;
     std::set<std::string> visited;
-    script = preprocess_includes(script, include_dir.empty() ? "." : include_dir, visited);
+    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
     return run_pipeline(std::move(script), local_params);
 }
 
-//运行脚本，使用外部变量表；默认按当前目录处理#include
-Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p, const std::string& include_dir)
+//运行脚本，使用外部变量表；按当前目录和include搜索目录处理#include
+Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p)
 {
     errors.clear();
     clear_runtime_error();
     std::set<std::string> visited;
-    script = preprocess_includes(script, include_dir.empty() ? "." : include_dir, visited);
+    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
     return run_pipeline(std::move(script), p);
 }
 
 //从文件运行脚本（简化版，使用空变量表）
-Object Cifa::run_script_from_file(const std::string& filename)
+Object Cifa::run_file(const std::string& filename)
 {
     std::unordered_map<std::string, Object> local_params;
-    return run_script_from_file(filename, local_params);
+    return run_file(filename, local_params);
 }
 
 //从文件运行脚本（使用外部变量表）
-Object Cifa::run_script_from_file(const std::string& filename, std::unordered_map<std::string, Object>& p)
+Object Cifa::run_file(const std::string& filename, std::unordered_map<std::string, Object>& p)
 {
     errors.clear();
     clear_runtime_error();
@@ -2934,9 +2970,9 @@ Object Cifa::run_script_from_file(const std::string& filename, std::unordered_ma
     }
     std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     std::set<std::string> visited;
-    visited.insert(filename);
+    visited.insert(normalize_path(filename));
     std::string dir = get_directory(filename);
-    str = preprocess_includes(str, dir, visited);
+    str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
     return run_pipeline(std::move(str), p);
 }
 
@@ -2948,9 +2984,15 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
     {
         std::stringstream source_stream(str);
         std::string source_line;
+        size_t line_index = 0;
         while (std::getline(source_stream, source_line))
         {
-            runtime_source_lines.emplace_back(std::move(source_line));
+            if (line_index >= runtime_source_line_infos.size())
+            {
+                runtime_source_line_infos.push_back({ "<script>", line_index + 1, source_line });
+            }
+            runtime_source_lines.emplace_back(runtime_source_line_infos[line_index].text);
+            ++line_index;
         }
     }
 
@@ -3037,6 +3079,19 @@ std::string Cifa::get_directory(const std::string& filepath)
     return ".";
 }
 
+bool Cifa::is_absolute_path(const std::string& filepath)
+{
+    if (filepath.empty())
+    {
+        return false;
+    }
+    if (filepath[0] == '/' || filepath[0] == '\\')
+    {
+        return true;
+    }
+    return filepath.size() >= 3 && ((filepath[0] >= 'A' && filepath[0] <= 'Z') || (filepath[0] >= 'a' && filepath[0] <= 'z')) && filepath[1] == ':' && (filepath[2] == '/' || filepath[2] == '\\');
+}
+
 //在语法树构建之前报告错误（无CalUnit信息）
 void Cifa::add_error(size_t line, size_t col, const char* fmt, ...)
 {
@@ -3086,7 +3141,7 @@ static std::string normalize_path(const std::string& path)
 }
 
 //预处理#include指令：递归展开所有包含的文件
-std::string Cifa::preprocess_includes(const std::string& source, const std::string& current_dir, std::set<std::string>& visited)
+std::string Cifa::preprocess_includes(const std::string& source, const std::string& current_file, const std::string& current_dir, const std::vector<std::string>& extra_include_dirs, std::set<std::string>& visited)
 {
     std::stringstream source_stream(source);
     std::string line;
@@ -3102,12 +3157,14 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         if (first_non_space == std::string::npos || trimmed[first_non_space] != '#')
         {
             result += line + "\n";
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             continue;
         }
         std::string directive = trimmed.substr(first_non_space);
         if (directive.substr(0, 8) != "#include")
         {
             result += line + "\n";
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             continue;
         }
         //解析文件名
@@ -3115,6 +3172,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         size_t filename_start = rest.find_first_not_of(" \t");
         if (filename_start == std::string::npos)
         {
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             add_error(line_num, first_non_space + 1, "#include: missing filename");
             result += "\n";
             continue;
@@ -3125,6 +3183,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         else if (open_char == '<') close_char = '>';
         else
         {
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             add_error(line_num, first_non_space + 1, "#include: invalid syntax, expected '\"' or '<'");
             result += "\n";
             continue;
@@ -3132,38 +3191,72 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         size_t filename_end = rest.find(close_char, filename_start + 1);
         if (filename_end == std::string::npos)
         {
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             add_error(line_num, first_non_space + 1, "#include: missing closing '%c'", close_char);
             result += "\n";
             continue;
         }
         std::string include_filename = rest.substr(filename_start + 1, filename_end - filename_start - 1);
-        //解析完整路径
-        std::string full_path = current_dir + "/" + include_filename;
-        std::string normalized = normalize_path(full_path);
-        //检查循环包含
-        if (visited.count(normalized))
+
+        std::vector<std::string> candidates;
+        if (is_absolute_path(include_filename))
+        {
+            candidates.push_back(include_filename);
+        }
+        else
+        {
+            candidates.push_back((current_dir.empty() ? "." : current_dir) + "/" + include_filename);
+            for (const auto& dir : extra_include_dirs)
+            {
+                candidates.push_back((dir.empty() ? "." : dir) + "/" + include_filename);
+            }
+        }
+
+        std::ifstream ifs;
+        std::string full_path;
+        std::string normalized;
+        for (const auto& candidate : candidates)
+        {
+            std::string candidate_normalized = normalize_path(candidate);
+            if (visited.count(candidate_normalized))
+            {
+                full_path = candidate;
+                normalized = std::move(candidate_normalized);
+                break;
+            }
+            ifs.open(candidate);
+            if (!ifs.is_open())
+            {
+                ifs.clear();
+                ifs.open(candidate_normalized);
+            }
+            if (ifs.is_open())
+            {
+                full_path = candidate;
+                normalized = std::move(candidate_normalized);
+                break;
+            }
+            ifs.clear();
+        }
+
+        if (!normalized.empty() && visited.count(normalized))
         {
             result += "\n";    //跳过已包含的文件，插入空行保持行号
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             continue;
         }
-        visited.insert(normalized);
-        //读取被包含的文件
-        std::ifstream ifs(full_path);
         if (!ifs.is_open())
         {
-            //尝试用规范化路径打开
-            ifs.open(normalized);
-        }
-        if (!ifs.is_open())
-        {
+            runtime_source_line_infos.push_back({ current_file, line_num, line });
             add_error(line_num, first_non_space + 1, "#include: cannot open file '%s'", include_filename.c_str());
             result += "\n";
             continue;
         }
+        visited.insert(normalized);
         std::string included_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         //递归预处理被包含的文件
         std::string included_dir = get_directory(full_path);
-        std::string processed = preprocess_includes(included_content, included_dir, visited);
+        std::string processed = preprocess_includes(included_content, normalized, included_dir, extra_include_dirs, visited);
         result += processed;
     }
     return result;
@@ -3176,10 +3269,11 @@ std::string Cifa::get_errors_str() const
     for (auto& e : errors)
     {
         str += "Syntax Error: " + e.message + "\n";
-        if (e.line > 0 && e.line <= runtime_source_lines.size())
+        if (e.line > 0 && e.line <= runtime_source_line_infos.size())
         {
-            const std::string& line_text = runtime_source_lines[e.line - 1];
-            std::string header = "  at line " + std::to_string(e.line) + ", col " + std::to_string(e.col) + ": ";
+            const auto& source_line = runtime_source_line_infos[e.line - 1];
+            const std::string& line_text = source_line.text;
+            std::string header = "  at " + source_line.filename + ":" + std::to_string(source_line.line) + ", col " + std::to_string(e.col) + ": ";
             str += header + line_text + "\n";
             size_t arrow_col = e.col > 0 ? (e.col - 1) : 0;
             std::string caret_line(header.size(), ' ');
@@ -3216,7 +3310,16 @@ std::string Cifa::format_runtime_frame(const CalUnit& c) const
 {
     std::string label = c.str.empty() ? "<none>" : c.str;
     std::string line_text;
-    if (c.line > 0 && c.line <= runtime_source_lines.size())
+    std::string filename = "<script>";
+    size_t line = c.line;
+    if (c.line > 0 && c.line <= runtime_source_line_infos.size())
+    {
+        const auto& source_line = runtime_source_line_infos[c.line - 1];
+        filename = source_line.filename;
+        line = source_line.line;
+        line_text = source_line.text;
+    }
+    else if (c.line > 0 && c.line <= runtime_source_lines.size())
     {
         line_text = runtime_source_lines[c.line - 1];
     }
@@ -3225,7 +3328,7 @@ std::string Cifa::format_runtime_frame(const CalUnit& c) const
         line_text = label;
     }
 
-    std::string header = "line " + std::to_string(c.line) + ", col " + std::to_string(c.col) + ": ";
+    std::string header = filename + ":" + std::to_string(line) + ", col " + std::to_string(c.col) + ": ";
     size_t arrow_col = c.col > 0 ? (c.col - 1) : 0;
     std::string caret_line(header.size(), ' ');
     const size_t prefix_len = std::min(arrow_col, line_text.size());
@@ -3261,6 +3364,7 @@ void Cifa::clear_runtime_error()
 {
     runtime_call_stack.clear();
     runtime_source_lines.clear();
+    runtime_source_line_infos.clear();
     runtime_error_message.clear();
     runtime_error_reported = false;
 }

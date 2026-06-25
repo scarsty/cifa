@@ -1,4 +1,5 @@
 ﻿#include "../Cifa.h"
+#include <filesystem>
 #include <iostream>
 #include <numeric>
 
@@ -619,15 +620,15 @@ bool static_syntax_error_test()
         R"(int x = 1; int y = x ? 10;)",
         "no :");
 
-    // 10. 错误定位验证：错误输出应包含 "at line 2" 和 "undef"
+    // 10. 错误定位验证：错误输出应包含 "<script>:2" 和 "undef"
     {
         Cifa c;
         c.set_output_error(false);
         c.run_script("int x = 10;\nint y = undef;\n");
         std::string err = c.get_errors_str();
-        if (err.find("at line 2") == std::string::npos || err.find("undef") == std::string::npos)
+        if (err.find("<script>:2") == std::string::npos || err.find("undef") == std::string::npos)
         {
-            std::cerr << "  FAIL [error line number]: expected 'at line 2' and 'undef' in error output\n";
+            std::cerr << "  FAIL [error line number]: expected '<script>:2' and 'undef' in error output\n";
             std::cerr << "    Got:\n"
                       << err;
             ok = false;
@@ -1370,21 +1371,21 @@ bool sprintf_format_test()
 bool include_basic_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/include_simple.cifa");
+    auto o = c.run_file("unit_test/test_data/include_simple.cifa");
     return o.isNumber() && o.toDouble() == 15.0;
 }
 
 bool include_multi_file_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/include_multi.cifa");
+    auto o = c.run_file("unit_test/test_data/include_multi.cifa");
     return o.isNumber() && o.toDouble() == 17.0;
 }
 
 bool include_transitive_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/c.cifa");
+    auto o = c.run_file("unit_test/test_data/c.cifa");
     return o.isNumber() && o.toDouble() == 201.0;
 }
 
@@ -1392,7 +1393,7 @@ bool include_self_circular_test()
 {
     Cifa c;
     c.set_output_error(false);
-    auto o = c.run_script_from_file("unit_test/test_data/self.cifa");
+    auto o = c.run_file("unit_test/test_data/self.cifa");
     return o.isNumber() && o.toDouble() == 1.0;
 }
 
@@ -1400,7 +1401,7 @@ bool include_mutual_circular_test()
 {
     Cifa c;
     c.set_output_error(false);
-    auto o = c.run_script_from_file("unit_test/test_data/cycle_a.cifa");
+    auto o = c.run_file("unit_test/test_data/cycle_a.cifa");
     return o.isNumber() && o.toDouble() == 1.0;
 }
 
@@ -1408,28 +1409,28 @@ bool include_missing_file_test()
 {
     Cifa c;
     c.set_output_error(false);
-    auto o = c.run_script_from_file("unit_test/test_data/missing.cifa");
+    auto o = c.run_file("unit_test/test_data/missing.cifa");
     return c.has_error();
 }
 
 bool include_subdir_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/include_subdir.cifa");
+    auto o = c.run_file("unit_test/test_data/include_subdir.cifa");
     return o.isNumber() && o.toDouble() == 42.0;
 }
 
 bool include_angle_bracket_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/angle_bracket.cifa");
+    auto o = c.run_file("unit_test/test_data/angle_bracket.cifa");
     return o.isNumber() && o.toDouble() == 10.0;
 }
 
 bool include_function_from_file_test()
 {
     Cifa c;
-    auto o = c.run_script_from_file("unit_test/test_data/include_in_function.cifa");
+    auto o = c.run_file("unit_test/test_data/include_in_function.cifa");
     return o.isNumber() && o.toDouble() == 25.0;
 }
 
@@ -1445,15 +1446,16 @@ bool include_with_parameters_test()
     Cifa c;
     std::unordered_map<std::string, Object> p;
     p["base"] = Object(100.0);
-    auto o = c.run_script_from_file("unit_test/test_data/with_params.cifa", p);
+    auto o = c.run_file("unit_test/test_data/with_params.cifa", p);
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
 bool include_run_script_include_dir_test()
 {
     Cifa c;
+    c.set_include_dirs({ "unit_test/test_data" });
     std::string script = "#include \"simple.cifa\"\nint y = x + 5;\nreturn y;\n";
-    auto o = c.run_script(script, "unit_test/test_data");
+    auto o = c.run_script(script);
     return o.isNumber() && o.toDouble() == 15.0;
 }
 
@@ -1468,19 +1470,61 @@ bool include_run_script_default_dir_test()
 bool include_run_script_include_dir_multi_test()
 {
     Cifa c;
+    c.set_include_dirs({ "unit_test/test_data" });
     std::string script = "#include \"lib_math.cifa\"\nreturn square(3) + cube(2);\n";
-    auto o = c.run_script(script, "unit_test/test_data");
+    auto o = c.run_script(script);
     return o.isNumber() && o.toDouble() == 17.0;
 }
 
 bool include_run_script_include_dir_with_params_test()
 {
     Cifa c;
+    c.set_include_dirs({ "unit_test/test_data" });
     std::unordered_map<std::string, Object> p;
     p["base"] = Object(100.0);
     std::string script = "return base + 10;\n";
-    auto o = c.run_script(script, p, "unit_test/test_data");
+    auto o = c.run_script(script, p);
     return o.isNumber() && o.toDouble() == 110.0;
+}
+
+bool include_multi_search_dirs_test()
+{
+    Cifa c;
+    c.set_include_dirs({ "unit_test/test_data/missing_dir", "unit_test/test_data" });
+    std::string script = "#include \"simple.cifa\"\nreturn x + 7;\n";
+    auto o = c.run_script(script);
+    return o.isNumber() && o.toDouble() == 17.0;
+}
+
+bool include_absolute_path_test()
+{
+    Cifa c;
+    c.set_include_dirs({ "unit_test/test_data/missing_dir" });
+    std::filesystem::path path = std::filesystem::absolute("unit_test/test_data/simple.cifa");
+    std::string path_str = path.generic_string();
+    std::string script = "#include \"" + path_str + "\"\nreturn x + 8;\n";
+    auto o = c.run_script(script);
+    return o.isNumber() && o.toDouble() == 18.0;
+}
+
+bool include_error_location_in_included_file_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.run_file("unit_test/test_data/include_bad_syntax.cifa");
+    std::string errors = c.get_errors_str();
+    return errors.find("unit_test/test_data/bad_syntax_include.cifa:2") != std::string::npos
+        && errors.find("int y = undef_from_include;") != std::string::npos;
+}
+
+bool include_error_location_after_include_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.run_file("unit_test/test_data/include_then_bad_main.cifa");
+    std::string errors = c.get_errors_str();
+    return errors.find("unit_test/test_data/include_then_bad_main.cifa:3") != std::string::npos
+        && errors.find("int b = undef_after_include;") != std::string::npos;
 }
 
 int main()
@@ -1550,6 +1594,10 @@ int main()
     run_test("include_run_script_default_dir_test", include_run_script_default_dir_test);
     run_test("include_run_script_include_dir_multi_test", include_run_script_include_dir_multi_test);
     run_test("include_run_script_include_dir_with_params_test", include_run_script_include_dir_with_params_test);
+    run_test("include_multi_search_dirs_test", include_multi_search_dirs_test);
+    run_test("include_absolute_path_test", include_absolute_path_test);
+    run_test("include_error_location_in_included_file_test", include_error_location_in_included_file_test);
+    run_test("include_error_location_after_include_test", include_error_location_after_include_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;

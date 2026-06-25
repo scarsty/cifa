@@ -353,6 +353,7 @@ private:
     std::unordered_map<std::string, Object> parameters;    //变量表，注意每次定义的函数调用都是独立的
     std::vector<void*> imported_modules;                   //通过 import() 加载的动态库句柄
     std::vector<std::string> imported_module_paths;        //避免重复加载同一个动态库
+    std::vector<std::string> include_dirs;                  //#include 搜索目录
 
     struct ErrorMessage
     {
@@ -374,8 +375,16 @@ private:
 
     std::set<ErrorMessage, ErrorMessageComp> errors;
 
+    struct SourceLineInfo
+    {
+        std::string filename;
+        size_t line = 0;
+        std::string text;
+    };
+
     std::vector<std::string> runtime_call_stack;
     std::vector<std::string> runtime_source_lines;
+    std::vector<SourceLineInfo> runtime_source_line_infos;
     std::string runtime_error_message;
     bool runtime_error_reported = false;
 
@@ -433,13 +442,15 @@ public:
 
     void* get_user_data(const std::string& name);
 
-    Object run_script(std::string script, const std::string& include_dir = ".");    //运行脚本，使用独立变量表；默认按当前目录处理#include
+    void set_include_dirs(const std::vector<std::string>& dirs);    //设置#include搜索目录
 
-    Object run_script(std::string script, std::unordered_map<std::string, Object>& p, const std::string& include_dir = ".");    //运行脚本，使用外部变量表；默认按当前目录处理#include
+    Object run_script(std::string script);    //运行脚本，使用独立变量表；按当前目录和include搜索目录处理#include
 
-    Object run_script_from_file(const std::string& filename);    //从文件运行脚本，支持#include指令
+    Object run_script(std::string script, std::unordered_map<std::string, Object>& p);    //运行脚本，使用外部变量表；按当前目录和include搜索目录处理#include
 
-    Object run_script_from_file(const std::string& filename, std::unordered_map<std::string, Object>& p);    //从文件运行脚本，使用外部变量表
+    Object run_file(const std::string& filename);    //从文件运行脚本，支持#include指令，并将文件所在目录作为搜索路径
+
+    Object run_file(const std::string& filename, std::unordered_map<std::string, Object>& p);    //从文件运行脚本，使用外部变量表
 
     bool has_error() const { return !errors.empty(); }
 
@@ -505,7 +516,8 @@ private:
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
 
     static std::string get_directory(const std::string& filepath);
-    std::string preprocess_includes(const std::string& source, const std::string& current_dir, std::set<std::string>& visited);
+    static bool is_absolute_path(const std::string& filepath);
+    std::string preprocess_includes(const std::string& source, const std::string& current_file, const std::string& current_dir, const std::vector<std::string>& extra_include_dirs, std::set<std::string>& visited);
     void add_error(size_t line, size_t col, const char* fmt, ...);
     Object run_pipeline(std::string str, std::unordered_map<std::string, Object>& p);
 

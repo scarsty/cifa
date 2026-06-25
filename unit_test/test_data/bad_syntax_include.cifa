@@ -1,0 +1,2 @@
+int ok = 1;
+int y = undef_from_include;
