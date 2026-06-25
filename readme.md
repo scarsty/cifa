@@ -106,7 +106,7 @@ Cifa c;
 auto o = c.run_script_from_file("scripts/main.cifa");
 ```
 
-如果脚本内容来自字符串，但仍希望指定一个“文件名”用于解析相对 include 路径，可以使用 `run_script_set_filename`：
+如果脚本内容来自字符串，但仍希望指定 include 的相对目录，可以使用 `run_script_set_include_dir`：
 
 ```c++
 Cifa c;
@@ -114,10 +114,10 @@ std::string script = R"(
 #include "lib_math.cifa"
 return square(3) + cube(2);
 )";
-auto o = c.run_script_set_filename(script, "scripts/main.cifa");
+auto o = c.run_script_set_include_dir(script, "scripts");
 ```
 
-`run_script_from_file` 和 `run_script_set_filename` 均有接受外部变量表的重载：
+`run_script_from_file` 和 `run_script_set_include_dir` 均有接受外部变量表的重载：
 
 ```c++
 std::unordered_map<std::string, Object> vars;
@@ -165,6 +165,26 @@ int main()
     c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
 ```
 这样也不必再定义sin1这个函数。
+
+如果宿主函数本身就是普通 C++ 函数指针，也可以直接注册，Cifa 会通过模板自动判断参数个数并完成常见类型转换。无重载的函数不需要手动写类型：
+
+```c++
+double square(double x) { return x * x; }
+double add(double a, double b) { return a + b; }
+
+c1.register_function("square", square);
+c1.register_function("add", add);
+```
+
+对于有重载的标准库函数，通常需要用 `static_cast` 指明具体签名：
+
+```c++
+c1.register_function("sin", static_cast<double(*)(double)>(&std::sin));
+c1.register_function("pow", static_cast<double(*)(double, double)>(&std::pow));
+```
+
+函数名仍需显式传入，因为 C++ 函数指针本身不携带源码中的名字。
+
 
 此时再运行如下脚本：
 ```c++
@@ -503,10 +523,13 @@ string s = "hello" + " " + "world";
 | `min(a, b, ...)` | 多个数中的最小值 |
 | `random()` | `[0, 1)` 均匀随机数；`random(n)` 返回 `[0, n)`；`random(a, b)` 返回 `[a, b)` |
 | `ifv(cond, a, b)` | 三元选择，等价于 `cond ? a : b` |
-| `abs / sqrt / round / floor / ceil` | 常见数学函数 |
-| `sin / cos / tan / asin / acos / atan` | 三角函数 |
+| `abs / sqrt / cbrt / round / trunc / nearbyint / rint / floor / ceil` | 常见数学函数 |
+| `fmod / remainder / copysign / fdim / fmax / fmin` | 常见双参数数学函数 |
+| `sin / cos / tan / asin / acos / atan / atan2` | 三角函数 |
 | `sinh / cosh / tanh` | 双曲函数 |
-| `exp / log / log10` | 指数对数函数 |
+| `exp / log / log2 / log10` | 指数对数函数 |
+| `hypot(x, y)` | 计算直角边为 x、y 的斜边长度 |
+| `erf / erfc / tgamma / lgamma` | 误差函数与 Gamma 相关函数 |
 | `sprintf(fmt, ...)` | C printf 风格格式化，支持 `%s %d %f %g %x` 等；`%%` 输出字面 `%` |
 | `format(fmt, ...)` | `{}` / `{N}` 占位符风格格式化；整数不带小数点，`{{` / `}}` 转义为字面括号 |
 

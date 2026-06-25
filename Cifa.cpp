@@ -86,14 +86,6 @@ Cifa::Cifa()
     register_function("ifv", ifv);
     register_function("ifvalue", ifv);
 
-    register_function("pow", [](ObjectVector& x) -> Object
-        {
-            if (x.size() <= 1) { return cifa::Object(); }
-            double x0 = x[0];
-            double x1 = x[1];
-            return pow(x0, x1);
-        });
-
     register_function("max", [](ObjectVector& x) -> Object
         {
             if (x.size() == 0) { return cifa::Object(); }
@@ -379,30 +371,45 @@ Cifa::Cifa()
             return Object(result);
         });
 
-#define REGISTER_FUNCTION(func) \
-    register_function(#func, [](ObjectVector& x) -> Object \
-        { \
-            if (x.size() == 0) { return cifa::Object(); } \
-            double x0 = x[0]; \
-            return func(x0); \
-        });
-    REGISTER_FUNCTION(abs);
-    REGISTER_FUNCTION(sqrt);
-    REGISTER_FUNCTION(round);
-    REGISTER_FUNCTION(sin);
-    REGISTER_FUNCTION(cos);
-    REGISTER_FUNCTION(tan);
-    REGISTER_FUNCTION(asin);
-    REGISTER_FUNCTION(acos);
-    REGISTER_FUNCTION(atan);
-    REGISTER_FUNCTION(sinh);
-    REGISTER_FUNCTION(cosh);
-    REGISTER_FUNCTION(tanh);
-    REGISTER_FUNCTION(exp);
-    REGISTER_FUNCTION(log);
-    REGISTER_FUNCTION(log10);
-    REGISTER_FUNCTION(ceil);
-    REGISTER_FUNCTION(floor);
+#define REGISTER_MATH1(func) register_function(#func, static_cast<double(*)(double)>(&std::func))
+#define REGISTER_MATH2(func) register_function(#func, static_cast<double(*)(double, double)>(&std::func))
+    REGISTER_MATH1(abs);
+    REGISTER_MATH1(sqrt);
+    REGISTER_MATH1(cbrt);
+    REGISTER_MATH1(round);
+    REGISTER_MATH1(trunc);
+    REGISTER_MATH1(nearbyint);
+    REGISTER_MATH1(rint);
+    REGISTER_MATH1(ceil);
+    REGISTER_MATH1(floor);
+    REGISTER_MATH1(sin);
+    REGISTER_MATH1(cos);
+    REGISTER_MATH1(tan);
+    REGISTER_MATH1(asin);
+    REGISTER_MATH1(acos);
+    REGISTER_MATH1(atan);
+    REGISTER_MATH2(atan2);
+    REGISTER_MATH1(sinh);
+    REGISTER_MATH1(cosh);
+    REGISTER_MATH1(tanh);
+    REGISTER_MATH1(exp);
+    REGISTER_MATH1(log);
+    REGISTER_MATH1(log2);
+    REGISTER_MATH1(log10);
+    REGISTER_MATH2(pow);
+    REGISTER_MATH2(hypot);
+    REGISTER_MATH2(fmod);
+    REGISTER_MATH2(remainder);
+    REGISTER_MATH1(erf);
+    REGISTER_MATH1(erfc);
+    REGISTER_MATH1(tgamma);
+    REGISTER_MATH1(lgamma);
+    REGISTER_MATH2(copysign);
+    REGISTER_MATH2(fdim);
+    REGISTER_MATH2(fmax);
+    REGISTER_MATH2(fmin);
+#undef REGISTER_MATH2
+#undef REGISTER_MATH1
 }
 
 //从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
@@ -2792,8 +2799,8 @@ Object Cifa::run_script(std::string script)
 {
     errors.clear();
     clear_runtime_error();
-    std::unordered_map<std::string, Object> p;
-    return run_pipeline(std::move(script), p);
+    std::unordered_map<std::string, Object> local_params;
+    return run_pipeline(std::move(script), local_params);
 }
 
 //运行脚本（使用外部变量表，支持当前目录下的#include）
@@ -2809,27 +2816,8 @@ Object Cifa::run_script(std::string script, std::unordered_map<std::string, Obje
 //从文件运行脚本（简化版，使用空变量表）
 Object Cifa::run_script_from_file(const std::string& filename)
 {
-    errors.clear();
-    clear_runtime_error();
-    std::ifstream ifs(filename);
-    if (!ifs.is_open())
-    {
-        add_error(1, 1, "cannot open file: %s", filename.c_str());
-        Object result = std::string("");
-        result.type1 = "Error";
-        if (output_error)
-        {
-            print_errors();
-        }
-        return result;
-    }
-    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    std::set<std::string> visited;
-    visited.insert(filename);
-    std::string dir = get_directory(filename);
-    str = preprocess_includes(str, dir, visited);
-    std::unordered_map<std::string, Object> p;
-    return run_pipeline(std::move(str), p);
+    std::unordered_map<std::string, Object> local_params;
+    return run_script_from_file(filename, local_params);
 }
 
 //从文件运行脚本（使用外部变量表）
@@ -2857,28 +2845,20 @@ Object Cifa::run_script_from_file(const std::string& filename, std::unordered_ma
     return run_pipeline(std::move(str), p);
 }
 
-//运行脚本，设定文件名用于解析#include（简化版，使用空变量表）
-Object Cifa::run_script_set_filename(std::string script, const std::string& filename)
+//运行脚本，设定include目录（简化版，使用空变量表）
+Object Cifa::run_script_set_include_dir(std::string script, const std::string& include_dir)
 {
-    errors.clear();
-    clear_runtime_error();
-    std::set<std::string> visited;
-    visited.insert(filename);
-    std::string dir = get_directory(filename);
-    script = preprocess_includes(script, dir, visited);
-    std::unordered_map<std::string, Object> p;
-    return run_pipeline(std::move(script), p);
+    std::unordered_map<std::string, Object> local_params;
+    return run_script_set_include_dir(std::move(script), include_dir, local_params);
 }
 
-//运行脚本，设定文件名用于解析#include，使用外部变量表
-Object Cifa::run_script_set_filename(std::string script, const std::string& filename, std::unordered_map<std::string, Object>& p)
+//运行脚本，设定include目录，使用外部变量表
+Object Cifa::run_script_set_include_dir(std::string script, const std::string& include_dir, std::unordered_map<std::string, Object>& p)
 {
     errors.clear();
     clear_runtime_error();
     std::set<std::string> visited;
-    visited.insert(filename);
-    std::string dir = get_directory(filename);
-    script = preprocess_includes(script, dir, visited);
+    script = preprocess_includes(script, include_dir, visited);
     return run_pipeline(std::move(script), p);
 }
 

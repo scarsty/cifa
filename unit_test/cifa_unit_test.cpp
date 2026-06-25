@@ -4,6 +4,26 @@
 
 using namespace cifa;
 
+static double template_square(double x)
+{
+    return x * x;
+}
+
+static double template_add(double a, double b)
+{
+    return a + b;
+}
+
+static int template_trunc(double x)
+{
+    return int(x);
+}
+
+static void template_set_flag(Object flag)
+{
+    (void)flag;
+}
+
 bool register_function_test()
 {
     Cifa c1;
@@ -30,6 +50,42 @@ bool register_function_test()
     {
         return false;
     }
+}
+
+bool register_function_template_test()
+{
+    Cifa c;
+    c.register_function("square", template_square);
+    c.register_function("add", template_add);
+    c.register_function("trunc", template_trunc);
+    c.register_function("set_flag", template_set_flag);
+
+    auto o = c.run_script(R"(
+        set_flag(1);
+        return square(3) + add(2, 4) + trunc(1.8);
+    )");
+    return o.isNumber() && o.toDouble() == 16.0;
+}
+
+bool builtin_math_function_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        double total = 0;
+        total += cbrt(27);
+        total += log2(8);
+        total += atan2(0, -1) > 3;
+        total += hypot(3, 4);
+        total += fmod(7, 4);
+        total += remainder(7, 4);
+        total += trunc(1.8);
+        total += copysign(2, -1);
+        total += fdim(5, 3);
+        total += fmax(2, 5);
+        total += fmin(2, 5);
+        return total;
+    )");
+    return o.isNumber() && std::fabs(o.toDouble() - 22.0) < 1e-9;
 }
 
 bool loop_math_test()
@@ -1382,29 +1438,29 @@ bool include_with_parameters_test()
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
-bool include_set_filename_test()
+bool include_set_include_dir_test()
 {
     Cifa c;
     std::string script = "#include \"simple.cifa\"\nint y = x + 5;\nreturn y;\n";
-    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa");
+    auto o = c.run_script_set_include_dir(script, "unit_test/test_data");
     return o.isNumber() && o.toDouble() == 15.0;
 }
 
-bool include_set_filename_multi_test()
+bool include_set_include_dir_multi_test()
 {
     Cifa c;
     std::string script = "#include \"lib_math.cifa\"\nreturn square(3) + cube(2);\n";
-    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa");
+    auto o = c.run_script_set_include_dir(script, "unit_test/test_data");
     return o.isNumber() && o.toDouble() == 17.0;
 }
 
-bool include_set_filename_with_params_test()
+bool include_set_include_dir_with_params_test()
 {
     Cifa c;
     std::unordered_map<std::string, Object> p;
     p["base"] = Object(100.0);
     std::string script = "return base + 10;\n";
-    auto o = c.run_script_set_filename(script, "unit_test/test_data/main.cifa", p);
+    auto o = c.run_script_set_include_dir(script, "unit_test/test_data", p);
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
@@ -1426,6 +1482,8 @@ int main()
     };
 
     run_test("register_function_test", register_function_test);
+    run_test("register_function_template_test", register_function_template_test);
+    run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
     run_test("ternary_operator_test", ternary_operator_test);
@@ -1468,9 +1526,9 @@ int main()
     run_test("include_function_from_file_test", include_function_from_file_test);
     run_test("include_backward_compat_test", include_backward_compat_test);
     run_test("include_with_parameters_test", include_with_parameters_test);
-    run_test("include_set_filename_test", include_set_filename_test);
-    run_test("include_set_filename_multi_test", include_set_filename_multi_test);
-    run_test("include_set_filename_with_params_test", include_set_filename_with_params_test);
+    run_test("include_set_include_dir_test", include_set_include_dir_test);
+    run_test("include_set_include_dir_multi_test", include_set_include_dir_multi_test);
+    run_test("include_set_include_dir_with_params_test", include_set_include_dir_with_params_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;
