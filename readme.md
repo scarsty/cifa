@@ -106,7 +106,7 @@ Cifa c;
 auto o = c.run_script_from_file("scripts/main.cifa");
 ```
 
-如果脚本内容来自字符串，但仍希望指定 include 的相对目录，可以使用 `run_script_set_include_dir`：
+如果脚本内容来自字符串，但仍希望指定 include 的相对目录，可以调用 `run_script` 的 include 目录重载：
 
 ```c++
 Cifa c;
@@ -114,20 +114,21 @@ std::string script = R"(
 #include "lib_math.cifa"
 return square(3) + cube(2);
 )";
-auto o = c.run_script_set_include_dir(script, "scripts");
+auto o = c.run_script(script, "scripts");
 ```
 
-`run_script_from_file` 和 `run_script_set_include_dir` 均有接受外部变量表的重载：
+`run_script` 和 `run_script_from_file` 均有接受外部变量表的重载：
 
 ```c++
 std::unordered_map<std::string, Object> vars;
 vars["base"] = Object(100.0);
 auto o = c.run_script_from_file("scripts/main.cifa", vars);
+auto o2 = c.run_script(script, vars, "scripts");
 ```
 
 几点限制和行为说明：
 
-- `run_script(script)` 不处理 include；`run_script(script, vars)` 会按当前目录 `.` 解析 include。若脚本来自文件，优先使用 `run_script_from_file`。
+- `run_script(script)` 默认按当前目录 `.` 解析 include；若脚本来自文件，优先使用 `run_script_from_file`，这样相对路径会以脚本文件所在目录为基准。
 - 重复 include 或循环 include 会被跳过，避免无限递归展开。
 - include 失败会产生语法错误，例如 `#include: cannot open file 'missing.cifa'`。
 - include 指令必须写在行首或只带前导空白；其他位置不会作为 include 处理。

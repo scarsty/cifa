@@ -1438,29 +1438,37 @@ bool include_with_parameters_test()
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
-bool include_set_include_dir_test()
+bool include_run_script_include_dir_test()
 {
     Cifa c;
     std::string script = "#include \"simple.cifa\"\nint y = x + 5;\nreturn y;\n";
-    auto o = c.run_script_set_include_dir(script, "unit_test/test_data");
+    auto o = c.run_script(script, "unit_test/test_data");
     return o.isNumber() && o.toDouble() == 15.0;
 }
 
-bool include_set_include_dir_multi_test()
+bool include_run_script_default_dir_test()
+{
+    Cifa c;
+    std::string script = "#include \"unit_test/test_data/simple.cifa\"\nreturn x + 5;\n";
+    auto o = c.run_script(script);
+    return o.isNumber() && o.toDouble() == 15.0;
+}
+
+bool include_run_script_include_dir_multi_test()
 {
     Cifa c;
     std::string script = "#include \"lib_math.cifa\"\nreturn square(3) + cube(2);\n";
-    auto o = c.run_script_set_include_dir(script, "unit_test/test_data");
+    auto o = c.run_script(script, "unit_test/test_data");
     return o.isNumber() && o.toDouble() == 17.0;
 }
 
-bool include_set_include_dir_with_params_test()
+bool include_run_script_include_dir_with_params_test()
 {
     Cifa c;
     std::unordered_map<std::string, Object> p;
     p["base"] = Object(100.0);
     std::string script = "return base + 10;\n";
-    auto o = c.run_script_set_include_dir(script, "unit_test/test_data", p);
+    auto o = c.run_script(script, p, "unit_test/test_data");
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
@@ -1526,9 +1534,10 @@ int main()
     run_test("include_function_from_file_test", include_function_from_file_test);
     run_test("include_backward_compat_test", include_backward_compat_test);
     run_test("include_with_parameters_test", include_with_parameters_test);
-    run_test("include_set_include_dir_test", include_set_include_dir_test);
-    run_test("include_set_include_dir_multi_test", include_set_include_dir_multi_test);
-    run_test("include_set_include_dir_with_params_test", include_set_include_dir_with_params_test);
+    run_test("include_run_script_include_dir_test", include_run_script_include_dir_test);
+    run_test("include_run_script_default_dir_test", include_run_script_default_dir_test);
+    run_test("include_run_script_include_dir_multi_test", include_run_script_include_dir_multi_test);
+    run_test("include_run_script_include_dir_with_params_test", include_run_script_include_dir_with_params_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;

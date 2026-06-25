@@ -429,17 +429,13 @@ public:
 
     void* get_user_data(const std::string& name);
 
-    Object run_script(std::string script);    //运行脚本，注意实际上使用独立的变量表，不处理#include
+    Object run_script(std::string script, const std::string& include_dir = ".");    //运行脚本，使用独立变量表；默认按当前目录处理#include
 
-    Object run_script(std::string script, std::unordered_map<std::string, Object>& p);    //运行脚本，使用外部传入的变量表，变量表会被修改
+    Object run_script(std::string script, std::unordered_map<std::string, Object>& p, const std::string& include_dir = ".");    //运行脚本，使用外部变量表；默认按当前目录处理#include
 
     Object run_script_from_file(const std::string& filename);    //从文件运行脚本，支持#include指令
 
     Object run_script_from_file(const std::string& filename, std::unordered_map<std::string, Object>& p);    //从文件运行脚本，使用外部变量表
-
-    Object run_script_set_include_dir(std::string script, const std::string& include_dir);    //运行脚本，设定include目录
-
-    Object run_script_set_include_dir(std::string script, const std::string& include_dir, std::unordered_map<std::string, Object>& p);    //运行脚本，设定include目录，使用外部变量表
 
     bool has_error() const { return !errors.empty(); }
 

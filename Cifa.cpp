@@ -2794,22 +2794,24 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
 }
 
-//运行脚本（简化版，使用空变量表，不处理#include）
-Object Cifa::run_script(std::string script)
+//运行脚本，使用独立变量表；默认按当前目录处理#include
+Object Cifa::run_script(std::string script, const std::string& include_dir)
 {
     errors.clear();
     clear_runtime_error();
     std::unordered_map<std::string, Object> local_params;
+    std::set<std::string> visited;
+    script = preprocess_includes(script, include_dir.empty() ? "." : include_dir, visited);
     return run_pipeline(std::move(script), local_params);
 }
 
-//运行脚本（使用外部变量表，支持当前目录下的#include）
-Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p)
+//运行脚本，使用外部变量表；默认按当前目录处理#include
+Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p, const std::string& include_dir)
 {
     errors.clear();
     clear_runtime_error();
     std::set<std::string> visited;
-    script = preprocess_includes(script, ".", visited);
+    script = preprocess_includes(script, include_dir.empty() ? "." : include_dir, visited);
     return run_pipeline(std::move(script), p);
 }
 
@@ -2843,23 +2845,6 @@ Object Cifa::run_script_from_file(const std::string& filename, std::unordered_ma
     std::string dir = get_directory(filename);
     str = preprocess_includes(str, dir, visited);
     return run_pipeline(std::move(str), p);
-}
-
-//运行脚本，设定include目录（简化版，使用空变量表）
-Object Cifa::run_script_set_include_dir(std::string script, const std::string& include_dir)
-{
-    std::unordered_map<std::string, Object> local_params;
-    return run_script_set_include_dir(std::move(script), include_dir, local_params);
-}
-
-//运行脚本，设定include目录，使用外部变量表
-Object Cifa::run_script_set_include_dir(std::string script, const std::string& include_dir, std::unordered_map<std::string, Object>& p)
-{
-    errors.clear();
-    clear_runtime_error();
-    std::set<std::string> visited;
-    script = preprocess_includes(script, include_dir, visited);
-    return run_pipeline(std::move(script), p);
 }
 
 //脚本执行管线：词法分析→语法树构建→语法检查→求值执行
