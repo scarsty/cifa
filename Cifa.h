@@ -357,19 +357,23 @@ private:
 
     struct ErrorMessage
     {
+        std::string filename;
         size_t line = 0, col = 0;
         std::string message;
+        size_t expanded_line = 0;
     };
 
     struct ErrorMessageComp
     {
         bool operator()(const ErrorMessage& l, const ErrorMessage& r) const
         {
-            if (l.line == r.line)
+            size_t left_line = l.expanded_line != 0 ? l.expanded_line : l.line;
+            size_t right_line = r.expanded_line != 0 ? r.expanded_line : r.line;
+            if (left_line == right_line)
             {
                 return l.col < r.col;
             }
-            return l.line < r.line;
+            return left_line < right_line;
         }
     };
 
@@ -519,14 +523,22 @@ private:
     static bool is_absolute_path(const std::string& filepath);
     std::string preprocess_includes(const std::string& source, const std::string& current_file, const std::string& current_dir, const std::vector<std::string>& extra_include_dirs, std::set<std::string>& visited);
     void add_error(size_t line, size_t col, const char* fmt, ...);
+    void add_error(const std::string& filename, size_t line, size_t col, const char* fmt, ...);
     Object run_pipeline(std::string str, std::unordered_map<std::string, Object>& p);
 
     template <typename... Args>
     void add_error(CalUnit& c, Args... args)
     {
         ErrorMessage e;
+        e.expanded_line = c.line;
         e.line = c.line;
         e.col = c.col;
+        if (c.line > 0 && c.line <= runtime_source_line_infos.size())
+        {
+            const auto& source_line = runtime_source_line_infos[c.line - 1];
+            e.filename = source_line.filename;
+            e.line = source_line.line;
+        }
         char buffer[1024] = { '\0' };
         if (sizeof...(args) == 1)
         {

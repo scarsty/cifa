@@ -1513,8 +1513,12 @@ bool include_error_location_in_included_file_test()
     c.set_output_error(false);
     c.run_file("unit_test/test_data/include_bad_syntax.cifa");
     std::string errors = c.get_errors_str();
+    auto error_list = c.get_errors();
     return errors.find("unit_test/test_data/bad_syntax_include.cifa:2") != std::string::npos
-        && errors.find("int y = undef_from_include;") != std::string::npos;
+        && errors.find("int y = undef_from_include;") != std::string::npos
+        && error_list.size() == 1
+        && error_list[0].filename == "unit_test/test_data/bad_syntax_include.cifa"
+        && error_list[0].line == 2;
 }
 
 bool include_error_location_after_include_test()
@@ -1523,8 +1527,12 @@ bool include_error_location_after_include_test()
     c.set_output_error(false);
     c.run_file("unit_test/test_data/include_then_bad_main.cifa");
     std::string errors = c.get_errors_str();
+    auto error_list = c.get_errors();
     return errors.find("unit_test/test_data/include_then_bad_main.cifa:3") != std::string::npos
-        && errors.find("int b = undef_after_include;") != std::string::npos;
+        && errors.find("int b = undef_after_include;") != std::string::npos
+        && error_list.size() == 1
+        && error_list[0].filename == "unit_test/test_data/include_then_bad_main.cifa"
+        && error_list[0].line == 3;
 }
 
 int main()

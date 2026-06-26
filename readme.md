@@ -615,7 +615,7 @@ if (c.has_error())
     // 也可逐条访问（建议优先使用上面的字符串接口）
     for (auto& e : c.get_errors())
     {
-        // e.line, e.col, e.message
+        // e.filename, e.line, e.col, e.message
     }
 }
 ```

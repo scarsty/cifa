@@ -2959,7 +2959,7 @@ Object Cifa::run_file(const std::string& filename, std::unordered_map<std::strin
     std::ifstream ifs(filename);
     if (!ifs.is_open())
     {
-        add_error(1, 1, "cannot open file: %s", filename.c_str());
+        add_error(filename, 1, 1, "cannot open file: %s", filename.c_str());
         Object result = std::string("");
         result.type1 = "Error";
         if (output_error)
@@ -3096,8 +3096,31 @@ bool Cifa::is_absolute_path(const std::string& filepath)
 void Cifa::add_error(size_t line, size_t col, const char* fmt, ...)
 {
     ErrorMessage e;
+    e.expanded_line = line;
     e.line = line;
     e.col = col;
+    if (line > 0 && line <= runtime_source_line_infos.size())
+    {
+        const auto& source_line = runtime_source_line_infos[line - 1];
+        e.filename = source_line.filename;
+        e.line = source_line.line;
+    }
+    char buffer[1024] = { '\0' };
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, 1024, fmt, args);
+    va_end(args);
+    e.message = buffer;
+    errors.emplace(std::move(e));
+}
+
+void Cifa::add_error(const std::string& filename, size_t line, size_t col, const char* fmt, ...)
+{
+    ErrorMessage e;
+    e.filename = filename;
+    e.line = line;
+    e.col = col;
+    e.expanded_line = runtime_source_line_infos.size();
     char buffer[1024] = { '\0' };
     va_list args;
     va_start(args, fmt);
@@ -3173,7 +3196,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         if (filename_start == std::string::npos)
         {
             runtime_source_line_infos.push_back({ current_file, line_num, line });
-            add_error(line_num, first_non_space + 1, "#include: missing filename");
+            add_error(current_file, line_num, first_non_space + 1, "#include: missing filename");
             result += "\n";
             continue;
         }
@@ -3184,7 +3207,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         else
         {
             runtime_source_line_infos.push_back({ current_file, line_num, line });
-            add_error(line_num, first_non_space + 1, "#include: invalid syntax, expected '\"' or '<'");
+            add_error(current_file, line_num, first_non_space + 1, "#include: invalid syntax, expected '\"' or '<'");
             result += "\n";
             continue;
         }
@@ -3192,7 +3215,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         if (filename_end == std::string::npos)
         {
             runtime_source_line_infos.push_back({ current_file, line_num, line });
-            add_error(line_num, first_non_space + 1, "#include: missing closing '%c'", close_char);
+            add_error(current_file, line_num, first_non_space + 1, "#include: missing closing '%c'", close_char);
             result += "\n";
             continue;
         }
@@ -3248,7 +3271,7 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         if (!ifs.is_open())
         {
             runtime_source_line_infos.push_back({ current_file, line_num, line });
-            add_error(line_num, first_non_space + 1, "#include: cannot open file '%s'", include_filename.c_str());
+            add_error(current_file, line_num, first_non_space + 1, "#include: cannot open file '%s'", include_filename.c_str());
             result += "\n";
             continue;
         }
@@ -3269,11 +3292,11 @@ std::string Cifa::get_errors_str() const
     for (auto& e : errors)
     {
         str += "Syntax Error: " + e.message + "\n";
-        if (e.line > 0 && e.line <= runtime_source_line_infos.size())
+        if (e.expanded_line > 0 && e.expanded_line <= runtime_source_line_infos.size())
         {
-            const auto& source_line = runtime_source_line_infos[e.line - 1];
+            const auto& source_line = runtime_source_line_infos[e.expanded_line - 1];
             const std::string& line_text = source_line.text;
-            std::string header = "  at " + source_line.filename + ":" + std::to_string(source_line.line) + ", col " + std::to_string(e.col) + ": ";
+            std::string header = "  at " + e.filename + ":" + std::to_string(e.line) + ", col " + std::to_string(e.col) + ": ";
             str += header + line_text + "\n";
             size_t arrow_col = e.col > 0 ? (e.col - 1) : 0;
             std::string caret_line(header.size(), ' ');
@@ -3287,7 +3310,14 @@ std::string Cifa::get_errors_str() const
         }
         else
         {
-            str += "  at line " + std::to_string(e.line) + ", col " + std::to_string(e.col) + "\n";
+            if (!e.filename.empty())
+            {
+                str += "  at " + e.filename + ":" + std::to_string(e.line) + ", col " + std::to_string(e.col) + "\n";
+            }
+            else
+            {
+                str += "  at line " + std::to_string(e.line) + ", col " + std::to_string(e.col) + "\n";
+            }
         }
     }
     return str;
