@@ -1,8 +1,8 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
 #include <cstdarg>
-#include <fstream>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #ifdef _WIN32
@@ -80,6 +80,34 @@ Cifa::Cifa()
                 return Object();
             }
             return Object(atof(d[0].toString().c_str()));
+        });
+    register_function("type", [](ObjectVector& d)
+        {
+            if (d.empty() || !d[0].hasValue())
+            {
+                return Object(std::string("empty"));
+            }
+            if (!d[0].getSpecialType().empty())
+            {
+                return Object(d[0].getSpecialType());
+            }
+            if (d[0].isNumber())
+            {
+                return Object(std::string("number"));
+            }
+            if (d[0].isType<std::string>())
+            {
+                return Object(std::string("string"));
+            }
+            if (d[0].isType<std::vector<Object>>())
+            {
+                return Object(std::string("array"));
+            }
+            if (d[0].isType<ObjectMap>())
+            {
+                return Object(std::string("map"));
+            }
+            return Object(d[0].getType().name());
         });
     register_function("import", [this](ObjectVector& d) -> Object
         {
@@ -179,7 +207,7 @@ Cifa::Cifa()
     // spec 含用户原始长度修饰符（如 %llu），此处统一剥离后按类型重新添加
     auto sprintf_sub = [](const Object& arg, const std::string& spec, char tc) -> std::string
     {
-        char buf[512] = {};
+        char buf[512] = { };
         // 剥离用户写的长度修饰符（hlLzjtq），保留 %、flags、width、.prec
         static const std::string len_mods = "hlLzjtq";
         std::string base;    // '%' + flags + width + .prec，不含长度修饰符和类型字符
@@ -271,7 +299,7 @@ Cifa::Cifa()
     // 将 Object 转为字符串
     // fspec 为空：用 std::format "{}"（编译期字面量），double 自动省略多余零（如 42.0→4 2）
     // fspec 非空：格式字串是运行时値，必须用 std::vformat；按末尾字符选择传入的原生类型
-    auto format_sub = [](const Object& arg, const std::string& fspec = {}) -> std::string
+    auto format_sub = [](const Object& arg, const std::string& fspec = { }) -> std::string
     {
         if (fspec.empty())
         {
@@ -390,8 +418,8 @@ Cifa::Cifa()
             return Object(result);
         });
 
-#define REGISTER_MATH1(func) register_function(#func, static_cast<double(*)(double)>(&std::func))
-#define REGISTER_MATH2(func) register_function(#func, static_cast<double(*)(double, double)>(&std::func))
+#define REGISTER_MATH1(func) register_function(#func, static_cast<double (*)(double)>(&std::func))
+#define REGISTER_MATH2(func) register_function(#func, static_cast<double (*)(double, double)>(&std::func))
     REGISTER_MATH1(abs);
     REGISTER_MATH1(sqrt);
     REGISTER_MATH1(cbrt);
@@ -486,7 +514,7 @@ struct RuntimeFrameGuard
 {
     std::vector<std::string>& stack;
     RuntimeFrameGuard(std::vector<std::string>& s) :
-        stack(s) {}
+        stack(s) { }
     ~RuntimeFrameGuard()
     {
         if (!stack.empty())
@@ -638,7 +666,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         std::vector<std::string>& stack;
         bool active;
         ConditionalFrameGuard(std::vector<std::string>& s, bool a) :
-            stack(s), active(a) {}
+            stack(s), active(a) { }
         ~ConditionalFrameGuard()
         {
             if (active && !stack.empty())
@@ -760,7 +788,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 //空花括号 {} 在赋值右侧视为空数组字面量
                 if (c.v[1].type == CalUnitType::Union && c.v[1].str == "{}" && c.v[1].v.empty())
                 {
-                    return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = Object(std::vector<Object>{});
+                    return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = Object(std::vector<Object>{ });
                 }
                 return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = eval_scoped(c.v[1], scopes);
             }
@@ -1284,7 +1312,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 else
                 {
                     //脚本中的自定义函数
-                    functions2[std::prev(it)->str] = {};
+                    functions2[std::prev(it)->str] = { };
                 }
             }
         }
@@ -1295,7 +1323,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 it->type = CalUnitType::Key;
             }
         }
-        if (vector_have(types, it->str))
+        if (it->type == CalUnitType::Parameter && vector_have(types, it->str))
         {
             it->type = CalUnitType::Type;
         }
@@ -1362,7 +1390,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 auto it2 = std::next(it1);
                 if (it2 != rv.end() && it2->str == "{")
                 {
-                    struct_defs.emplace(it1->str, std::vector<std::string>{});
+                    struct_defs.emplace(it1->str, std::vector<std::string>{ });
                 }
             }
         }
@@ -3070,8 +3098,14 @@ std::string Cifa::get_directory(const std::string& filepath)
     auto pos1 = filepath.find_last_of('/');
     auto pos2 = filepath.find_last_of('\\');
     size_t pos = std::string::npos;
-    if (pos1 != std::string::npos) pos = pos1;
-    if (pos2 != std::string::npos && (pos == std::string::npos || pos2 > pos)) pos = pos2;
+    if (pos1 != std::string::npos)
+    {
+        pos = pos1;
+    }
+    if (pos2 != std::string::npos && (pos == std::string::npos || pos2 > pos))
+    {
+        pos = pos2;
+    }
     if (pos != std::string::npos)
     {
         return filepath.substr(0, pos);
@@ -3136,28 +3170,43 @@ static std::string normalize_path(const std::string& path)
     std::string normalized = path;
     for (auto& c : normalized)
     {
-        if (c == '\\') c = '/';
+        if (c == '\\')
+        {
+            c = '/';
+        }
     }
     std::vector<std::string> parts;
     std::stringstream ss(normalized);
     std::string part;
     while (std::getline(ss, part, '/'))
     {
-        if (part.empty() || part == ".") continue;
+        if (part.empty() || part == ".")
+        {
+            continue;
+        }
         if (part == "..")
         {
-            if (!parts.empty()) parts.pop_back();
+            if (!parts.empty())
+            {
+                parts.pop_back();
+            }
         }
         else
         {
             parts.push_back(part);
         }
     }
-    if (parts.empty()) return ".";
+    if (parts.empty())
+    {
+        return ".";
+    }
     std::string result;
     for (size_t i = 0; i < parts.size(); ++i)
     {
-        if (i > 0) result += "/";
+        if (i > 0)
+        {
+            result += "/";
+        }
         result += parts[i];
     }
     return result;
@@ -3202,8 +3251,14 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
         }
         char open_char = rest[filename_start];
         char close_char = 0;
-        if (open_char == '"') close_char = '"';
-        else if (open_char == '<') close_char = '>';
+        if (open_char == '"')
+        {
+            close_char = '"';
+        }
+        else if (open_char == '<')
+        {
+            close_char = '>';
+        }
         else
         {
             runtime_source_line_infos.push_back({ current_file, line_num, line });

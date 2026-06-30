@@ -89,6 +89,22 @@ bool builtin_math_function_test()
     return o.isNumber() && std::fabs(o.toDouble() - 22.0) < 1e-9;
 }
 
+bool builtin_type_function_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        int empty_value;
+        arr = {1, 2};
+        m["x"] = 1;
+        return type(empty_value) == "empty"
+            && type(1) == "number"
+            && type("abc") == "string"
+            && type(arr) == "array"
+            && type(m) == "map";
+    )");
+    return o.isNumber() && o.toDouble() == 1.0;
+}
+
 bool import_dll_test()
 {
     Cifa c;
@@ -203,6 +219,17 @@ bool string_operation_test()
     )";
     auto o = c.run_script(script);
     return o.hasValue() && o.isType<std::string>() && o.toString() == "Hello World";
+}
+
+bool string_compare_test()
+{    // 字符串比较与跨行逻辑运算测试
+    Cifa c;
+    std::string script = R"(
+        return "abc" == "abc"
+            && "abc" != "def";
+    )";
+    auto o = c.run_script(script);
+    return o.isNumber() && o.toDouble() == 1.0;
 }
 
 bool bitwise_operator_test()
@@ -1555,6 +1582,7 @@ int main()
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
+    run_test("builtin_type_function_test", builtin_type_function_test);
     run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
@@ -1562,6 +1590,7 @@ int main()
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
     run_test("string_operation_test", string_operation_test);
+    run_test("string_compare_test", string_compare_test);
     run_test("bitwise_operator_test", bitwise_operator_test);
     run_test("scope_shadowing_test", scope_shadowing_test);
     run_test("complex_math_priority_test", complex_math_priority_test);

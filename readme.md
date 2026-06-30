@@ -572,6 +572,9 @@ string s = "hello" + " " + "world";
 - `to_string(3.14)` → 将数值转为字符串
 - `to_number("3.14")` → 将字符串转为数值
 
+类型检查：
+- `type(x)` → 返回变量或表达式的类型字符串。内置类型返回 `empty`、`number`、`string`、`array`、`map`；宿主程序注册的自定义对象返回对应的 C++ 类型名。
+
 ### 内置函数汇总
 
 | 函数 | 说明 |
@@ -580,6 +583,7 @@ string s = "hello" + " " + "world";
 | `println(...)` | 输出一个或多个值，最后换行 |
 | `to_string(x)` | 将数值转为字符串 |
 | `to_number(s)` | 将字符串转为数值 |
+| `type(x)` | 返回变量或表达式的类型字符串，如 `empty`、`number`、`string`、`array`、`map` |
 | `size(x)` | 返回数组、map 或字符串的大小 |
 | `pow(x, y)` | x 的 y 次方 |
 | `max(a, b, ...)` | 多个数中的最大值 |
