@@ -84,7 +84,7 @@ struct Object
         }
         const std::string object_name = name.empty() ? "<temporary>" : name;
         const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to double");
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to double", this);
         return NAN;
     }
 
@@ -96,7 +96,7 @@ struct Object
         }
         const std::string object_name = name.empty() ? "<temporary>" : name;
         const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to string");
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to string", this);
         return "";
     }
 
@@ -110,7 +110,7 @@ struct Object
         }
         const std::string object_name = name.empty() ? "<temporary>" : name;
         const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
         return T();
     }
 
@@ -125,7 +125,7 @@ struct Object
         }
         const std::string object_name = name.empty() ? "<temporary>" : name;
         const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
         throw std::bad_any_cast();
     }
 
@@ -138,7 +138,7 @@ struct Object
         }
         const std::string object_name = name.empty() ? "<temporary>" : name;
         const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name());
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
         throw std::bad_any_cast();
     }
 
@@ -158,15 +158,15 @@ struct Object
     std::type_info const& getType() const { return value.type(); }
 
 private:
-    static void report_runtime_error(const std::string& message)
+    static void report_runtime_error(const std::string& message, const Object* source)
     {
         if (runtime_error_reporter)
         {
-            runtime_error_reporter(message);
+            runtime_error_reporter(message, source);
         }
     }
 
-    static void set_runtime_error_reporter(const std::function<void(const std::string&)>& reporter)
+    static void set_runtime_error_reporter(const std::function<void(const std::string&, const Object*)>& reporter)
     {
         runtime_error_reporter = reporter;
     }
@@ -176,12 +176,13 @@ private:
         runtime_error_reporter = nullptr;
     }
 
-    inline static std::function<void(const std::string&)> runtime_error_reporter;
+    inline static std::function<void(const std::string&, const Object*)> runtime_error_reporter;
 
     std::any value;
     std::string type1;        //特别的类型，用于Error、break、continue
     std::vector<Object> v;    //仅用于处理逗号表达式
     std::string name;
+    const Object* argument_origin = nullptr;
 };
 
 using ObjectVector = std::vector<Object>;
@@ -389,6 +390,8 @@ private:
     std::vector<std::string> runtime_call_stack;
     std::vector<std::string> runtime_source_lines;
     std::vector<SourceLineInfo> runtime_source_line_infos;
+    const std::vector<CalUnit>* active_function_arguments = nullptr;
+    const ObjectVector* active_function_values = nullptr;
     std::string runtime_error_message;
     bool runtime_error_reported = false;
 
@@ -509,7 +512,7 @@ private:
     bool has_return_value(const ScopeStack& scopes) const;
     Object& return_value(ScopeStack& scopes);
     std::string format_runtime_frame(const CalUnit& c) const;
-    void set_runtime_error(const std::string& message);
+    void set_runtime_error(const std::string& message, const Object* source = nullptr);
     void clear_runtime_error();
     bool has_runtime_error() const { return !runtime_error_message.empty(); }
     void print_runtime_error() const;

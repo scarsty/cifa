@@ -25,6 +25,11 @@ static void template_set_flag(Object flag)
     (void)flag;
 }
 
+static double template_menu(double x, double y, Object choices, double count)
+{
+    return x + y + count + (choices.hasValue() ? 0.0 : 1.0);
+}
+
 bool register_function_test()
 {
     Cifa c1;
@@ -66,6 +71,65 @@ bool register_function_template_test()
         return square(3) + add(2, 4) + trunc(1.8);
     )");
     return o.isNumber() && o.toDouble() == 16.0;
+}
+
+bool typed_function_argument_error_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.register_function("menu", template_menu);
+    auto o = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
+    return o.getSpecialType() == "Error"
+        && c.get_runtime_error().find("variable 'strs'") != std::string::npos
+        && c.get_runtime_error().find("to double") != std::string::npos;
+}
+
+bool object_vector_argument_error_test()
+{
+    const auto expect_conversion_error = [](const Cifa::func_type& menu, const std::string& target_type)
+        {
+            Cifa c;
+            c.set_output_error(false);
+            c.register_function("menu", menu);
+            auto result = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
+            return result.getSpecialType() == "Error"
+                && c.get_runtime_error().find("variable 'strs'") != std::string::npos
+                && c.get_runtime_error().find(target_type) != std::string::npos;
+        };
+    const auto expect_ref_error = []()
+        {
+            Cifa c;
+            c.set_output_error(false);
+            c.register_function("menu", [](ObjectVector& args) -> Object
+                {
+                    return Object(args[3].ref<ObjectMap>().size());
+                });
+            try
+            {
+                c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
+            }
+            catch (const std::bad_any_cast&)
+            {
+                return c.get_runtime_error().find("variable 'strs'") != std::string::npos
+                    && c.get_runtime_error().find(typeid(ObjectMap).name()) != std::string::npos;
+            }
+            return false;
+        };
+
+    return expect_conversion_error([](ObjectVector& args) -> Object
+        {
+            return Object(args[3].toDouble());
+        }, "to double")
+        && expect_conversion_error([](ObjectVector& args) -> Object
+        {
+            Object value = args[3];
+            return Object(value.toDouble());
+        }, "to double")
+        && expect_conversion_error([](ObjectVector& args) -> Object
+        {
+            return Object(args[3].toString());
+        }, "to string")
+        && expect_ref_error();
 }
 
 bool builtin_math_function_test()
@@ -660,7 +724,23 @@ bool static_syntax_error_test()
         R"(int x = 1; int y = x ? 10;)",
         "no :");
 
-    // 10. 错误定位验证：错误输出应包含 "<script>:2" 和 "undef"
+    // 10. 非法字符不能被静默忽略，避免 #strs 被解释为 strs
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("return menu(85, 100, strs, #strs);");
+        std::string err = c.get_errors_str();
+        if (err.find("unexpected character '#'") == std::string::npos
+            || err.find("col 29") == std::string::npos)
+        {
+            std::cerr << "  FAIL [unexpected character]: expected '#' at column 29\n";
+            std::cerr << "    Got:\n"
+                      << err;
+            ok = false;
+        }
+    }
+
+    // 11. 错误定位验证：错误输出应包含 "<script>:2" 和 "undef"
     {
         Cifa c;
         c.set_output_error(false);
@@ -1632,6 +1712,8 @@ int main()
 
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
+    run_test("typed_function_argument_error_test", typed_function_argument_error_test);
+    run_test("object_vector_argument_error_test", object_vector_argument_error_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("builtin_type_function_test", builtin_type_function_test);
     run_test("range_for_test", range_for_test);

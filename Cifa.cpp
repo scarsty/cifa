@@ -1297,6 +1297,10 @@ std::list<CalUnit> Cifa::split(std::string& str)
         }
         else if (g == CalUnitType::None)
         {
+            if (!std::isspace(static_cast<unsigned char>(c)))
+            {
+                add_error(line, col, "unexpected character '%c'", c);
+            }
             stat = CalUnitType::None;
         }
         if (pre_stat != stat || stat == CalUnitType::Operator || stat == CalUnitType::Split)
@@ -2182,6 +2186,31 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
                 v.emplace_back(eval_scoped(c, scopes));
             }
         }
+        for (auto& value : v)
+        {
+            value.argument_origin = &value;
+        }
+        struct ActiveFunctionArgumentsGuard
+        {
+            const std::vector<CalUnit>*& active_arguments;
+            const std::vector<CalUnit>* previous_arguments;
+            const ObjectVector*& active_values;
+            const ObjectVector* previous_values;
+
+            ActiveFunctionArgumentsGuard(const std::vector<CalUnit>*& active, const std::vector<CalUnit>& arguments,
+                const ObjectVector*& values, const ObjectVector& function_values) :
+                active_arguments(active), previous_arguments(active), active_values(values), previous_values(values)
+            {
+                active_arguments = &arguments;
+                active_values = &function_values;
+            }
+
+            ~ActiveFunctionArgumentsGuard()
+            {
+                active_arguments = previous_arguments;
+                active_values = previous_values;
+            }
+        } argument_guard(active_function_arguments, vc, active_function_values, v);
         return f(v);
     }
     else if (functions2.count(name))
@@ -3119,9 +3148,9 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
         {
             RuntimeReporterGuard(Cifa* owner)
             {
-                Object::set_runtime_error_reporter([owner](const std::string& message)
+                Object::set_runtime_error_reporter([owner](const std::string& message, const Object* source)
                     {
-                        owner->set_runtime_error(message);
+                        owner->set_runtime_error(message, source);
                     });
             }
             ~RuntimeReporterGuard()
@@ -3496,17 +3525,36 @@ std::string Cifa::format_runtime_frame(const CalUnit& c) const
 }
 
 //设置运行时错误消息（仅记录第一个错误，后续错误忽略）
-void Cifa::set_runtime_error(const std::string& message)
+void Cifa::set_runtime_error(const std::string& message, const Object* source)
 {
     if (has_runtime_error())
     {
         return;
+    }
+    bool pushed_argument_frame = false;
+    if (source != nullptr && active_function_arguments != nullptr && active_function_values != nullptr)
+    {
+        const Object* origin = source->argument_origin != nullptr ? source->argument_origin : source;
+        const size_t count = std::min(active_function_arguments->size(), active_function_values->size());
+        for (size_t index = 0; index < count; ++index)
+        {
+            if (&(*active_function_values)[index] == origin)
+            {
+                runtime_call_stack.push_back(format_runtime_frame((*active_function_arguments)[index]));
+                pushed_argument_frame = true;
+                break;
+            }
+        }
     }
     runtime_error_message = message.empty() ? "runtime error" : message;
     if (output_error && !runtime_error_reported)
     {
         print_runtime_error();
         runtime_error_reported = true;
+    }
+    if (pushed_argument_frame)
+    {
+        runtime_call_stack.pop_back();
     }
 }
 
