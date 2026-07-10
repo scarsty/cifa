@@ -108,9 +108,14 @@ bool builtin_type_function_test()
 bool import_dll_test()
 {
     Cifa c;
+#ifdef _DEBUG
+    constexpr const char* plugin_path = "build/cifa_import_example_debug.dll";
+#else
+    constexpr const char* plugin_path = "build/cifa_import_example_release.dll";
+#endif
     auto o = c.run_script(R"(
-        import("build/cifa_import_example.dll");
-        import("build/cifa_import_example.dll");
+        import(")" + std::string(plugin_path) + R"(");
+        import(")" + std::string(plugin_path) + R"(");
         return plugin_square(3) + plugin_add(2, 4) + plugin_sin(0);
     )");
     return o.isNumber() && std::fabs(o.toDouble() - 15.0) < 1e-9;
@@ -980,6 +985,44 @@ bool array_methods_test()
     return true;
 }
 
+bool range_for_test()
+{
+    // 循环变量为值副本；修改不会回写数组元素。
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            values = {1, 2, 3, 4};
+            int sum = 0;
+            for (int value : values) {
+                value *= 10;
+                if (value == 20) continue;
+                if (value == 40) break;
+                sum += value;
+            }
+            return sum + values[0] + values[1] + values[2] + values[3];
+        )");
+        if (!o.isNumber() || o.toDouble() != 50)
+        {
+            return false;
+        }
+    }
+    // auto 形式与传统范围循环作用域。
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            values = {2, 3, 5};
+            int product = 1;
+            for (auto value : values) { product *= value; }
+            return product;
+        )");
+        if (!o.isNumber() || o.toDouble() != 30)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool map_methods_test()
 {
     // contains
@@ -1583,6 +1626,7 @@ int main()
     run_test("register_function_template_test", register_function_template_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("builtin_type_function_test", builtin_type_function_test);
+    run_test("range_for_test", range_for_test);
     run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);

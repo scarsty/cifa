@@ -97,6 +97,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Console</SubSystem>
     </Link>
+    <PostBuildEvent>
+      <Command>cl /std:c++latest /EHsc /nologo /utf-8 /MDd /LD /I&quot;$(ProjectDir)..&quot; /Fe&quot;$(ProjectDir)..\build\cifa_import_example_debug.dll&quot; &quot;$(ProjectDir)..\examples\cifa_import_example.cpp&quot; &quot;$(ProjectDir)..\Cifa.cpp&quot;</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -122,6 +125,9 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
+    <PostBuildEvent>
+      <Command>cl /std:c++latest /EHsc /nologo /utf-8 /MD /LD /I&quot;$(ProjectDir)..&quot; /Fe&quot;$(ProjectDir)..\build\cifa_import_example_release.dll&quot; &quot;$(ProjectDir)..\examples\cifa_import_example.cpp&quot; &quot;$(ProjectDir)..\Cifa.cpp&quot;</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\Cifa.cpp" />

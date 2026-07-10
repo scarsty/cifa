@@ -877,6 +877,47 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         if (c.str == "for")    //for(语句1;条件1;语句2){语句3}
         {
+            //范围 for：for (item : array)，循环变量每轮都是数组元素的值副本。
+            CalUnit* range_clause = c.v[0].type == CalUnitType::Operator && c.v[0].str == ":" ? &c.v[0] : nullptr;
+            if (range_clause == nullptr && c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 1
+                && c.v[0].v[0].type == CalUnitType::Operator && c.v[0].v[0].str == ":")
+            {
+                range_clause = &c.v[0].v[0];
+            }
+            if (range_clause != nullptr && range_clause->v.size() == 2
+                && range_clause->v[0].type == CalUnitType::Parameter)
+            {
+                range_clause->v[0].with_type = false;
+                const auto& loop_var = range_clause->v[0].str;
+                Object range = eval_scoped(range_clause->v[1], scopes);
+                if (!range.isType<std::vector<Object>>())
+                {
+                    set_runtime_error("range for requires an array");
+                    return Object();
+                }
+
+                const auto values = range.ref<std::vector<Object>>();
+                Object o;
+                int loop_count = 0;
+                for (const auto& value : values)
+                {
+                    if (++loop_count > max_loop_iterations)
+                    {
+                        set_runtime_error("range for exceeded max iterations");
+                        break;
+                    }
+                    scopes.emplace_back();
+                    scopes.back()[loop_var] = value;
+                    scopes.back()[loop_var].name = loop_var;
+                    o = eval_scoped(c.v[1], scopes);
+                    scopes.pop_back();
+                    if (o.type1 == "__" && o.toString() == "break") { break; }
+                    if (o.type1 == "__" && o.toString() == "continue") { continue; }
+                    if (has_return_value(scopes)) { return return_value(scopes); }
+                }
+                return Object(0);
+            }
+
             Object o;
             int loop_count = 0;
             for (
@@ -2516,20 +2557,12 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 }
                 else
                 {
-                    if (c.v[0].type == CalUnitType::Parameter)
+                    check_cal_unit(c.v[1], &c, p);    //here make sure no undefined parameters at right of "="
+                    p[c.v[0].str].name = c.v[0].str;
+                    //赋值左侧的下标表达式也需要递归检查
+                    for (auto& sub : c.v[0].v)
                     {
-                        check_cal_unit(c.v[1], &c, p);    //here make sure no undefined parameters at right of "="
-                        p[c.v[0].str].name = c.v[0].str;
-                        //赋值左侧的下标表达式也需要递归检查
-                        for (auto& sub : c.v[0].v)
-                        {
-                            check_cal_unit(sub, &c.v[0], p);
-                        }
-                    }
-                    else
-                    {
-                        //左侧不是参数（如常量、字符串），仍需递归检查右侧
-                        check_cal_unit(c.v[1], &c, p);
+                        check_cal_unit(sub, &c.v[0], p);
                     }
                     if (c.v[0].type == CalUnitType::Parameter && p[c.v[0].str].type1 == "__"
                         || c.v[0].type != CalUnitType::Parameter
@@ -2635,7 +2668,8 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         }
         else if (father && father->type == CalUnitType::Operator)
         {
-            if (father->str == "::" || father->str == ".")
+            if (father->str == "::" || father->str == "."
+                || (father->str == ":" && father->v.size() >= 1 && &father->v[0] == &c))
             {
                 // do nothings
             }
@@ -2735,13 +2769,25 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         }
         if (c.str == "for")
         {
-            if (c.v[0].type != CalUnitType::Union || c.v[0].str != "()" || c.v[0].v.size() != 3
-                || !c.v[0].v[0].is_statement() || !c.v[0].v[1].is_statement() || (c.v[0].v[2].is_statement() && c.v[0].v[2].type != CalUnitType::None))
+            CalUnit* range_clause = c.v[0].type == CalUnitType::Operator && c.v[0].str == ":" ? &c.v[0] : nullptr;
+            if (range_clause == nullptr && c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 1
+                && c.v[0].v[0].type == CalUnitType::Operator && c.v[0].v[0].str == ":")
+            {
+                range_clause = &c.v[0].v[0];
+            }
+            const bool is_range_for = range_clause != nullptr && range_clause->v.size() == 2
+                && range_clause->v[0].type == CalUnitType::Parameter;
+            if (!is_range_for && (c.v[0].type != CalUnitType::Union || c.v[0].str != "()" || c.v[0].v.size() != 3
+                || !c.v[0].v[0].is_statement() || !c.v[0].v[1].is_statement() || (c.v[0].v[2].is_statement() && c.v[0].v[2].type != CalUnitType::None)))
             {
                 add_error(c, "for loop condition is not right");
             }
+            if (is_range_for)
+            {
+                p[range_clause->v[0].str].name = range_clause->v[0].str;
+            }
             //检测 for(;; ) 和 for(; true/1; ) 形式的潜在死循环
-            if (c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 3)
+            if (!is_range_for && c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 3)
             {
                 auto& cond = c.v[0].v[1];
                 bool is_always_true = (cond.type == CalUnitType::None)

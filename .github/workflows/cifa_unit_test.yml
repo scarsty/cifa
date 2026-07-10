@@ -21,9 +21,11 @@ jobs:
     - name: Compile Unit Test
       run: |
         New-Item -ItemType Directory -Force build | Out-Null
-        # 1) Build the standard library module IFC/OBJ.
+        # 1) Build the release CRT plugin selected by the non-_DEBUG test binary.
+        cl /std:c++latest /EHsc /nologo /W4 /utf-8 /MD /LD /I./ /Fe:build/cifa_import_example_release.dll examples/cifa_import_example.cpp Cifa.cpp
+        # 2) Build the standard library module IFC/OBJ.
         cl /std:c++latest /EHsc /nologo /W4 /utf-8 /c "$env:VCToolsInstallDir\modules\std.ixx" /ifcOutput build\std.ifc /Fo:build\std.obj
-        # 2) Build and link unit test with std module reference.
+        # 3) Build and link unit test with std module reference.
         cl /std:c++latest /EHsc /nologo /W4 /utf-8 /I./ /Fe:build/cifa_unit_test.exe unit_test/cifa_unit_test.cpp Cifa.cpp /reference "std=build\std.ifc" build\std.obj
 
     - name: Run Cifa Unit Test
