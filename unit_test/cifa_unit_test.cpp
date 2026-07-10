@@ -529,6 +529,14 @@ bool runtime_error_stack_test()
     return o.getSpecialType() == "Error";
 }
 
+bool uninitialized_variable_runtime_test()
+{
+    Cifa c;
+    auto o = c.run_script("double x; return x * 2;");
+    return o.getSpecialType() == "Error"
+        && c.get_runtime_error().find("variable 'x' has not been initialized") != std::string::npos;
+}
+
 bool mixed_array_literal_test()
 {    // 混合类型数组字面量：数字、字符串混存
     Cifa c;
@@ -1651,6 +1659,7 @@ int main()
     run_test("compound_assignment_test", compound_assignment_test);
     run_test("c_string_library_test", c_string_library_test);
     run_test("runtime_error_stack_test", runtime_error_stack_test);
+    run_test("uninitialized_variable_runtime_test", uninitialized_variable_runtime_test);
     run_test("mixed_array_literal_test", mixed_array_literal_test);
     run_test("string_key_map_test", string_key_map_test);
     run_test("static_syntax_error_test", static_syntax_error_test);

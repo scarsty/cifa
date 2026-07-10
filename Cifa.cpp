@@ -2173,7 +2173,14 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
         std::vector<Object> v;
         for (auto& c : vc)
         {
-            v.emplace_back(eval_scoped(c, scopes));
+            if (name == "type" && c.type == CalUnitType::Parameter)
+            {
+                v.emplace_back(get_parameter(c, scopes, true));
+            }
+            else
+            {
+                v.emplace_back(eval_scoped(c, scopes));
+            }
         }
         return f(v);
     }
@@ -2213,9 +2220,18 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     }
     if (c.v.size() > 0 && c.v[0].str == "[]")
     {
-        return resolve_indexed_parameter(c, scopes, only_check, false, true);
+        auto* base = find_object_from_inner(scopes, c.str);
+        const bool is_map_access = (base != nullptr && base->isType<ObjectMap>())
+            || (!c.v[0].v.empty() && c.v[0].v[0].type == CalUnitType::String);
+            auto& element = resolve_indexed_parameter(c, scopes, only_check, false, true);
+        if (!only_check && !is_map_access && !element.hasValue())
+            {
+                set_runtime_error("array element '" + element.name + "' has not been initialized");
+            }
+            return element;
     }
     auto* o = find_object_from_inner(scopes, c.str);
+    const bool existed = o != nullptr;
     if (o == nullptr)
     {
         if (scopes.empty())
@@ -2225,6 +2241,10 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
         o = &scopes.back()[c.str];
     }
     o->name = c.str;
+    if (!only_check && existed && !c.with_type && !o->hasValue())
+    {
+        set_runtime_error("variable '" + o->name + "' has not been initialized");
+    }
     return *o;
 }
 
@@ -3509,22 +3529,16 @@ void Cifa::print_runtime_error() const
         return;
     }
     fprintf(stderr, "Call Stack (most recent call last):\n");
-    std::string last_source_line;
+    // Keep distinct columns from a shared source line; only remove exact duplicates.
+    std::string last_frame;
     for (auto it = runtime_call_stack.rbegin(); it != runtime_call_stack.rend(); ++it)
     {
         const std::string& frame = *it;
-        const size_t line_pos = frame.find("line ");
-        const size_t colon_pos = frame.find(": ");
-        if (line_pos == 0 && colon_pos != std::string::npos)
+        if (frame == last_frame)
         {
-            size_t line_end = frame.find('\n', colon_pos + 2);
-            std::string source_line = frame.substr(colon_pos + 2, line_end == std::string::npos ? std::string::npos : line_end - (colon_pos + 2));
-            if (!source_line.empty() && source_line == last_source_line)
-            {
-                continue;
-            }
-            last_source_line = std::move(source_line);
+            continue;
         }
+        last_frame = frame;
         size_t newline_pos = frame.find('\n');
         if (newline_pos == std::string::npos)
         {
