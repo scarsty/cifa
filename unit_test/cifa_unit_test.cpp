@@ -73,6 +73,29 @@ bool register_function_template_test()
     return o.isNumber() && o.toDouble() == 16.0;
 }
 
+bool exit_function_test()
+{
+    {
+        Cifa c;
+        std::unordered_map<std::string, Object> values;
+        c.run_script("value = 1; exit(); value = 2;", values);
+        if (!values.contains("value") || values.at("value").toDouble() != 1.0)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        std::unordered_map<std::string, Object> values;
+        c.run_script("count = 0; running = 1; while (running) { count++; exit(); count++; }", values);
+        if (!values.contains("count") || values.at("count").toDouble() != 1.0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool typed_function_argument_error_test()
 {
     Cifa c;
@@ -1712,6 +1735,7 @@ int main()
 
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
+    run_test("exit_function_test", exit_function_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);
     run_test("builtin_math_function_test", builtin_math_function_test);

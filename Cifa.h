@@ -394,6 +394,7 @@ private:
     const ObjectVector* active_function_values = nullptr;
     std::string runtime_error_message;
     bool runtime_error_reported = false;
+    bool exit_requested = false;
 
     bool output_error = true;
 
@@ -515,6 +516,7 @@ private:
     void set_runtime_error(const std::string& message, const Object* source = nullptr);
     void clear_runtime_error();
     bool has_runtime_error() const { return !runtime_error_message.empty(); }
+    bool is_exit_requested() const { return exit_requested; }
     void print_runtime_error() const;
     bool import_module(const std::string& path);
     void import_literal_modules(CalUnit& c);

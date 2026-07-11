@@ -118,6 +118,11 @@ Cifa::Cifa()
             }
             return Object(import_module(d[0].toString()));
         });
+    register_function("exit", [this](ObjectVector&) -> Object
+        {
+            exit_requested = true;
+            return Object();
+        });
     //parameters["true"] = Object(1, "__");
     //parameters["false"] = Object(0, "__");
     //parameters["break"] = Object("break", "__");
@@ -650,7 +655,7 @@ Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, st
 //核心求值函数：递归遍历语法树节点并执行对应操作
 Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 {
-    if (has_runtime_error())
+    if (has_runtime_error() || is_exit_requested())
     {
         return Object("RuntimeError", "Error");
     }
@@ -911,6 +916,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     scopes.back()[loop_var].name = loop_var;
                     o = eval_scoped(c.v[1], scopes);
                     scopes.pop_back();
+                    if (is_exit_requested()) { return o; }
                     if (o.type1 == "__" && o.toString() == "break") { break; }
                     if (o.type1 == "__" && o.toString() == "continue") { continue; }
                     if (has_return_value(scopes)) { return return_value(scopes); }
@@ -932,6 +938,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     break;
                 }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
+                if (is_exit_requested()) { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -950,6 +957,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     break;
                 }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
+                if (is_exit_requested()) { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -968,6 +976,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     break;
                 }
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
+                if (is_exit_requested()) { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -1001,6 +1010,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 else if (!skip)
                 {
                     auto o = eval_scoped(c1, scopes);
+                    if (is_exit_requested())
+                    {
+                        scopes.pop_back();
+                        return o;
+                    }
                     if (o.type1 == "__" && o.toString() == "break") { break; }
                     if (has_return_value(scopes))
                     {
@@ -1052,6 +1066,14 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         for (auto& c1 : c.v)
         {
             o = eval_scoped(c1, scopes);
+            if (is_exit_requested())
+            {
+                if (is_block_scope)
+                {
+                    scopes.pop_back();
+                }
+                return o;
+            }
             if (o.type1 == "__" && o.toString() == "break") { break; }
             if (o.type1 == "__" && o.toString() == "continue") { break; }
             if (has_return_value(scopes))
@@ -2751,7 +2773,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
     else if (c.type == CalUnitType::Function)
     {
-        if (c.v.size() == 0)
+        if (c.v.size() == 0 && c.str != "exit")
         {
             add_error(c, "function '%s' has no operands", c.str.c_str());
         }
@@ -3566,6 +3588,7 @@ void Cifa::clear_runtime_error()
     runtime_source_line_infos.clear();
     runtime_error_message.clear();
     runtime_error_reported = false;
+    exit_requested = false;
 }
 
 //输出运行时错误信息和调用栈到 stderr（相同源码行的栈帧会去重）
