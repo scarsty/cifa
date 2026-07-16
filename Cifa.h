@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include <any>
 #include <cmath>
+#include <format>
 #include <functional>
 #include <list>
 #include <map>
@@ -527,12 +528,38 @@ private:
     static std::string get_directory(const std::string& filepath);
     static bool is_absolute_path(const std::string& filepath);
     std::string preprocess_includes(const std::string& source, const std::string& current_file, const std::string& current_dir, const std::vector<std::string>& extra_include_dirs, std::set<std::string>& visited);
-    void add_error(size_t line, size_t col, const char* fmt, ...);
-    void add_error(const std::string& filename, size_t line, size_t col, const char* fmt, ...);
+    template <typename... Args>
+    void add_error(size_t line, size_t col, std::format_string<Args...> format, Args&&... args)
+    {
+        ErrorMessage e;
+        e.expanded_line = line;
+        e.line = line;
+        e.col = col;
+        if (line > 0 && line <= runtime_source_line_infos.size())
+        {
+            const auto& source_line = runtime_source_line_infos[line - 1];
+            e.filename = source_line.filename;
+            e.line = source_line.line;
+        }
+        e.message = std::format(format, std::forward<Args>(args)...);
+        errors.emplace(std::move(e));
+    }
+
+    template <typename... Args>
+    void add_error(const std::string& filename, size_t line, size_t col, std::format_string<Args...> format, Args&&... args)
+    {
+        ErrorMessage e;
+        e.filename = filename;
+        e.line = line;
+        e.col = col;
+        e.expanded_line = runtime_source_line_infos.size();
+        e.message = std::format(format, std::forward<Args>(args)...);
+        errors.emplace(std::move(e));
+    }
     Object run_pipeline(std::string str, std::unordered_map<std::string, Object>& p);
 
     template <typename... Args>
-    void add_error(CalUnit& c, Args... args)
+    void add_error(CalUnit& c, std::format_string<Args...> format, Args&&... args)
     {
         ErrorMessage e;
         e.expanded_line = c.line;
@@ -544,16 +571,7 @@ private:
             e.filename = source_line.filename;
             e.line = source_line.line;
         }
-        char buffer[1024] = { '\0' };
-        if (sizeof...(args) == 1)
-        {
-            snprintf(buffer, 1024, "%s", args...);
-        }
-        else if (sizeof...(args) >= 2)
-        {
-            snprintf(buffer, 1024, args...);
-        }
-        e.message = buffer;
+        e.message = std::format(format, std::forward<Args>(args)...);
         errors.emplace(std::move(e));
     }
 
