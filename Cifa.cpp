@@ -2019,9 +2019,27 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp)
                 f.body = std::move(*itr);
                 for (auto& c : it->v)
                 {
-                    f.arguments.emplace_back(std::move(c.str));
+                    std::vector<CalUnit> arguments;
+                    expand_comma(c, arguments);
+                    for (auto& argument : arguments)
+                    {
+                        f.arguments.emplace_back(std::move(argument.str));
+                    }
                 }
-                functions2[it->str] = std::move(f);
+                const std::string name = it->str;
+                const size_t argument_count = f.arguments.size();
+                if (functions.contains(name))
+                {
+                    add_error(*it, "script function '{}' conflicts with a host function", name);
+                }
+                else if (functions2[name].contains(argument_count))
+                {
+                    add_error(*it, "duplicate script function '{}' with {} arguments", name, argument_count);
+                }
+                else
+                {
+                    functions2[name][argument_count] = std::move(f);
+                }
                 ppp.erase(itr);
                 it = ppp.erase(it);
             }
@@ -2241,10 +2259,34 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     }
     else if (functions2.count(name))
     {
-        auto& f = functions2[name];
+        auto& overloads = functions2[name];
+        auto overload = overloads.find(vc.size());
+        if (overload == overloads.end())
+        {
+            std::vector<size_t> arities;
+            arities.reserve(overloads.size());
+            for (const auto& [arity, function] : overloads)
+            {
+                arities.push_back(arity);
+            }
+            std::sort(arities.begin(), arities.end());
+            std::string available;
+            for (size_t index = 0; index < arities.size(); ++index)
+            {
+                if (index > 0)
+                {
+                    available += ", ";
+                }
+                available += std::to_string(arities[index]);
+            }
+            set_runtime_error("function '" + name + "' has no overload for " + std::to_string(vc.size())
+                + " arguments; available: " + available);
+            return Object();
+        }
+        auto& f = overload->second;
         ScopeStack fn_scopes;
         fn_scopes.emplace_back(parameters);
-        for (size_t i = 0; i < std::min(vc.size(), f.arguments.size()); i++)
+        for (size_t i = 0; i < f.arguments.size(); i++)
         {
             fn_scopes.back()[f.arguments[i]] = eval_scoped(vc[i], scopes);
         }
@@ -2777,7 +2819,9 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
     else if (c.type == CalUnitType::Function)
     {
-        if (c.v.size() == 0 && c.str != "exit")
+        const bool has_zero_argument_script_overload = functions2.contains(c.str)
+            && functions2.at(c.str).contains(0);
+        if (c.v.size() == 0 && c.str != "exit" && !has_zero_argument_script_overload)
         {
             add_error(c, "function '{}' has no operands", c.str);
         }
@@ -2789,7 +2833,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 add_error(c, "function '{}' is not defined", c.str);
             }
         }
-        else if (!functions.contains(c.str) && functions2.contains(c.str) && functions2.at(c.str).body.type == CalUnitType::None)
+        else if (!functions.contains(c.str) && functions2.contains(c.str) && functions2.at(c.str).empty())
         {
             if (!builtin_methods.contains(c.str))
             {
@@ -3158,14 +3202,17 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
             p1[name] = o;
         }
         check_cal_unit(c, nullptr, p1);
-        for (auto& [name, func2] : functions2)
+        for (auto& [name, overloads] : functions2)
         {
-            auto p1 = parameters;
-            for (auto& a : func2.arguments)
+            for (auto& [argument_count, func2] : overloads)
             {
-                p1[a] = Object();
+                auto p1 = parameters;
+                for (auto& argument : func2.arguments)
+                {
+                    p1[argument] = Object();
+                }
+                check_cal_unit(func2.body, nullptr, p1);
             }
-            check_cal_unit(func2.body, nullptr, p1);
         }
     }
     if (errors.empty())

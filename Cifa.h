@@ -240,6 +240,8 @@ struct Function2
     CalUnit body;
 };
 
+using FunctionOverloads = std::unordered_map<size_t, Function2>;
+
 template <typename T>
 bool vector_have(const std::vector<T>& ops, const T& op)
 {
@@ -348,7 +350,7 @@ private:
 
     //两个函数表都是全局的
     std::unordered_map<std::string, func_type> functions;     //在宿主程序中注册的函数
-    std::unordered_map<std::string, Function2> functions2;    //在cifa程序中定义的函数
+    std::unordered_map<std::string, FunctionOverloads> functions2; //在cifa程序中定义的函数，按参数个数重载
     std::unordered_map<std::string, std::vector<std::string>> struct_defs;    //用户定义的 struct 类型及其字段列表
 
     std::unordered_map<std::string, void*> user_data;

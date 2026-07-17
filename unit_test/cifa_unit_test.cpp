@@ -301,6 +301,60 @@ bool recursion_test()
     return o.hasValue() && std::fabs(o.toDouble() - 120.0) < 1e-9;
 }
 
+bool script_function_argument_count_test()
+{
+    const auto expect_runtime_error = [](const char* label, const std::string& script, const std::string& expected)
+        {
+            Cifa c;
+            c.set_output_error(false);
+            const auto result = c.run_script(script);
+            const std::string error = c.get_runtime_error();
+            if (result.getSpecialType() != "Error" || error.find(expected) == std::string::npos)
+            {
+                std::cerr << "  " << label << " failed: expected runtime error: " << expected << "\n";
+                std::cerr << "    actual: " << error << "\n";
+                return false;
+            }
+            std::cerr << "  " << label << ": " << error << "\n";
+            return true;
+        };
+    const auto expect_static_error = [](const char* label, const std::string& script, const std::string& expected)
+        {
+            Cifa c;
+            c.set_output_error(false);
+            c.run_script(script);
+            const std::string errors = c.get_errors_str();
+            if (!c.has_error() || errors.find(expected) == std::string::npos || errors.find("^") == std::string::npos)
+            {
+                std::cerr << "  " << label << " failed: expected static error: " << expected << "\n";
+                std::cerr << "    actual:\n" << errors;
+                return false;
+            }
+            std::cerr << "  " << label << ":\n" << errors;
+            return true;
+        };
+    {
+        Cifa c;
+        auto result = c.run_script(
+            "describe() { return 0; } "
+            "describe(value) { return value; } "
+            "describe(left, right) { return left + right; } "
+            "return describe() + describe(2) + describe(3, 4);");
+        if (!result.isNumber() || result.toDouble() != 9.0)
+        {
+            return false;
+        }
+    }
+    return expect_runtime_error("missing overload", "add(a, b) { return a + b; } return add(2);",
+        "no overload for 1 arguments; available: 2")
+        && expect_runtime_error("extra argument overload", "add(a, b) { return a + b; } return add(2, 3, 4);",
+            "no overload for 3 arguments; available: 2")
+        && expect_static_error("duplicate script overload", "same(value) { return value; } same(other) { return other; }",
+            "duplicate script function 'same' with 1 arguments")
+        && expect_static_error("host function conflict", "sqrt(value) { return value; }",
+            "script function 'sqrt' conflicts with a host function");
+}
+
 bool string_operation_test()
 {    // 字符串操作与拼接测试
     Cifa c;
@@ -1716,6 +1770,47 @@ bool include_error_location_after_include_test()
         && error_list[0].line == 3;
 }
 
+bool include_test()
+{
+    struct IncludeCase
+    {
+        const char* name;
+        bool (*test)();
+    };
+    const IncludeCase cases[] = {
+        { "basic", include_basic_test },
+        { "multi file", include_multi_file_test },
+        { "transitive", include_transitive_test },
+        { "self circular", include_self_circular_test },
+        { "mutual circular", include_mutual_circular_test },
+        { "missing file", include_missing_file_test },
+        { "subdirectory", include_subdir_test },
+        { "angle bracket", include_angle_bracket_test },
+        { "function from file", include_function_from_file_test },
+        { "backward compatibility", include_backward_compat_test },
+        { "with parameters", include_with_parameters_test },
+        { "run_script include dir", include_run_script_include_dir_test },
+        { "run_script default dir", include_run_script_default_dir_test },
+        { "run_script include dir multi", include_run_script_include_dir_multi_test },
+        { "run_script include dir with parameters", include_run_script_include_dir_with_params_test },
+        { "multiple search directories", include_multi_search_dirs_test },
+        { "absolute path", include_absolute_path_test },
+        { "error location in included file", include_error_location_in_included_file_test },
+        { "error location after include", include_error_location_after_include_test },
+    };
+
+    bool ok = true;
+    for (const auto& include_case : cases)
+    {
+        if (!include_case.test())
+        {
+            std::cerr << "  include case failed: " << include_case.name << std::endl;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 int main()
 {
     int total = 0, ok = 0;
@@ -1747,6 +1842,7 @@ int main()
     run_test("ternary_operator_test", ternary_operator_test);
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
+    run_test("script_function_argument_count_test", script_function_argument_count_test);
     run_test("string_operation_test", string_operation_test);
     run_test("string_compare_test", string_compare_test);
     run_test("bitwise_operator_test", bitwise_operator_test);
@@ -1775,25 +1871,7 @@ int main()
     run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);
     run_test("sprintf_format_test", sprintf_format_test);
     run_test("struct_test", struct_test);
-    run_test("include_basic_test", include_basic_test);
-    run_test("include_multi_file_test", include_multi_file_test);
-    run_test("include_transitive_test", include_transitive_test);
-    run_test("include_self_circular_test", include_self_circular_test);
-    run_test("include_mutual_circular_test", include_mutual_circular_test);
-    run_test("include_missing_file_test", include_missing_file_test);
-    run_test("include_subdir_test", include_subdir_test);
-    run_test("include_angle_bracket_test", include_angle_bracket_test);
-    run_test("include_function_from_file_test", include_function_from_file_test);
-    run_test("include_backward_compat_test", include_backward_compat_test);
-    run_test("include_with_parameters_test", include_with_parameters_test);
-    run_test("include_run_script_include_dir_test", include_run_script_include_dir_test);
-    run_test("include_run_script_default_dir_test", include_run_script_default_dir_test);
-    run_test("include_run_script_include_dir_multi_test", include_run_script_include_dir_multi_test);
-    run_test("include_run_script_include_dir_with_params_test", include_run_script_include_dir_with_params_test);
-    run_test("include_multi_search_dirs_test", include_multi_search_dirs_test);
-    run_test("include_absolute_path_test", include_absolute_path_test);
-    run_test("include_error_location_in_included_file_test", include_error_location_in_included_file_test);
-    run_test("include_error_location_after_include_test", include_error_location_after_include_test);
+    run_test("include_test", include_test);
 
     std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
     return 0;
