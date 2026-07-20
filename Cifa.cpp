@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <print>
 #include <sstream>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -26,12 +27,12 @@ Cifa::Cifa()
     {
         if (d1.isNumber())
         {
-            std::cout << d1.toDouble();
+            std::print("{}", d1.toDouble());
             return true;
         }
         if (d1.isType<std::string>())
         {
-            std::cout << d1.toString();
+            std::print("{}", d1.toString());
             return true;
         }
         //不可输出类型：触发运行时错误，不输出值
@@ -58,7 +59,7 @@ Cifa::Cifa()
                 }
             }
             //只有全部成功才输出换行，避免出错后多出空行
-            if (ok) { std::cout << "\n"; }
+            if (ok) { std::print("\n"); }
             return Object(double(d.size()));
         });
     register_function("to_string", [](ObjectVector& d)
@@ -3511,7 +3512,7 @@ std::string Cifa::get_errors_str() const
 //将编译期错误信息输出到 stderr（委托 get_errors_str() 避免重复逻辑）
 void Cifa::print_errors() const
 {
-    fprintf(stderr, "%s", get_errors_str().c_str());
+    std::print(stderr, "{}", get_errors_str());
 }
 
 //获取所有编译期错误的列表，建议优先使用 get_errors_str() 或 print_errors()
@@ -3607,12 +3608,12 @@ void Cifa::clear_runtime_error()
 //输出运行时错误信息和调用栈到 stderr（相同源码行的栈帧会去重）
 void Cifa::print_runtime_error() const
 {
-    fprintf(stderr, "Runtime Error: %s\n", runtime_error_message.c_str());
+    std::print(stderr, "Runtime Error: {}\n", runtime_error_message);
     if (runtime_call_stack.empty())
     {
         return;
     }
-    fprintf(stderr, "Call Stack (most recent call last):\n");
+    std::print(stderr, "Call Stack (most recent call last):\n");
     // Keep distinct columns from a shared source line; only remove exact duplicates.
     std::string last_frame;
     for (auto it = runtime_call_stack.rbegin(); it != runtime_call_stack.rend(); ++it)
@@ -3626,13 +3627,13 @@ void Cifa::print_runtime_error() const
         size_t newline_pos = frame.find('\n');
         if (newline_pos == std::string::npos)
         {
-            fprintf(stderr, "  at %s\n", frame.c_str());
+            std::print(stderr, "  at {}\n", frame);
         }
         else
         {
             std::string first_line = frame.substr(0, newline_pos);
             std::string rest = frame.substr(newline_pos + 1);
-            fprintf(stderr, "  at %s\n", first_line.c_str());
+            std::print(stderr, "  at {}\n", first_line);
 
             size_t start = 0;
             while (start <= rest.size())
@@ -3641,7 +3642,7 @@ void Cifa::print_runtime_error() const
                 std::string continuation = (pos == std::string::npos) ? rest.substr(start) : rest.substr(start, pos - start);
                 if (!continuation.empty())
                 {
-                    fprintf(stderr, "     %s\n", continuation.c_str());
+                    std::print(stderr, "     {}\n", continuation);
                 }
                 if (pos == std::string::npos)
                 {
