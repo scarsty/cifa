@@ -122,10 +122,6 @@ Cifa::Cifa()
             exit_requested = true;
             return Object();
         });
-    //parameters["true"] = Object(1, "__");
-    //parameters["false"] = Object(0, "__");
-    //parameters["break"] = Object("break", "__");
-    //parameters["continue"] = Object("continue", "__");
     auto ifv = [](ObjectVector& x) -> Object
     {
         if (x.size() != 3) { return cifa::Object(); }
@@ -485,7 +481,7 @@ Cifa::~Cifa()
     }
 }
 
-//从作用域栈的最内层向外查找变量，找到则返回指针，否则返回 nullptr
+//从局部作用域栈的最内层向外查找变量，最后查找实例全局变量表
 Object* Cifa::find_object_from_inner(ScopeStack& scopes, const std::string& name)
 {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
@@ -496,27 +492,31 @@ Object* Cifa::find_object_from_inner(ScopeStack& scopes, const std::string& name
             return &it_obj->second;
         }
     }
+    auto global = global_variables.find(name);
+    if (global != global_variables.end())
+    {
+        return &global->second;
+    }
     return nullptr;
 }
 
-//检查作用域栈中是否已存在返回值
+//返回值属于执行/函数调用控制状态，不存放在变量作用域栈中
 bool Cifa::has_return_value(const ScopeStack& scopes) const
 {
-    if (scopes.empty())
-    {
-        return false;
-    }
-    return scopes.front().count("return") > 0;
+    (void)scopes;
+    return !return_states.empty() && return_states.back().has_value;
 }
 
-//获取作用域栈中的返回值引用
+//获取当前执行或函数调用的返回值引用
 Object& Cifa::return_value(ScopeStack& scopes)
 {
-    if (scopes.empty())
+    (void)scopes;
+    if (return_states.empty())
     {
-        scopes.emplace_back();
+        return_states.emplace_back();
     }
-    return scopes.front()["return"];
+    return_states.back().has_value = true;
+    return return_states.back().value;
 }
 
 //RAII 守卫：在作用域退出时自动弹出运行时调用栈的栈帧
@@ -1384,7 +1384,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 else
                 {
                     //脚本中的自定义函数
-                    functions2[std::prev(it)->str] = { };
+                    functions2.try_emplace(std::prev(it)->str);
                 }
             }
         }
@@ -2191,7 +2191,7 @@ void Cifa::register_user_data(const std::string& name, void* p)
 //注册一个全局参数变量
 void Cifa::register_parameter(const std::string& name, Object o)
 {
-    parameters[name] = o;
+    global_variables[name] = o;
 }
 
 void Cifa::set_include_dirs(const std::vector<std::string>& dirs)
@@ -2286,12 +2286,25 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
         }
         auto& f = overload->second;
         ScopeStack fn_scopes;
-        fn_scopes.emplace_back(parameters);
+        fn_scopes.emplace_back();
         for (size_t i = 0; i < f.arguments.size(); i++)
         {
             fn_scopes.back()[f.arguments[i]] = eval_scoped(vc[i], scopes);
         }
-        return eval_scoped(f.body, fn_scopes);
+        struct ReturnStateGuard
+        {
+            std::vector<ReturnState>& states;
+            ReturnStateGuard(std::vector<ReturnState>& return_states) : states(return_states)
+            {
+                states.emplace_back();
+            }
+            ~ReturnStateGuard()
+            {
+                states.pop_back();
+            }
+        } return_state_guard(return_states);
+        auto result = eval_scoped(f.body, fn_scopes);
+        return result;
     }
     else
     {
@@ -2332,11 +2345,7 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     const bool existed = o != nullptr;
     if (o == nullptr)
     {
-        if (scopes.empty())
-        {
-            scopes.emplace_back();
-        }
-        o = &scopes.back()[c.str];
+        o = scopes.empty() ? &global_variables[c.str] : &scopes.back()[c.str];
     }
     o->name = c.str;
     if (!only_check && existed && !c.with_type && !o->hasValue())
@@ -2352,11 +2361,7 @@ Object& Cifa::get_parameter(const std::string& name, ScopeStack& scopes)
     auto* o = find_object_from_inner(scopes, name);
     if (o == nullptr)
     {
-        if (scopes.empty())
-        {
-            scopes.emplace_back();
-        }
-        o = &scopes.back()[name];
+        o = scopes.empty() ? &global_variables[name] : &scopes.back()[name];
     }
     o->name = name;
     return *o;
@@ -2390,15 +2395,12 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     }
 
     const auto& name = c.str;
-    if (scopes.empty())
-    {
-        scopes.emplace_back();
-    }
     Object* o = nullptr;
+    auto& current_variables = scopes.empty() ? global_variables : scopes.back();
     // struct 类型声明：直接创建并初始化 ObjectMap
     if (declare_current && !c.type_name.empty() && struct_defs.count(c.type_name))
     {
-        o = &scopes.back()[name];
+        o = &current_variables[name];
         ObjectMap m;
         for (auto& field : struct_defs.at(c.type_name))
         {
@@ -2410,14 +2412,14 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     }
     if (declare_current)
     {
-        o = &scopes.back()[name];
+        o = &current_variables[name];
     }
     else
     {
         o = find_object_from_inner(scopes, name);
         if (o == nullptr)
         {
-            o = &scopes.back()[name];
+            o = &current_variables[name];
         }
     }
     o->name = name;
@@ -2461,15 +2463,11 @@ Object& Cifa::resolve_nested_index(Object& element, CalUnit& c, size_t dim_index
 //解析字符串下标访问（map 语义），如 dict["name"]，返回元素引用
 Object& Cifa::resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, const std::string& key, bool only_check, bool declare_current)
 {
-    if (scopes.empty())
-    {
-        scopes.emplace_back();
-    }
-
+    auto& current_variables = scopes.empty() ? global_variables : scopes.back();
     Object* base = nullptr;
     if (declare_current)
     {
-        base = &scopes.back()[c.str];
+        base = &current_variables[c.str];
         base->name = c.str;
     }
     else
@@ -2489,7 +2487,7 @@ Object& Cifa::resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, c
     //不存在则创建新的 map
     if (base == nullptr)
     {
-        base = &scopes.back()[c.str];
+        base = &current_variables[c.str];
         base->name = c.str;
     }
 
@@ -2532,15 +2530,11 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
     }
     const bool is_decl_array = declaration_as_array && c.with_type && c.suffix;
 
-    if (scopes.empty())
-    {
-        scopes.emplace_back();
-    }
-
+    auto& current_variables = scopes.empty() ? global_variables : scopes.back();
     Object* base = nullptr;
     if (declare_current)
     {
-        base = &scopes.back()[c.str];
+        base = &current_variables[c.str];
         base->name = c.str;
     }
     else
@@ -2576,7 +2570,7 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
 
     if (base == nullptr)
     {
-        base = &scopes.back()[c.str];
+        base = &current_variables[c.str];
         base->name = c.str;
     }
 
@@ -3117,36 +3111,18 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
 }
 
-//运行脚本，使用独立变量表；按当前目录和include搜索目录处理#include
+//运行脚本，使用实例全局变量表；按当前目录和include搜索目录处理#include
 Object Cifa::run_script(std::string script)
 {
     errors.clear();
     clear_runtime_error();
-    std::unordered_map<std::string, Object> local_params;
     std::set<std::string> visited;
     script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
-    return run_pipeline(std::move(script), local_params);
+    return run_pipeline(std::move(script));
 }
 
-//运行脚本，使用外部变量表；按当前目录和include搜索目录处理#include
-Object Cifa::run_script(std::string script, std::unordered_map<std::string, Object>& p)
-{
-    errors.clear();
-    clear_runtime_error();
-    std::set<std::string> visited;
-    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
-    return run_pipeline(std::move(script), p);
-}
-
-//从文件运行脚本（简化版，使用空变量表）
+//从文件运行脚本，使用实例全局变量表
 Object Cifa::run_file(const std::string& filename)
-{
-    std::unordered_map<std::string, Object> local_params;
-    return run_file(filename, local_params);
-}
-
-//从文件运行脚本（使用外部变量表）
-Object Cifa::run_file(const std::string& filename, std::unordered_map<std::string, Object>& p)
 {
     errors.clear();
     clear_runtime_error();
@@ -3167,13 +3143,76 @@ Object Cifa::run_file(const std::string& filename, std::unordered_map<std::strin
     visited.insert(normalize_path(filename));
     std::string dir = get_directory(filename);
     str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
-    return run_pipeline(std::move(str), p);
+    return run_pipeline(std::move(str));
+}
+
+//在宿主函数回调中嵌套运行脚本，return/exit 与外层执行相互独立
+Object Cifa::run_nested_script(std::string script)
+{
+    errors.clear();
+    runtime_error_message.clear();
+    runtime_error_reported = false;
+    const bool previous_exit_requested = exit_requested;
+    exit_requested = false;
+    auto previous_source_lines = std::move(runtime_source_lines);
+    auto previous_source_line_infos = std::move(runtime_source_line_infos);
+
+    std::set<std::string> visited;
+    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
+    Object result = run_pipeline(std::move(script));
+    if (!has_error() && !has_runtime_error())
+    {
+        runtime_source_lines = std::move(previous_source_lines);
+        runtime_source_line_infos = std::move(previous_source_line_infos);
+    }
+    exit_requested = previous_exit_requested;
+    return result;
+}
+
+//在宿主函数回调中嵌套运行文件，return/exit 与外层执行相互独立
+Object Cifa::run_nested_file(const std::string& filename)
+{
+    errors.clear();
+    runtime_error_message.clear();
+    runtime_error_reported = false;
+    const bool previous_exit_requested = exit_requested;
+    exit_requested = false;
+    auto previous_source_lines = std::move(runtime_source_lines);
+    auto previous_source_line_infos = std::move(runtime_source_line_infos);
+
+    std::ifstream ifs(filename);
+    if (!ifs.is_open())
+    {
+        add_error(filename, 1, 1, "cannot open file: {}", filename);
+        Object result = std::string("");
+        result.type1 = "Error";
+        if (output_error)
+        {
+            print_errors();
+        }
+        exit_requested = previous_exit_requested;
+        return result;
+    }
+    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    std::set<std::string> visited;
+    visited.insert(normalize_path(filename));
+    std::string dir = get_directory(filename);
+    str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
+    Object result = run_pipeline(std::move(str));
+    if (!has_error() && !has_runtime_error())
+    {
+        runtime_source_lines = std::move(previous_source_lines);
+        runtime_source_line_infos = std::move(previous_source_line_infos);
+    }
+    exit_requested = previous_exit_requested;
+    return result;
 }
 
 //脚本执行管线：词法分析→语法树构建→语法检查→求值执行
-Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Object>& p)
+Object Cifa::run_pipeline(std::string str)
 {
     Object result;
+    const auto previous_functions2 = functions2;
 
     {
         std::stringstream source_stream(str);
@@ -3197,22 +3236,23 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
     //此处设定为在语法树检查不正确时，仍然尝试运行并检查执行时的错误
     //if (errors.empty())
     {
-        auto p1 = parameters;
-        for (auto& [name, o] : p)
-        {
-            p1[name] = o;
-        }
+        auto p1 = global_variables;
         check_cal_unit(c, nullptr, p1);
         for (auto& [name, overloads] : functions2)
         {
             for (auto& [argument_count, func2] : overloads)
             {
-                auto p1 = parameters;
+                auto previous_name = previous_functions2.find(name);
+                if (previous_name != previous_functions2.end() && previous_name->second.contains(argument_count))
+                {
+                    continue;
+                }
+                auto function_parameters = p1;
                 for (auto& argument : func2.arguments)
                 {
-                    p1[argument] = Object();
+                    function_parameters[argument] = Object();
                 }
-                check_cal_unit(func2.body, nullptr, p1);
+                check_cal_unit(func2.body, nullptr, function_parameters);
             }
         }
     }
@@ -3220,27 +3260,55 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
     {
         struct RuntimeReporterGuard
         {
+            bool active;
             RuntimeReporterGuard(Cifa* owner)
+                : active(owner->execution_depth == 0)
             {
-                Object::set_runtime_error_reporter([owner](const std::string& message, const Object* source)
-                    {
-                        owner->set_runtime_error(message, source);
-                    });
+                if (active)
+                {
+                    Object::set_runtime_error_reporter([owner](const std::string& message, const Object* source)
+                        {
+                            owner->set_runtime_error(message, source);
+                        });
+                }
             }
             ~RuntimeReporterGuard()
             {
-                Object::clear_runtime_error_reporter();
+                if (active)
+                {
+                    Object::clear_runtime_error_reporter();
+                }
             }
         } runtime_reporter_guard(this);
 
-        for (auto& [name, o] : parameters)
+        struct ExecutionGuard
         {
-            p[name] = o;
-        }
+            int& depth;
+            ExecutionGuard(int& execution_depth) : depth(execution_depth)
+            {
+                ++depth;
+            }
+            ~ExecutionGuard()
+            {
+                --depth;
+            }
+        } execution_guard(execution_depth);
+
+        struct ReturnStateGuard
+        {
+            std::vector<ReturnState>& states;
+            ReturnStateGuard(std::vector<ReturnState>& return_states) : states(return_states)
+            {
+                states.emplace_back();
+            }
+            ~ReturnStateGuard()
+            {
+                states.pop_back();
+            }
+        } return_state_guard(return_states);
+
         ScopeStack run_scopes;
-        run_scopes.emplace_back(p);
         auto o = eval_scoped(c, run_scopes);
-        p = std::move(run_scopes.front());
         if (has_runtime_error())
         {
             result = std::string("");
@@ -3251,6 +3319,7 @@ Object Cifa::run_pipeline(std::string str, std::unordered_map<std::string, Objec
     }
     else
     {
+        functions2 = previous_functions2;
         result = std::string("");
         result.type1 = "Error";
         if (output_error)

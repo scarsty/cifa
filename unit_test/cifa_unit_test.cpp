@@ -1,5 +1,6 @@
 ﻿#include "../Cifa.h"
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 
@@ -77,18 +78,18 @@ bool exit_function_test()
 {
     {
         Cifa c;
-        std::unordered_map<std::string, Object> values;
-        c.run_script("value = 1; exit(); value = 2;", values);
-        if (!values.contains("value") || values.at("value").toDouble() != 1.0)
+        c.run_script("value = 1; exit(); value = 2;");
+        auto value = c.run_script("return value;");
+        if (!value.isNumber() || value.toDouble() != 1.0)
         {
             return false;
         }
     }
     {
         Cifa c;
-        std::unordered_map<std::string, Object> values;
-        c.run_script("count = 0; running = 1; while (running) { count++; exit(); count++; }", values);
-        if (!values.contains("count") || values.at("count").toDouble() != 1.0)
+        c.run_script("count = 0; running = 1; while (running) { count++; exit(); count++; }");
+        auto count = c.run_script("return count;");
+        if (!count.isNumber() || count.toDouble() != 1.0)
         {
             return false;
         }
@@ -355,6 +356,114 @@ bool script_function_argument_count_test()
             "script function 'sqrt' conflicts with a host function");
 }
 
+bool script_function_global_scope_test()
+{
+    Cifa c;
+    int captured_value = 0;
+    c.register_function("capture", [&captured_value](ObjectVector& args) -> Object
+        {
+            captured_value = args.empty() ? 0 : args[0].toInt();
+            return Object();
+        });
+    auto global_result = c.run_script(R"(
+        b = 304;
+        update_b() {
+            capture(b);
+            b = b + 1;
+            return b;
+        }
+        result = update_b();
+        return b * 1000 + result;
+    )");
+    if (!global_result.isNumber() || global_result.toInt() != 305305 || captured_value != 304)
+    {
+        return false;
+    }
+
+    c.register_parameter("registered_global", 10);
+    auto registered_result = c.run_script("registered_global = registered_global + 2; script_global = 30; return registered_global;");
+    if (!registered_result.isNumber() || registered_result.toInt() != 12)
+    {
+        return false;
+    }
+    auto retained_globals = c.run_script("return registered_global * 100 + script_global;");
+    if (!retained_globals.isNumber() || retained_globals.toInt() != 1230)
+    {
+        return false;
+    }
+
+    auto next_script_result = c.run_script("return 7;");
+    if (!next_script_result.isNumber() || next_script_result.toInt() != 7 || c.has_error())
+    {
+        return false;
+    }
+
+    auto persisted_function_result = c.run_script("b = 40; return update_b();");
+    if (!persisted_function_result.isNumber() || persisted_function_result.toInt() != 41 || c.has_error())
+    {
+        return false;
+    }
+
+    c.run_script("broken() { return missing_function(); }");
+    if (!c.has_error())
+    {
+        return false;
+    }
+    auto after_failed_definition = c.run_script("return 8;");
+    if (!after_failed_definition.isNumber() || after_failed_definition.toInt() != 8 || c.has_error())
+    {
+        return false;
+    }
+
+    auto shadow_result = c.run_script(R"(
+        b = 10;
+        add_one(b) {
+            b = b + 1;
+            return b;
+        }
+        result = add_one(20);
+        return b * 100 + result;
+    )");
+    return shadow_result.isNumber() && shadow_result.toInt() == 1021;
+}
+
+bool nested_script_control_flow_test()
+{
+    Cifa c;
+    const auto return_file = std::filesystem::temp_directory_path() / "cifa_nested_return_test.cifa";
+    const auto exit_file = std::filesystem::temp_directory_path() / "cifa_nested_exit_test.cifa";
+    {
+        std::ofstream output(return_file);
+        output << "shared = shared + 5; return 99; shared = 1000;";
+    }
+    {
+        std::ofstream output(exit_file);
+        output << "shared = shared + 7; exit(); shared = 2000;";
+    }
+    c.register_function("run_nested_return", [&c, &return_file](ObjectVector&) -> Object
+        {
+            return c.run_nested_file(return_file.string());
+        });
+    c.register_function("run_nested_exit", [&c, &exit_file](ObjectVector&) -> Object
+        {
+            return c.run_nested_file(exit_file.string());
+        });
+
+    auto result = c.run_script(R"(
+        shared = 10;
+        nested_result = run_nested_return();
+        shared = shared + 1;
+        run_nested_exit();
+        shared = shared + 1;
+        return shared;
+    )");
+    std::filesystem::remove(return_file);
+    std::filesystem::remove(exit_file);
+    auto nested_result = c.run_script("return nested_result;");
+    return result.isNumber() && result.toInt() == 24
+        && nested_result.isNumber() && nested_result.toInt() == 99;
+}
+
 bool string_operation_test()
 {    // 字符串操作与拼接测试
     Cifa c;
@@ -408,7 +517,23 @@ bool scope_shadowing_test()
         return x;
     )";
     auto o = c.run_script(script);
-    return o.toInt() == 10;    // 外部作用域不应受内部干扰
+    if (o.toInt() != 10)
+    {
+        return false;
+    }
+
+    c.set_output_error(false);
+    c.run_script("{ int block_only = 1; }");
+    c.run_script("return block_only;");
+    if (!c.has_error())
+    {
+        return false;
+    }
+
+    Cifa another;
+    another.set_output_error(false);
+    another.run_script("return x;");
+    return another.has_error();
 }
 
 bool complex_math_priority_test()
@@ -1679,9 +1804,8 @@ bool include_backward_compat_test()
 bool include_with_parameters_test()
 {
     Cifa c;
-    std::unordered_map<std::string, Object> p;
-    p["base"] = Object(100.0);
-    auto o = c.run_file("unit_test/test_data/with_params.cifa", p);
+    c.register_parameter("base", 100);
+    auto o = c.run_file("unit_test/test_data/with_params.cifa");
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
@@ -1715,10 +1839,9 @@ bool include_run_script_include_dir_with_params_test()
 {
     Cifa c;
     c.set_include_dirs({ "unit_test/test_data" });
-    std::unordered_map<std::string, Object> p;
-    p["base"] = Object(100.0);
+    c.register_parameter("base", 100);
     std::string script = "return base + 10;\n";
-    auto o = c.run_script(script, p);
+    auto o = c.run_script(script);
     return o.isNumber() && o.toDouble() == 110.0;
 }
 
@@ -1843,6 +1966,8 @@ int main()
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
     run_test("script_function_argument_count_test", script_function_argument_count_test);
+    run_test("script_function_global_scope_test", script_function_global_scope_test);
+    run_test("nested_script_control_flow_test", nested_script_control_flow_test);
     run_test("string_operation_test", string_operation_test);
     run_test("string_compare_test", string_compare_test);
     run_test("bitwise_operator_test", bitwise_operator_test);
