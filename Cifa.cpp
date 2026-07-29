@@ -507,6 +507,11 @@ bool Cifa::has_return_value(const ScopeStack& scopes) const
     return !return_states.empty() && return_states.back().has_value;
 }
 
+bool Cifa::is_control_signal(const Object& value, const std::string& signal) const
+{
+    return value.type1 == "__" && value.isType<std::string>() && value.ref<std::string>() == signal;
+}
+
 //获取当前执行或函数调用的返回值引用
 Object& Cifa::return_value(ScopeStack& scopes)
 {
@@ -927,8 +932,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     scopes.pop_back();
                     if (is_exit_requested()) { return o; }
                     if (o.type1 == "__goto") { return o; }
-                    if (o.type1 == "__" && o.toString() == "break") { break; }
-                    if (o.type1 == "__" && o.toString() == "continue") { continue; }
+                    if (is_control_signal(o, "break")) { break; }
+                    if (is_control_signal(o, "continue")) { continue; }
                     if (has_return_value(scopes)) { return return_value(scopes); }
                 }
                 return Object(0);
@@ -950,8 +955,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
-                if (o.type1 == "__" && o.toString() == "break") { break; }
-                if (o.type1 == "__" && o.toString() == "continue") { continue; }
+                if (is_control_signal(o, "break")) { break; }
+                if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
             }
             return Object(0);
@@ -970,8 +975,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
-                if (o.type1 == "__" && o.toString() == "break") { break; }
-                if (o.type1 == "__" && o.toString() == "continue") { continue; }
+                if (is_control_signal(o, "break")) { break; }
+                if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
             }
             return o;
@@ -990,8 +995,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
-                if (o.type1 == "__" && o.toString() == "break") { break; }
-                if (o.type1 == "__" && o.toString() == "continue") { continue; }
+                if (is_control_signal(o, "break")) { break; }
+                if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
             } while (eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
             return o;
@@ -1033,7 +1038,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                         scopes.pop_back();
                         return o;
                     }
-                    if (o.type1 == "__" && o.toString() == "break") { break; }
+                    if (is_control_signal(o, "break")) { break; }
                     if (has_return_value(scopes))
                     {
                         auto ret = return_value(scopes);
@@ -1133,8 +1138,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 return o;
             }
-            if (o.type1 == "__" && o.toString() == "break") { break; }
-            if (o.type1 == "__" && o.toString() == "continue") { break; }
+            if (is_control_signal(o, "break")) { break; }
+            if (is_control_signal(o, "continue")) { break; }
             if (has_return_value(scopes))
             {
                 auto ret = return_value(scopes);
@@ -1916,23 +1921,6 @@ void Cifa::combine_semi(std::list<CalUnit>& ppp)
             ++it;
         }
     }
-
-    for (auto it = ppp.begin(); it != ppp.end();)
-    {
-        if (it->type == CalUnitType::Operator && it->str == ":" && !it->un_combine && it->v.empty() && it != ppp.begin()
-            && std::prev(it)->type == CalUnitType::Parameter
-            && (std::prev(it) == ppp.begin() || std::prev(std::prev(it))->suffix))
-        {
-            auto label = std::prev(it);
-            label->type = CalUnitType::Label;
-            label->suffix = true;
-            it = ppp.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
 }
 
 //处理 case/default 后的冒号，以及 for 语句的特殊结构
@@ -2565,12 +2553,6 @@ Object& Cifa::get_parameter(const std::string& name, ScopeStack& scopes)
     }
     o->name = name;
     return *o;
-}
-
-//按名称检查变量是否存在于作用域栈中
-bool Cifa::check_parameter(const std::string& name, ScopeStack& scopes)
-{
-    return find_object_from_inner(scopes, name) != nullptr;
 }
 
 //获取赋值目标的变量引用，必要时在当前作用域创建新变量

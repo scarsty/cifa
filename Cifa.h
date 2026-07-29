@@ -517,7 +517,6 @@ private:
 
     Object& get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check = false);
     Object& get_parameter(const std::string& name, ScopeStack& scopes);
-    bool check_parameter(const std::string& name, ScopeStack& scopes);
     Object& get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool declare_current = false);
     Object& resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool only_check, bool declare_current, bool declaration_as_array);
     Object& resolve_string_indexed_parameter(CalUnit& c, ScopeStack& scopes, const std::string& key, bool only_check, bool declare_current);
@@ -532,6 +531,7 @@ private:
     void clear_runtime_error();
     bool has_runtime_error() const { return !runtime_error_message.empty(); }
     bool is_exit_requested() const { return exit_requested; }
+    bool is_control_signal(const Object& value, const std::string& signal) const;
     std::string format_runtime_error() const;
     void print_runtime_error() const;
     bool import_module(const std::string& path);
