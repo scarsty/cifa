@@ -117,6 +117,24 @@ Cifa::Cifa()
             }
             return Object(import_module(d[0].toString()));
         });
+    register_function("run_string", [this](ObjectVector& d) -> Object
+        {
+            if (d.size() != 1)
+            {
+                set_runtime_error("function 'run_string' expects 1 argument, got " + std::to_string(d.size()));
+                return Object();
+            }
+            return run_script(d[0].toString());
+        });
+    register_function("run_file", [this](ObjectVector& d) -> Object
+        {
+            if (d.size() != 1)
+            {
+                set_runtime_error("function 'run_file' expects 1 argument, got " + std::to_string(d.size()));
+                return Object();
+            }
+            return run_file(d[0].toString());
+        });
     register_function("exit", [this](ObjectVector&) -> Object
         {
             exit_requested = true;
@@ -501,9 +519,8 @@ Object* Cifa::find_object_from_inner(ScopeStack& scopes, const std::string& name
 }
 
 //返回值属于执行/函数调用控制状态，不存放在变量作用域栈中
-bool Cifa::has_return_value(const ScopeStack& scopes) const
+bool Cifa::has_return_value() const
 {
-    (void)scopes;
     return !return_states.empty() && return_states.back().has_value;
 }
 
@@ -513,9 +530,8 @@ bool Cifa::is_control_signal(const Object& value, const std::string& signal) con
 }
 
 //获取当前执行或函数调用的返回值引用
-Object& Cifa::return_value(ScopeStack& scopes)
+Object& Cifa::return_value()
 {
-    (void)scopes;
     if (return_states.empty())
     {
         return_states.emplace_back();
@@ -691,9 +707,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
     } frame_guard(runtime_call_stack, push_frame);
 
-    if (has_return_value(scopes))
+    if (has_return_value())
     {
-        return return_value(scopes);
+        return return_value();
     }
     else if (c.type == CalUnitType::Operator)
     {
@@ -934,7 +950,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     if (o.type1 == "__goto") { return o; }
                     if (is_control_signal(o, "break")) { break; }
                     if (is_control_signal(o, "continue")) { continue; }
-                    if (has_return_value(scopes)) { return return_value(scopes); }
+                    if (has_return_value()) { return return_value(); }
                 }
                 return Object(0);
             }
@@ -957,7 +973,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
-                if (has_return_value(scopes)) { return return_value(scopes); }
+                if (has_return_value()) { return return_value(); }
             }
             return Object(0);
         }
@@ -977,7 +993,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
-                if (has_return_value(scopes)) { return return_value(scopes); }
+                if (has_return_value()) { return return_value(); }
             }
             return o;
         }
@@ -997,7 +1013,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
-                if (has_return_value(scopes)) { return return_value(scopes); }
+                if (has_return_value()) { return return_value(); }
             } while (eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
             return o;
         }
@@ -1039,9 +1055,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                         return o;
                     }
                     if (is_control_signal(o, "break")) { break; }
-                    if (has_return_value(scopes))
+                    if (has_return_value())
                     {
-                        auto ret = return_value(scopes);
+                        auto ret = return_value();
                         scopes.pop_back();
                         return ret;
                     }
@@ -1052,8 +1068,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         if (c.str == "return")
         {
-            return_value(scopes) = eval_scoped(c.v[0], scopes);
-            return return_value(scopes);
+            return_value() = eval_scoped(c.v[0], scopes);
+            return return_value();
         }
         if (c.str == "break")
         {
@@ -1140,9 +1156,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
             if (is_control_signal(o, "break")) { break; }
             if (is_control_signal(o, "continue")) { break; }
-            if (has_return_value(scopes))
+            if (has_return_value())
             {
-                auto ret = return_value(scopes);
+                auto ret = return_value();
                 if (is_block_scope)
                 {
                     scopes.pop_back();
@@ -2278,7 +2294,7 @@ void Cifa::combine_structs(std::list<CalUnit>& ppp)
 //注册宿主程序中的 C++ 函数
 void Cifa::register_function(const std::string& name, func_type func)
 {
-    functions[name] = func;
+    functions[name] = std::move(func);
 }
 
 bool Cifa::import_module(const std::string& path)
@@ -2379,7 +2395,7 @@ void Cifa::register_user_data(const std::string& name, void* p)
 //注册一个全局参数变量
 void Cifa::register_parameter(const std::string& name, Object o)
 {
-    global_variables[name] = o;
+    global_variables[name] = std::move(o);
 }
 
 void Cifa::set_include_dirs(const std::vector<std::string>& dirs)
@@ -2390,7 +2406,8 @@ void Cifa::set_include_dirs(const std::vector<std::string>& dirs)
 //获取用户自定义数据指针
 void* Cifa::get_user_data(const std::string& name)
 {
-    return user_data[name];
+    auto value = user_data.find(name);
+    return value != user_data.end() ? value->second : nullptr;
 }
 
 //执行函数调用：查找已注册函数或脚本定义函数并执行
@@ -2404,9 +2421,9 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
     runtime_call_stack.push_back("func " + name + "()");
     RuntimeFrameGuard frame_guard(runtime_call_stack);
 
-    if (functions.count(name))
+    auto host_function = functions.find(name);
+    if (host_function != functions.end())
     {
-        auto f = functions[name];
         std::vector<Object> v;
         for (auto& c : vc)
         {
@@ -2444,11 +2461,12 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
                 active_values = previous_values;
             }
         } argument_guard(active_function_arguments, vc, active_function_values, v);
-        return f(v);
+        return host_function->second(v);
     }
-    else if (functions2.count(name))
+    auto script_function = functions2.find(name);
+    if (script_function != functions2.end())
     {
-        auto& overloads = functions2[name];
+        auto& overloads = script_function->second;
         auto overload = overloads.find(vc.size());
         if (overload == overloads.end())
         {
@@ -3300,98 +3318,73 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
 //运行脚本，使用实例全局变量表；按当前目录和include搜索目录处理#include
 Object Cifa::run_script(std::string script)
 {
-    errors.clear();
-    clear_runtime_error();
-    std::set<std::string> visited;
-    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
-    return run_pipeline(std::move(script));
+    return run_execution([this, script = std::move(script)]() mutable
+        {
+            std::set<std::string> visited;
+            script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
+            return run_pipeline(std::move(script));
+        });
 }
 
 //从文件运行脚本，使用实例全局变量表
 Object Cifa::run_file(const std::string& filename)
 {
-    errors.clear();
-    clear_runtime_error();
-    std::ifstream ifs(filename);
-    if (!ifs.is_open())
-    {
-        add_error(filename, 1, 1, "cannot open file: {}", filename);
-        Object result = std::string("");
-        result.type1 = "Error";
-        if (output_error)
+    return run_execution([this, filename]()
         {
-            print_errors();
-        }
-        return result;
-    }
-    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    std::set<std::string> visited;
-    visited.insert(normalize_path(filename));
-    std::string dir = get_directory(filename);
-    str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
-    return run_pipeline(std::move(str));
+            std::ifstream ifs(filename);
+            if (!ifs.is_open())
+            {
+                add_error(filename, 1, 1, "cannot open file: {}", filename);
+                Object result = std::string("");
+                result.type1 = "Error";
+                if (output_error)
+                {
+                    print_errors();
+                }
+                return result;
+            }
+            std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+            std::set<std::string> visited;
+            visited.insert(normalize_path(filename));
+            std::string dir = get_directory(filename);
+            str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
+            return run_pipeline(std::move(str));
+        });
 }
 
-//在宿主函数回调中嵌套运行脚本，return/exit 与外层执行相互独立
-Object Cifa::run_nested_script(std::string script)
+Object Cifa::run_execution(const std::function<Object()>& action)
 {
-    errors.clear();
-    runtime_error_message.clear();
-    runtime_error_reported = false;
-    const bool previous_exit_requested = exit_requested;
-    exit_requested = false;
-    auto previous_source_lines = std::move(runtime_source_lines);
-    auto previous_source_line_infos = std::move(runtime_source_line_infos);
-
-    std::set<std::string> visited;
-    script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
-    Object result = run_pipeline(std::move(script));
-    if (!has_error() && !has_runtime_error())
+    if (execution_depth == 0)
     {
-        runtime_source_lines = std::move(previous_source_lines);
-        runtime_source_line_infos = std::move(previous_source_line_infos);
+        errors.clear();
+        clear_runtime_error();
+        return action();
     }
-    exit_requested = previous_exit_requested;
-    return result;
-}
 
-//在宿主函数回调中嵌套运行文件，return/exit 与外层执行相互独立
-Object Cifa::run_nested_file(const std::string& filename)
-{
-    errors.clear();
-    runtime_error_message.clear();
-    runtime_error_reported = false;
-    const bool previous_exit_requested = exit_requested;
-    exit_requested = false;
-    auto previous_source_lines = std::move(runtime_source_lines);
-    auto previous_source_line_infos = std::move(runtime_source_line_infos);
-
-    std::ifstream ifs(filename);
-    if (!ifs.is_open())
+    struct NestedExecutionGuard
     {
-        add_error(filename, 1, 1, "cannot open file: {}", filename);
-        Object result = std::string("");
-        result.type1 = "Error";
-        if (output_error)
+        bool& exit_requested;
+        bool previous_exit_requested;
+        std::vector<std::string>& source_lines;
+        std::vector<SourceLineInfo>& source_line_infos;
+        std::vector<std::string> previous_source_lines;
+        std::vector<SourceLineInfo> previous_source_line_infos;
+
+        NestedExecutionGuard(bool& exit, std::vector<std::string>& lines, std::vector<SourceLineInfo>& line_infos)
+            : exit_requested(exit), previous_exit_requested(exit), source_lines(lines), source_line_infos(line_infos),
+              previous_source_lines(std::move(lines)), previous_source_line_infos(std::move(line_infos))
         {
-            print_errors();
+            exit_requested = false;
         }
-        exit_requested = previous_exit_requested;
-        return result;
-    }
-    std::string str((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    std::set<std::string> visited;
-    visited.insert(normalize_path(filename));
-    std::string dir = get_directory(filename);
-    str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
-    Object result = run_pipeline(std::move(str));
-    if (!has_error() && !has_runtime_error())
-    {
-        runtime_source_lines = std::move(previous_source_lines);
-        runtime_source_line_infos = std::move(previous_source_line_infos);
-    }
-    exit_requested = previous_exit_requested;
-    return result;
+
+        ~NestedExecutionGuard()
+        {
+            source_lines = std::move(previous_source_lines);
+            source_line_infos = std::move(previous_source_line_infos);
+            exit_requested = previous_exit_requested;
+        }
+    } nested_guard(exit_requested, runtime_source_lines, runtime_source_line_infos);
+    return action();
 }
 
 //脚本执行管线：词法分析→语法树构建→语法检查→求值执行
@@ -3735,10 +3728,9 @@ std::string Cifa::get_errors_str() const
     for (auto& e : errors)
     {
         str += "Syntax Error: " + e.message + "\n";
-        if (e.expanded_line > 0 && e.expanded_line <= runtime_source_line_infos.size())
+        if (e.has_source_text)
         {
-            const auto& source_line = runtime_source_line_infos[e.expanded_line - 1];
-            const std::string& line_text = source_line.text;
+            const std::string& line_text = e.source_text;
             std::string header = "  at " + e.filename + ":" + std::to_string(e.line) + ", col " + std::to_string(e.col) + ": ";
             str += header + line_text + "\n";
             size_t arrow_col = e.col > 0 ? (e.col - 1) : 0;
@@ -3841,10 +3833,9 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
     }
     runtime_error_message = message.empty() ? "runtime error" : message;
     runtime_error_call_stack = runtime_call_stack;
-    if (output_error && !runtime_error_reported)
+    if (output_error)
     {
         print_runtime_error();
-        runtime_error_reported = true;
     }
     if (pushed_argument_frame)
     {
@@ -3860,7 +3851,6 @@ void Cifa::clear_runtime_error()
     runtime_source_lines.clear();
     runtime_source_line_infos.clear();
     runtime_error_message.clear();
-    runtime_error_reported = false;
     exit_requested = false;
 }
 

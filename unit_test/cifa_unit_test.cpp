@@ -770,6 +770,60 @@ bool uninitialized_variable_runtime_test()
         && c.get_runtime_error().find("variable 'x' has not been initialized") != std::string::npos;
 }
 
+bool nested_execution_state_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    auto success = c.run_script("shared = 10; run_string(\"shared += 1; return shared;\"); run_file(\"unit_test/test_data/nested_increment.cifa\"); return shared;");
+    if (!success.isNumber() || success.toInt() != 21 || c.has_error())
+    {
+        return false;
+    }
+
+    c.run_script("run_string(\"return missing_nested_value;\"); return 1;");
+    if (!c.has_error() || c.get_errors_str().find("missing_nested_value") == std::string::npos)
+    {
+        return false;
+    }
+
+    c.run_script("run_file(\"unit_test/test_data/not_present_nested.cifa\"); double outer_value; return outer_value;");
+    return c.has_error()
+        && c.get_errors_str().find("cannot open file") != std::string::npos
+        && !c.get_runtime_error().empty()
+        && c.get_runtime_error().find("double outer_value; return outer_value;") != std::string::npos;
+}
+
+bool nested_error_preservation_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.register_function("run_first", [&c](ObjectVector&) -> Object
+        {
+            return c.run_script("first_missing_function();");
+        });
+    c.register_function("run_second", [&c](ObjectVector&) -> Object
+        {
+            return c.run_script("second_missing_function();");
+        });
+    c.run_script("run_first(); run_second();");
+    const std::string errors = c.get_errors_str();
+    return c.get_errors().size() == 2
+        && errors.find("first_missing_function") != std::string::npos
+        && errors.find("second_missing_function") != std::string::npos;
+}
+
+    bool nested_static_error_source_test()
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("run_string(\"missing_nested_function();\");");
+        const auto errors = c.get_errors();
+        return errors.size() == 1
+        && errors.front().message == "function 'missing_nested_function' is not defined"
+        && errors.front().source_text == "missing_nested_function();"
+        && c.get_errors_str().find("missing_nested_function();") != std::string::npos;
+    }
+
 bool mixed_array_literal_test()
 {    // 混合类型数组字面量：数字、字符串混存
     Cifa c;
@@ -2036,6 +2090,9 @@ int main()
     run_test("c_string_library_test", c_string_library_test);
     run_test("runtime_error_stack_test", runtime_error_stack_test);
     run_test("uninitialized_variable_runtime_test", uninitialized_variable_runtime_test);
+    run_test("nested_execution_state_test", nested_execution_state_test);
+    run_test("nested_error_preservation_test", nested_error_preservation_test);
+    run_test("nested_static_error_source_test", nested_static_error_source_test);
     run_test("mixed_array_literal_test", mixed_array_literal_test);
     run_test("string_key_map_test", string_key_map_test);
     run_test("static_syntax_error_test", static_syntax_error_test);

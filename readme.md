@@ -160,6 +160,17 @@ c.run_script("shared = 10; run_child(); return shared;");
 
 嵌套脚本与外层脚本共享同一张实例全局变量表，但不会看到调用者代码块或函数的局部变量。嵌套脚本自己的 `return` 只返回到宿主函数调用处，`exit()` 只结束嵌套脚本；两者都不会终止外层脚本。子脚本的静态错误或运行时错误仍会向外传播，使本次外层求值停止，并保留子脚本的源码位置用于错误报告。
 
+脚本中也可以直接使用内置函数 `run_string(script)` 和 `run_file(filename)` 执行嵌套脚本。两者各接收一个字符串参数，返回子脚本的执行结果；`run_file` 支持 `#include`，并以被执行文件的目录解析相对 include：
+
+```c
+total = 1;
+run_string("total += 2; return total;");
+run_file("scripts/child.cifa");
+return total;
+```
+
+它们与 C++ API `run_nested_script` / `run_nested_file` 具有相同的独立 `return` / `exit` 语义。
+
 #### 函数错误检查
 
 - 函数名是否存在、是否与宿主函数重名，以及新函数定义时可确定的未初始化变量，属于静态检查；同名同参数数的脚本函数定义按后定义覆盖，不视为错误。

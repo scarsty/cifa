@@ -367,6 +367,8 @@ private:
         size_t line = 0, col = 0;
         std::string message;
         size_t expanded_line = 0;
+        std::string source_text;
+        bool has_source_text = false;
     };
 
     struct ErrorMessageComp
@@ -375,11 +377,19 @@ private:
         {
             size_t left_line = l.expanded_line != 0 ? l.expanded_line : l.line;
             size_t right_line = r.expanded_line != 0 ? r.expanded_line : r.line;
-            if (left_line == right_line)
+            if (left_line != right_line)
+            {
+                return left_line < right_line;
+            }
+            if (l.col != r.col)
             {
                 return l.col < r.col;
             }
-            return left_line < right_line;
+            if (l.filename != r.filename)
+            {
+                return l.filename < r.filename;
+            }
+            return l.message < r.message;
         }
     };
 
@@ -399,7 +409,6 @@ private:
     const std::vector<CalUnit>* active_function_arguments = nullptr;
     const ObjectVector* active_function_values = nullptr;
     std::string runtime_error_message;
-    bool runtime_error_reported = false;
     bool exit_requested = false;
     int execution_depth = 0;
 
@@ -470,10 +479,6 @@ public:
 
     Object run_file(const std::string& filename);    //从文件运行脚本，支持#include指令，并将文件所在目录作为搜索路径
 
-    Object run_nested_script(std::string script);    //在宿主函数回调中运行脚本，子脚本的 return/exit 等控制流独立
-
-    Object run_nested_file(const std::string& filename);    //在宿主函数回调中运行文件，子脚本的 return/exit 等控制流独立
-
     bool has_error() const { return !errors.empty(); }
 
     std::string get_errors_str() const;
@@ -496,6 +501,7 @@ public:
 private:
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
+    Object run_execution(const std::function<Object()>& action);
     Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
 
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
@@ -524,8 +530,8 @@ private:
     bool try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out);
     bool is_array_literal_candidate(CalUnit& c) const;
     Object* find_object_from_inner(ScopeStack& scopes, const std::string& name);
-    bool has_return_value(const ScopeStack& scopes) const;
-    Object& return_value(ScopeStack& scopes);
+    bool has_return_value() const;
+    Object& return_value();
     std::string format_runtime_frame(const CalUnit& c) const;
     void set_runtime_error(const std::string& message, const Object* source = nullptr);
     void clear_runtime_error();
@@ -555,6 +561,8 @@ private:
             const auto& source_line = runtime_source_line_infos[line - 1];
             e.filename = source_line.filename;
             e.line = source_line.line;
+            e.source_text = source_line.text;
+            e.has_source_text = true;
         }
         e.message = std::format(format, std::forward<Args>(args)...);
         errors.emplace(std::move(e));
@@ -567,7 +575,6 @@ private:
         e.filename = filename;
         e.line = line;
         e.col = col;
-        e.expanded_line = runtime_source_line_infos.size();
         e.message = std::format(format, std::forward<Args>(args)...);
         errors.emplace(std::move(e));
     }
@@ -585,6 +592,8 @@ private:
             const auto& source_line = runtime_source_line_infos[c.line - 1];
             e.filename = source_line.filename;
             e.line = source_line.line;
+            e.source_text = source_line.text;
+            e.has_source_text = true;
         }
         e.message = std::format(format, std::forward<Args>(args)...);
         errors.emplace(std::move(e));
