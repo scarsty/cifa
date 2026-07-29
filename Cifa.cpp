@@ -2007,6 +2007,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
 void Cifa::combine_functions2(std::list<CalUnit>& ppp)
 {
     //合并关键字，从右向左
+    std::unordered_map<std::string, std::set<size_t>> definitions_in_current_script;
     auto it = ppp.end();
     while (it != ppp.begin())
     {
@@ -2033,13 +2034,14 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp)
                 {
                     add_error(*it, "script function '{}' conflicts with a host function", name);
                 }
-                else if (functions2[name].contains(argument_count))
-                {
-                    add_error(*it, "duplicate script function '{}' with {} arguments", name, argument_count);
-                }
                 else
                 {
-                    functions2[name][argument_count] = std::move(f);
+                    // 函数定义从右向左归约，已登记的同 arity 版本来自源码更靠后的位置。
+                    // 它应覆盖此前执行留下的版本；更早定义则忽略。
+                    if (definitions_in_current_script[name].insert(argument_count).second)
+                    {
+                        functions2[name][argument_count] = std::move(f);
+                    }
                 }
                 ppp.erase(itr);
                 it = ppp.erase(it);

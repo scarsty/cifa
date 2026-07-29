@@ -318,21 +318,6 @@ bool script_function_argument_count_test()
             std::cerr << "  " << label << ": " << error << "\n";
             return true;
         };
-    const auto expect_static_error = [](const char* label, const std::string& script, const std::string& expected)
-        {
-            Cifa c;
-            c.set_output_error(false);
-            c.run_script(script);
-            const std::string errors = c.get_errors_str();
-            if (!c.has_error() || errors.find(expected) == std::string::npos || errors.find("^") == std::string::npos)
-            {
-                std::cerr << "  " << label << " failed: expected static error: " << expected << "\n";
-                std::cerr << "    actual:\n" << errors;
-                return false;
-            }
-            std::cerr << "  " << label << ":\n" << errors;
-            return true;
-        };
     {
         Cifa c;
         auto result = c.run_script(
@@ -345,14 +330,32 @@ bool script_function_argument_count_test()
             return false;
         }
     }
+    {
+        Cifa c;
+        auto result = c.run_script("same(value) { return value; } same(other) { return other + 10; } return same(1);");
+        if (!result.isNumber() || result.toDouble() != 11.0 || c.has_error())
+        {
+            return false;
+        }
+        result = c.run_script("same(number) { return number + 100; } return same(1);");
+        if (!result.isNumber() || result.toDouble() != 101.0 || c.has_error())
+        {
+            return false;
+        }
+    }
     return expect_runtime_error("missing overload", "add(a, b) { return a + b; } return add(2);",
         "no overload for 1 arguments; available: 2")
         && expect_runtime_error("extra argument overload", "add(a, b) { return a + b; } return add(2, 3, 4);",
             "no overload for 3 arguments; available: 2")
-        && expect_static_error("duplicate script overload", "same(value) { return value; } same(other) { return other; }",
-            "duplicate script function 'same' with 1 arguments")
-        && expect_static_error("host function conflict", "sqrt(value) { return value; }",
-            "script function 'sqrt' conflicts with a host function");
+        && [&]()
+        {
+            Cifa c;
+            c.set_output_error(false);
+            c.run_script("sqrt(value) { return value; }");
+            const std::string errors = c.get_errors_str();
+            return c.has_error() && errors.find("script function 'sqrt' conflicts with a host function") != std::string::npos
+                && errors.find("^") != std::string::npos;
+        }();
 }
 
 bool script_function_global_scope_test()
