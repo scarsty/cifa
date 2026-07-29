@@ -391,6 +391,7 @@ private:
     };
 
     std::vector<std::string> runtime_call_stack;
+    std::vector<std::string> runtime_error_call_stack;
     std::vector<std::string> runtime_source_lines;
     std::vector<SourceLineInfo> runtime_source_line_infos;
     const std::vector<CalUnit>* active_function_arguments = nullptr;
@@ -482,7 +483,7 @@ public:
 
     void set_output_error(bool oe) { output_error = oe; }
 
-    std::string get_runtime_error() const { return runtime_error_message; }
+    std::string get_runtime_error() const;
 
     //用户可扩展的运算符函数列表
     std::vector<std::function<Object(const Object&, const Object&)>> user_add, user_sub, user_mul, user_div, user_mod,
@@ -528,6 +529,7 @@ private:
     void clear_runtime_error();
     bool has_runtime_error() const { return !runtime_error_message.empty(); }
     bool is_exit_requested() const { return exit_requested; }
+    std::string format_runtime_error() const;
     void print_runtime_error() const;
     bool import_module(const std::string& path);
     void import_literal_modules(CalUnit& c);

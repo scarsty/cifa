@@ -3652,6 +3652,7 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
         }
     }
     runtime_error_message = message.empty() ? "runtime error" : message;
+    runtime_error_call_stack = runtime_call_stack;
     if (output_error && !runtime_error_reported)
     {
         print_runtime_error();
@@ -3667,6 +3668,7 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
 void Cifa::clear_runtime_error()
 {
     runtime_call_stack.clear();
+    runtime_error_call_stack.clear();
     runtime_source_lines.clear();
     runtime_source_line_infos.clear();
     runtime_error_message.clear();
@@ -3674,18 +3676,22 @@ void Cifa::clear_runtime_error()
     exit_requested = false;
 }
 
-//输出运行时错误信息和调用栈到 stderr（相同源码行的栈帧会去重）
-void Cifa::print_runtime_error() const
+//格式化运行时错误和调用栈（相同源码行的栈帧会去重）
+std::string Cifa::format_runtime_error() const
 {
-    std::print(stderr, "Runtime Error: {}\n", runtime_error_message);
-    if (runtime_call_stack.empty())
+    if (runtime_error_message.empty())
     {
-        return;
+        return "";
     }
-    std::print(stderr, "Call Stack (most recent call last):\n");
+    std::string result = "Runtime Error: " + runtime_error_message + "\n";
+    if (runtime_error_call_stack.empty())
+    {
+        return result;
+    }
+    result += "Call Stack (most recent call last):\n";
     // Keep distinct columns from a shared source line; only remove exact duplicates.
     std::string last_frame;
-    for (auto it = runtime_call_stack.rbegin(); it != runtime_call_stack.rend(); ++it)
+    for (auto it = runtime_error_call_stack.rbegin(); it != runtime_error_call_stack.rend(); ++it)
     {
         const std::string& frame = *it;
         if (frame == last_frame)
@@ -3696,13 +3702,13 @@ void Cifa::print_runtime_error() const
         size_t newline_pos = frame.find('\n');
         if (newline_pos == std::string::npos)
         {
-            std::print(stderr, "  at {}\n", frame);
+            result += "  at " + frame + "\n";
         }
         else
         {
             std::string first_line = frame.substr(0, newline_pos);
             std::string rest = frame.substr(newline_pos + 1);
-            std::print(stderr, "  at {}\n", first_line);
+            result += "  at " + first_line + "\n";
 
             size_t start = 0;
             while (start <= rest.size())
@@ -3711,7 +3717,7 @@ void Cifa::print_runtime_error() const
                 std::string continuation = (pos == std::string::npos) ? rest.substr(start) : rest.substr(start, pos - start);
                 if (!continuation.empty())
                 {
-                    std::print(stderr, "     {}\n", continuation);
+                    result += "     " + continuation + "\n";
                 }
                 if (pos == std::string::npos)
                 {
@@ -3721,5 +3727,17 @@ void Cifa::print_runtime_error() const
             }
         }
     }
+    return result;
+}
+
+std::string Cifa::get_runtime_error() const
+{
+    return format_runtime_error();
+}
+
+//输出运行时错误信息和调用栈到 stderr
+void Cifa::print_runtime_error() const
+{
+    std::print(stderr, "{}", format_runtime_error());
 }
 }    // namespace cifa
