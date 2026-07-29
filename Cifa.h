@@ -201,6 +201,8 @@ enum class CalUnitType
     Key,
     Type,
     Union,
+    Label,
+    Goto,
     //UnionRound,    //()合并模式，仅for语句使用
 };
 
@@ -340,7 +342,7 @@ private:
     //右结合的运算符，注意+-既有单目又有双目，因此不能简单地放在单目列表中
     inline static const std::vector<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };
     //关键字，在表中的位置为其所需参数个数
-    inline static const std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default" }, { "if", "for", "while", "do", "switch", "case" } };
+    inline static const std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default", "goto" }, { "if", "for", "while", "do", "switch", "case" } };
     //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
     inline static const std::vector<std::string> types = { "auto", "int", "float", "double", "string", "char" };
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
@@ -511,6 +513,7 @@ private:
     void combine_keys(std::list<CalUnit>& ppp);
     void combine_functions2(std::list<CalUnit>& ppp);
     void combine_structs(std::list<CalUnit>& ppp);
+    void check_goto_targets(CalUnit& root);
 
     Object& get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check = false);
     Object& get_parameter(const std::string& name, ScopeStack& scopes);

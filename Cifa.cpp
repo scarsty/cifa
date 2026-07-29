@@ -871,6 +871,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         return run_function(c.str, v, scopes);
     }
+    else if (c.type == CalUnitType::Goto)
+    {
+        return Object(c.str, "__goto");
+    }
     else if (c.type == CalUnitType::Key)
     {
         if (c.str == "if")    //if(条件1){语句1}else{语句2}
@@ -922,6 +926,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     o = eval_scoped(c.v[1], scopes);
                     scopes.pop_back();
                     if (is_exit_requested()) { return o; }
+                    if (o.type1 == "__goto") { return o; }
                     if (o.type1 == "__" && o.toString() == "break") { break; }
                     if (o.type1 == "__" && o.toString() == "continue") { continue; }
                     if (has_return_value(scopes)) { return return_value(scopes); }
@@ -944,6 +949,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (is_exit_requested()) { return o; }
+                if (o.type1 == "__goto") { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -963,6 +969,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
+                if (o.type1 == "__goto") { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -982,6 +989,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
+                if (o.type1 == "__goto") { return o; }
                 if (o.type1 == "__" && o.toString() == "break") { break; }
                 if (o.type1 == "__" && o.toString() == "continue") { continue; }
                 if (has_return_value(scopes)) { return return_value(scopes); }
@@ -1020,6 +1028,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                         scopes.pop_back();
                         return o;
                     }
+                    if (o.type1 == "__goto")
+                    {
+                        scopes.pop_back();
+                        return o;
+                    }
                     if (o.type1 == "__" && o.toString() == "break") { break; }
                     if (has_return_value(scopes))
                     {
@@ -1045,6 +1058,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         {
             return Object("continue", "__");
         }
+        if (c.str == "goto" && c.v.size() == 1 && c.v[0].type == CalUnitType::Parameter)
+        {
+            return Object(c.v[0].str, "__goto");
+        }
         if (c.str == "true")
         {
             return Object(1, "__");
@@ -1067,12 +1084,49 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         {
             scopes.emplace_back();
         }
-        Object o;
-        for (auto& c1 : c.v)
+        std::unordered_map<std::string, size_t> labels;
+        for (size_t index = 0; index < c.v.size(); ++index)
         {
+            if (c.v[index].type == CalUnitType::Label)
+            {
+                labels[c.v[index].str] = index;
+            }
+        }
+        Object o;
+        int goto_count = 0;
+        for (size_t index = 0; index < c.v.size(); ++index)
+        {
+            auto& c1 = c.v[index];
+            if (c1.type == CalUnitType::Label)
+            {
+                continue;
+            }
             o = eval_scoped(c1, scopes);
             if (is_exit_requested())
             {
+                if (is_block_scope)
+                {
+                    scopes.pop_back();
+                }
+                return o;
+            }
+            if (o.type1 == "__goto")
+            {
+                auto target = labels.find(o.toString());
+                if (target != labels.end())
+                {
+                    if (++goto_count > max_loop_iterations)
+                    {
+                        set_runtime_error("goto exceeded max iterations");
+                        if (is_block_scope)
+                        {
+                            scopes.pop_back();
+                        }
+                        return Object();
+                    }
+                    index = target->second;
+                    continue;
+                }
                 if (is_block_scope)
                 {
                     scopes.pop_back();
@@ -1505,6 +1559,26 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, 
     //合并关键字
     deal_special_keys(ppp);
 
+    //标签必须在运算符合并前处理，避免其冒号被当作普通二元运算符。
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->type == CalUnitType::Operator && it->str == ":" && !it->un_combine && it->v.empty() && it != ppp.begin()
+            && std::prev(it)->type == CalUnitType::Parameter && !std::prev(it)->with_type
+            && (std::prev(it) == ppp.begin() || std::prev(std::prev(it))->str == ";"
+                || std::prev(std::prev(it))->type == CalUnitType::Label
+                || std::prev(std::prev(it))->type == CalUnitType::Union && std::prev(std::prev(it))->str == "{}"))
+        {
+            auto label = std::prev(it);
+            label->type = CalUnitType::Label;
+            label->suffix = true;
+            it = ppp.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
     //合并算符
     combine_ops(ppp);
 
@@ -1842,6 +1916,23 @@ void Cifa::combine_semi(std::list<CalUnit>& ppp)
             ++it;
         }
     }
+
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->type == CalUnitType::Operator && it->str == ":" && !it->un_combine && it->v.empty() && it != ppp.begin()
+            && std::prev(it)->type == CalUnitType::Parameter
+            && (std::prev(it) == ppp.begin() || std::prev(std::prev(it))->suffix))
+        {
+            auto label = std::prev(it);
+            label->type = CalUnitType::Label;
+            label->suffix = true;
+            it = ppp.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 //处理 case/default 后的冒号，以及 for 语句的特殊结构
@@ -1907,6 +1998,7 @@ void Cifa::deal_special_keys(std::list<CalUnit>& ppp)
             }
         }
     }
+
 }
 
 //合并关键字（if/for/while/do/switch/case/else 等）及其子节点
@@ -1981,26 +2073,132 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
         }
     }
 
-    it = ppp.end();
-    while (it != ppp.begin())
-    {
-        --it;
-        if (it->str == "if" && it->v.size() == 2 && std::next(it) != ppp.end())
+    const auto find_open_else_if = [&](auto&& self, CalUnit& unit) -> CalUnit*
         {
-            auto itr = std::next(it);
-            if (itr->str == "else")
+            if (unit.type != CalUnitType::Key || unit.str != "if")
             {
-                it->v.emplace_back(std::move(*itr));
-                ppp.erase(itr);
-                if (!it->v[2].v.empty())
+                return nullptr;
+            }
+            if (unit.v.size() >= 3)
+            {
+                if (auto* nested = self(self, unit.v[2]))
                 {
-                    auto it_else = std::move(it->v[2].v[0]);
-                    it->v[2] = std::move(it_else);    //cannot assign directly when debug
-                    //it->v[2] = std::move(it->v[2].v[0]);
+                    return nested;
                 }
+                return nullptr;
+            }
+            return unit.v.size() == 2 ? &unit : nullptr;
+        };
+
+    for (auto it = ppp.begin(); it != ppp.end(); ++it)
+    {
+        if (it->type != CalUnitType::Key || it->str != "if")
+        {
+            continue;
+        }
+        auto else_it = std::next(it);
+        while (else_it != ppp.end() && else_it->type == CalUnitType::Key && else_it->str == "else")
+        {
+            auto* target_if = find_open_else_if(find_open_else_if, *it);
+            if (target_if == nullptr || else_it->v.empty())
+            {
+                break;
+            }
+            target_if->v.emplace_back(std::move(else_it->v[0]));
+            else_it = ppp.erase(else_it);
+        }
+    }
+
+    for (auto& unit : ppp)
+    {
+        if (unit.type == CalUnitType::Key && unit.str == "goto" && unit.v.size() == 1)
+        {
+            if (unit.v[0].type == CalUnitType::Parameter)
+            {
+                unit.type = CalUnitType::Goto;
+                unit.str = unit.v[0].str;
+                unit.v.clear();
+                unit.suffix = true;
             }
         }
     }
+}
+
+void Cifa::check_goto_targets(CalUnit& root)
+{
+    struct LabelInfo
+    {
+        std::vector<CalUnit*> blocks;
+    };
+    std::unordered_map<std::string, LabelInfo> labels;
+    std::vector<CalUnit*> blocks;
+
+    const auto collect_labels = [&](auto&& self, CalUnit& unit) -> void
+        {
+            const bool is_block = unit.type == CalUnitType::Union;
+            if (is_block)
+            {
+                blocks.push_back(&unit);
+            }
+            if (unit.type == CalUnitType::Label)
+            {
+                if (labels.contains(unit.str))
+                {
+                    add_error(unit, "duplicate label '{}'", unit.str);
+                }
+                else
+                {
+                    labels.emplace(unit.str, LabelInfo{ blocks });
+                }
+            }
+            for (auto& child : unit.v)
+            {
+                self(self, child);
+            }
+            if (is_block)
+            {
+                blocks.pop_back();
+            }
+        };
+    collect_labels(collect_labels, root);
+
+    const auto check_gotos = [&](auto&& self, CalUnit& unit) -> void
+        {
+            const bool is_block = unit.type == CalUnitType::Union;
+            if (is_block)
+            {
+                blocks.push_back(&unit);
+            }
+            if (unit.type == CalUnitType::Goto || unit.type == CalUnitType::Key && unit.str == "goto"
+                && unit.v.size() == 1 && unit.v[0].type == CalUnitType::Parameter)
+            {
+                const std::string& target_name = unit.type == CalUnitType::Goto ? unit.str : unit.v[0].str;
+                auto target = labels.find(target_name);
+                if (target == labels.end())
+                {
+                    add_error(unit, "goto target '{}' is not defined", target_name);
+                }
+                else if (target->second.blocks.size() > blocks.size()
+                    || !std::equal(target->second.blocks.begin(), target->second.blocks.end(), blocks.begin()))
+                {
+                    add_error(unit, "goto '{}' jumps into a nested or sibling block", target_name);
+                }
+                if (is_block)
+                {
+                    blocks.pop_back();
+                }
+                return;
+            }
+            for (auto& child : unit.v)
+            {
+                self(self, child);
+            }
+            if (is_block)
+            {
+                blocks.pop_back();
+            }
+        };
+    check_gotos(check_gotos, root);
 }
 
 //合并脚本中定义的函数：将函数名+参数+函数体合为 Function2 并注册到 functions2
@@ -2840,6 +3038,10 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     }
     else if (c.type == CalUnitType::Key)
     {
+        if (c.str == "goto")
+        {
+            return;
+        }
         if (c.str == "if")
         {
             if (c.v.size() == 0)
@@ -3235,6 +3437,7 @@ Object Cifa::run_pipeline(std::string str)
     auto rv = split(str);
     auto c = combine_all_cal(rv);    //结果必定是一个Union
     import_literal_modules(c);
+    check_goto_targets(c);
     //此处设定为在语法树检查不正确时，仍然尝试运行并检查执行时的错误
     //if (errors.empty())
     {
@@ -3254,6 +3457,7 @@ Object Cifa::run_pipeline(std::string str)
                 {
                     function_parameters[argument] = Object();
                 }
+                check_goto_targets(func2.body);
                 check_cal_unit(func2.body, nullptr, function_parameters);
             }
         }

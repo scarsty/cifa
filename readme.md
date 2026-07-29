@@ -522,6 +522,22 @@ for (auto value : arr) {
 
 首版范围循环仅支持数组。循环变量是每个数组元素的**值副本**，在循环体中修改它不会回写原数组；暂不支持 `auto&`、引用遍历、map 直接遍历或结构化绑定。范围表达式只在进入循环时求值一次，随后按当时的数组元素副本依次执行。
 
+#### 受限 goto
+
+脚本支持标签和 `goto`，可用于同一代码块内的跳转，或从嵌套代码块跳到其外层代码块的标签：
+
+```c++
+int value = 0;
+again:
+value += 1;
+if (value < 3) goto again;
+return value; // 3
+```
+
+标签写作 `label:`，跳转写作 `goto label;`。为保持作用域与控制流可预测，目标标签必须位于当前代码块或其祖先代码块中：不能跳入嵌套块或兄弟块，也不能跨函数或跨嵌套脚本跳转。标签名在同一脚本/函数中必须唯一。
+
+静态检查会报告 `duplicate label '...'`、`goto target '...' is not defined` 或 `goto '...' jumps into a nested or sibling block`。反复跳转受 `max_loop_iterations` 限制，超过时产生运行时错误 `goto exceeded max iterations`。
+
 #### 从宿主注册向量
 
 宿主程序可以将 `std::vector<double>` 注册为脚本内的数组变量：
@@ -895,7 +911,7 @@ Cifa 没有使用 yacc/ANTLR 之类的生成器，也不是传统的递归下降
     `combine_ops()` 按 `ops` 表定义的优先级从高到低处理运算符。大多数二元运算符按从左到右归约；赋值和部分一元运算按右结合处理。前置正号/负号会在这里区分一元和二元场景。三元 `?:` 也作为特殊运算符组处理。
 
 6. **语句和关键字归约**  
-    `combine_semi()` 将分号前的表达式标记为语句。`combine_keys()` 处理 `if/else/for/while/do/switch/case/default` 等关键字，把它们需要的条件和语句体挂成子节点。
+    `combine_semi()` 将分号前的表达式标记为语句。`combine_keys()` 处理 `if/else/for/while/do/switch/case/default` 等关键字，把它们需要的条件和语句体挂成子节点。花括号形式的 `if / else if / else` 支持任意长度的连续分支，归约为嵌套的 `if` 结构，执行时只会进入第一个条件成立的分支。
 
 7. **静态检查**  
     `check_cal_unit()` 遍历归约后的语法树，检查括号、运算符参数个数、未初始化变量、未定义函数、缺失分号、无块语句中定义新变量、明显无限循环等问题。这里的检查不是完整 C/C++ 语义检查，而是为了在执行前拦住常见错误。

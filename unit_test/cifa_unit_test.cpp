@@ -623,6 +623,26 @@ bool empty_statement_test()
     return o.toInt() == 10;
 }
 
+bool else_if_chain_test()
+{
+    Cifa c;
+    const auto run_branch = [&c](int value)
+        {
+            return c.run_script(std::format(R"(
+                int value = {};
+                if (value == 3) {{ return 30; }}
+                else if (value == 2) {{ return 20; }}
+                else if (value == 1) {{ return 10; }}
+                else {{ return 0; }}
+            )", value));
+        };
+
+    return run_branch(3).toInt() == 30
+        && run_branch(2).toInt() == 20
+        && run_branch(1).toInt() == 10
+        && run_branch(0).toInt() == 0;
+}
+
 bool multi_dimensional_array_test()
 {
     Cifa c;
@@ -1258,6 +1278,87 @@ bool range_for_test()
         }
     }
     return true;
+}
+
+bool goto_test()
+{
+    {
+        Cifa c;
+        auto result = c.run_script(R"(
+            int value = 0;
+        again:
+            value += 1;
+            if (value < 3) goto again;
+            return value;
+        )");
+        if (!result.isNumber() || result.toDouble() != 3.0)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        auto result = c.run_script(R"(
+            int value = 0;
+            if (value == 0) {
+                value = 1;
+            }
+        label_after_if:
+            value += 1;
+            if (value < 3) { goto label_after_if; }
+            return value;
+        )");
+        if (!result.isNumber() || result.toDouble() != 3.0)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        auto result = c.run_script(R"(
+            int value = 0;
+            {
+                value = 1;
+                goto done;
+            }
+            value = 2;
+        done:
+            return value;
+        )");
+        if (!result.isNumber() || result.toDouble() != 1.0)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        auto result = c.run_script(R"(
+            count_to(limit) {
+                int value = 0;
+            again:
+                value += 1;
+                if (value < limit) goto again;
+                return value;
+            }
+            return count_to(4);
+        )");
+        if (!result.isNumber() || result.toDouble() != 4.0)
+        {
+            return false;
+        }
+    }
+
+    const auto expect_static_error = [](const std::string& script, const std::string& expected)
+        {
+            Cifa c;
+            c.set_output_error(false);
+            c.run_script(script);
+            return c.has_error() && c.get_errors_str().find(expected) != std::string::npos;
+        };
+    return expect_static_error("goto missing;", "goto target 'missing' is not defined")
+        && expect_static_error("first: first:", "duplicate label 'first'")
+        && expect_static_error("goto inside; { inside: return 1; }", "goto 'inside' jumps into a nested or sibling block")
+        && expect_static_error("{ left: goto right; } { right: return 1; }", "goto 'right' jumps into a nested or sibling block");
 }
 
 bool map_methods_test()
@@ -1906,6 +2007,7 @@ int main()
     run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("builtin_type_function_test", builtin_type_function_test);
     run_test("range_for_test", range_for_test);
+    run_test("goto_test", goto_test);
     run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
@@ -1928,6 +2030,7 @@ int main()
     run_test("register_map_test", register_map_test);
     run_test("type_promotion_test", type_promotion_test);
     run_test("empty_statement_test", empty_statement_test);
+    run_test("else_if_chain_test", else_if_chain_test);
     run_test("multi_dimensional_array_test", multi_dimensional_array_test);
     run_test("compound_assignment_test", compound_assignment_test);
     run_test("c_string_library_test", c_string_library_test);
