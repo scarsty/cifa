@@ -269,6 +269,18 @@ bool ternary_operator_test()
     return o.hasValue() && o.toInt() == 20;
 }
 
+bool logical_short_circuit_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        int a = 0, b = 0, c = 0, d = 0;
+        int first = (0 && a++) || (1 && (b++ == 0)) || c++;
+        int second = (1 || d++) && (0 || (++d == 1));
+        return a + b * 10 + c * 100 + d * 1000 + first * 10000 + second * 100000;
+    )");
+    return o.isNumber() && o.toInt() == 111010;
+}
+
 bool switch_case_test()
 {    // Switch-Case 完备性测试
     Cifa c;
@@ -2066,6 +2078,7 @@ int main()
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
     run_test("ternary_operator_test", ternary_operator_test);
+    run_test("logical_short_circuit_test", logical_short_circuit_test);
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
     run_test("script_function_argument_count_test", script_function_argument_count_test);

@@ -810,8 +810,24 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             if (c.str == "&") { return bit_and(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "^") { return bit_xor(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "|") { return bit_or(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "&&") { return logic_and(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "||") { return logic_or(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
+            if (c.str == "&&")
+            {
+                auto left = eval_scoped(c.v[0], scopes);
+                if (!left.toBool())
+                {
+                    return Object(0);
+                }
+                return logic_and(left, eval_scoped(c.v[1], scopes));
+            }
+            if (c.str == "||")
+            {
+                auto left = eval_scoped(c.v[0], scopes);
+                if (left.toBool())
+                {
+                    return Object(1);
+                }
+                return logic_or(left, eval_scoped(c.v[1], scopes));
+            }
             if (c.str == "<<") { return shift_left(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == ">>") { return shift_right(eval_scoped(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
             if (c.str == "=")
