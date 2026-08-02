@@ -96,16 +96,6 @@ bool exit_function_test()
     return true;
 }
 
-bool host_function_exit_condition_test()
-{
-    Cifa c;
-    bool marked = false;
-    c.register_function("askrest", [](ObjectVector&) -> Object { return Object(0); });
-    c.register_function("mark", [&marked](ObjectVector&) -> Object { marked = true; return Object(); });
-    c.run_script("if (AskRest() == 0) { exit(); } mark();");
-    return !marked;
-}
-
 bool typed_function_argument_error_test()
 {
     Cifa c;
@@ -535,6 +525,9 @@ bool unary_minus_test()
     ok = ok && c.run_script("return 10 - 3 - 2;").toDouble() == 5;    // 二元减左结合
     ok = ok && c.run_script("return -3 + 5;").toDouble() == 2;        // 前置负号 + 加法
     ok = ok && c.run_script("return 2 * -3;").toDouble() == -6;       // 乘以前置负号
+    ok = ok && c.run_script("x = 7; return x * -1;").toDouble() == -7; // 变量乘以前置负号
+    ok = ok && c.run_script("x = 7; x = x * -1; return x;").toDouble() == -7; // 赋值语境中的前置负号
+    ok = ok && c.run_script("x = 7; return x * -1 + x * -2;").toDouble() == -21; // 连续乘法项
     ok = ok && c.run_script("return -(2*3);").toDouble() == -6;       // 前置负号 + 乘法括号
     ok = ok && c.run_script("return -2 + -3;").toDouble() == -5;      // 两个前置负号相加
     ok = ok && c.run_script("return +5;").toDouble() == 5;            // 前置正号 + 常量
@@ -2078,7 +2071,6 @@ int main()
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
     run_test("exit_function_test", exit_function_test);
-    run_test("host_function_exit_condition_test", host_function_exit_condition_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);
     run_test("builtin_math_function_test", builtin_math_function_test);

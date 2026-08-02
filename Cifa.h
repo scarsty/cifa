@@ -49,7 +49,17 @@ struct Object
         type1 = t;
     }
 
-    template <typename T, typename std::enable_if<!std::is_same_v<std::decay_t<T>, Object>, int>::type = 0>
+    template <typename T, typename std::enable_if<std::is_arithmetic_v<std::decay_t<T>>
+        && !std::is_same_v<std::decay_t<T>, double>
+        && !std::is_same_v<std::decay_t<T>, int>
+        && !std::is_same_v<std::decay_t<T>, bool>, int>::type = 0>
+    Object(T v)
+    {
+        value = double(v);
+    }
+
+    template <typename T, typename std::enable_if<!std::is_same_v<std::decay_t<T>, Object>
+        && !std::is_arithmetic_v<std::decay_t<T>>, int>::type = 0>
     Object(const T& v)
     {
         value = v;
@@ -495,8 +505,10 @@ public:
     void set_output_error(bool oe) { output_error = oe; }
 
     void request_exit() { exit_requested = true; }
+    bool is_exit_requested() const { return exit_requested; }
 
     std::string get_runtime_error() const;
+    bool has_runtime_error() const { return !runtime_error_message.empty(); }
 
     //用户可扩展的运算符函数列表
     std::vector<std::function<Object(const Object&, const Object&)>> user_add, user_sub, user_mul, user_div, user_mod,
@@ -541,8 +553,6 @@ private:
     std::string format_runtime_frame(const CalUnit& c) const;
     void set_runtime_error(const std::string& message, const Object* source = nullptr);
     void clear_runtime_error();
-    bool has_runtime_error() const { return !runtime_error_message.empty(); }
-    bool is_exit_requested() const { return exit_requested; }
     bool is_control_signal(const Object& value, const std::string& signal) const;
     std::string format_runtime_error() const;
     void print_runtime_error() const;
