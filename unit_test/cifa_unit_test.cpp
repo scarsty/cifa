@@ -96,6 +96,16 @@ bool exit_function_test()
     return true;
 }
 
+bool host_function_exit_condition_test()
+{
+    Cifa c;
+    bool marked = false;
+    c.register_function("askrest", [](ObjectVector&) -> Object { return Object(0); });
+    c.register_function("mark", [&marked](ObjectVector&) -> Object { marked = true; return Object(); });
+    c.run_script("if (AskRest() == 0) { exit(); } mark();");
+    return !marked;
+}
+
 bool typed_function_argument_error_test()
 {
     Cifa c;
@@ -2068,6 +2078,7 @@ int main()
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
     run_test("exit_function_test", exit_function_test);
+    run_test("host_function_exit_condition_test", host_function_exit_condition_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);
     run_test("builtin_math_function_test", builtin_math_function_test);

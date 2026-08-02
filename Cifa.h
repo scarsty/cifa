@@ -427,6 +427,10 @@ public:
 
     Cifa();
     ~Cifa();
+    Cifa(const Cifa&) = delete;
+    Cifa& operator=(const Cifa&) = delete;
+    Cifa(Cifa&&) = delete;
+    Cifa& operator=(Cifa&&) = delete;
 
     void register_function(const std::string& name, func_type func);
 
