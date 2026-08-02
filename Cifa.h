@@ -490,6 +490,8 @@ public:
 
     void set_output_error(bool oe) { output_error = oe; }
 
+    void request_exit() { exit_requested = true; }
+
     std::string get_runtime_error() const;
 
     //用户可扩展的运算符函数列表
