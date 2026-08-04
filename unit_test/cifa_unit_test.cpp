@@ -258,6 +258,73 @@ bool loop_control_test()
     return o.toInt() == 16;
 }
 
+bool loop_control_flow_matrix_test()
+{
+    struct ScriptCase
+    {
+        const char* script;
+        int expected;
+    };
+
+    const ScriptCase breakCases[] = {
+        { R"(int value = 0; for (int i = 0; i < 3; i++) { value++; break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value += item; break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; int i = 0; while (i < 3) { value++; break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; do { value++; break; } while (value < 3); value += 10; return value;)", 11 },
+    };
+    const ScriptCase continueCases[] = {
+        { R"(int value = 0; for (int i = 0; i < 4; i++) { if (i == 1) continue; value += i + 1; } value += 10; return value;)", 18 },
+        { R"(int value = 0; values = {1, 2, 3, 4}; for (item : values) { if (item == 2) continue; value += item; } value += 10; return value;)", 18 },
+        { R"(int value = 0; int i = 0; while (i < 4) { i++; if (i == 2) continue; value += i; } value += 10; return value;)", 18 },
+        { R"(int value = 0; int i = 0; do { i++; if (i == 2) continue; value += i; } while (i < 4); value += 10; return value;)", 18 },
+    };
+    const ScriptCase returnCases[] = {
+        { R"(f() { for (int i = 0; i < 3; i++) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { values = {1, 2, 3}; for (item : values) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { int i = 0; while (i < 3) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { do { return 7; } while (false); return 0; } int value = f(); value += 10; return value;)", 17 },
+    };
+    const ScriptCase exitCases[] = {
+        { R"(value = 0; for (int i = 0; i < 3; i++) { value++; exit(); } value = 99;)", 1 },
+        { R"(value = 0; values = {1, 2, 3}; for (item : values) { value += item; exit(); } value = 99;)", 1 },
+        { R"(value = 0; int i = 0; while (i < 3) { value++; exit(); } value = 99;)", 1 },
+        { R"(value = 0; do { value++; exit(); } while (false); value = 99;)", 1 },
+    };
+
+    const auto runValueCases = [](const ScriptCase* cases, size_t count)
+        {
+            for (size_t index = 0; index < count; index++)
+            {
+                Cifa c;
+                const auto result = c.run_script(cases[index].script);
+                if (!result.isNumber() || result.toInt() != cases[index].expected)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+    const auto runExitCases = [](const ScriptCase* cases, size_t count)
+        {
+            for (size_t index = 0; index < count; index++)
+            {
+                Cifa c;
+                c.run_script(cases[index].script);
+                const auto result = c.run_script("return value;");
+                if (!result.isNumber() || result.toInt() != cases[index].expected)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    return runValueCases(breakCases, std::size(breakCases))
+        && runValueCases(continueCases, std::size(continueCases))
+        && runValueCases(returnCases, std::size(returnCases))
+        && runExitCases(exitCases, std::size(exitCases));
+}
+
 bool ternary_operator_test()
 {    // 测试嵌套三目运算
     Cifa c;
@@ -1346,6 +1413,20 @@ bool range_for_test()
             return false;
         }
     }
+    // 无类型循环变量也应识别为范围循环，而不是标签。
+    {
+        Cifa c;
+        auto o = c.run_script(R"(
+            values = {2, 3, 5};
+            int product = 1;
+            for (value : values) { product *= value; }
+            return product;
+        )");
+        if (!o.isNumber() || o.toDouble() != 30)
+        {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -2080,6 +2161,7 @@ int main()
     run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
+    run_test("loop_control_flow_matrix_test", loop_control_flow_matrix_test);
     run_test("ternary_operator_test", ternary_operator_test);
     run_test("logical_short_circuit_test", logical_short_circuit_test);
     run_test("switch_case_test", switch_case_test);

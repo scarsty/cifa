@@ -1011,7 +1011,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value()) { return return_value(); }
             }
-            return o;
+            return Object(0);
         }
         if (c.str == "do")    //do {语句1} while (条件1);
         {
@@ -1031,7 +1031,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value()) { return return_value(); }
             } while (eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
-            return o;
+            return Object(0);
         }
         if (c.str == "switch")
         {
@@ -1581,7 +1581,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
 
 //表达式语法树
 //参数含义：是否合并{}，是否合并[]，是否合并()
-CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, bool round)
+CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, bool round, bool allow_labels)
 {
     //合并{}
     if (curly) { combine_curly_bracket(ppp); }
@@ -1599,7 +1599,7 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, 
     //标签必须在运算符合并前处理，避免其冒号被当作普通二元运算符。
     for (auto it = ppp.begin(); it != ppp.end();)
     {
-        if (it->type == CalUnitType::Operator && it->str == ":" && !it->un_combine && it->v.empty() && it != ppp.begin()
+        if (allow_labels && it->type == CalUnitType::Operator && it->str == ":" && !it->un_combine && it->v.empty() && it != ppp.begin()
             && std::prev(it)->type == CalUnitType::Parameter && !std::prev(it)->with_type
             && (std::prev(it) == ppp.begin() || std::prev(std::prev(it))->str == ";"
                 || std::prev(std::prev(it))->type == CalUnitType::Label
@@ -1762,8 +1762,9 @@ void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
         {
             break;
         }
+        const bool is_for_header = it != ppp.begin() && std::prev(it)->type == CalUnitType::Key && std::prev(it)->str == "for";
         it = ppp.erase(it);
-        auto c1 = combine_all_cal(ppp2, true, true, false);
+        auto c1 = combine_all_cal(ppp2, true, true, false, !is_for_header);
         c1.str = "()";
         c1.line = it->line;
         c1.col = it->col;

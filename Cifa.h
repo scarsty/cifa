@@ -526,7 +526,7 @@ private:
     CalUnit& find_right_side(CalUnit& c1);
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
-    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true);
+    CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true, bool allow_labels = true);
     std::list<CalUnit>::iterator inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br);
     void combine_curly_bracket(std::list<CalUnit>& ppp);
     void combine_square_bracket(std::list<CalUnit>& ppp);
