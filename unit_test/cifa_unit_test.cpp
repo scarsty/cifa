@@ -267,10 +267,10 @@ bool loop_control_flow_matrix_test()
     };
 
     const ScriptCase breakCases[] = {
-        { R"(int value = 0; for (int i = 0; i < 3; i++) { value++; break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value += item; break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; int i = 0; while (i < 3) { value++; break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; do { value++; break; } while (value < 3); value += 10; return value;)", 11 },
+        { R"(int value = 0; for (int i = 0; i < 3; i++) { value++; if (value == 1) break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value += item; if (value == 1) break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; int i = 0; while (i < 3) { value++; if (value == 1) break; } value += 10; return value;)", 11 },
+        { R"(int value = 0; do { value++; if (value == 1) break; } while (value < 3); value += 10; return value;)", 11 },
     };
     const ScriptCase continueCases[] = {
         { R"(int value = 0; for (int i = 0; i < 4; i++) { if (i == 1) continue; value += i + 1; } value += 10; return value;)", 18 },
@@ -279,16 +279,16 @@ bool loop_control_flow_matrix_test()
         { R"(int value = 0; int i = 0; do { i++; if (i == 2) continue; value += i; } while (i < 4); value += 10; return value;)", 18 },
     };
     const ScriptCase returnCases[] = {
-        { R"(f() { for (int i = 0; i < 3; i++) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { values = {1, 2, 3}; for (item : values) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { int i = 0; while (i < 3) { return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { do { return 7; } while (false); return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { for (int i = 0; i < 3; i++) { if (i == 0) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { values = {1, 2, 3}; for (item : values) { if (item == 1) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { int i = 0; while (i < 3) { if (i == 0) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
+        { R"(f() { do { if (true) return 7; } while (false); return 0; } int value = f(); value += 10; return value;)", 17 },
     };
     const ScriptCase exitCases[] = {
-        { R"(value = 0; for (int i = 0; i < 3; i++) { value++; exit(); } value = 99;)", 1 },
-        { R"(value = 0; values = {1, 2, 3}; for (item : values) { value += item; exit(); } value = 99;)", 1 },
-        { R"(value = 0; int i = 0; while (i < 3) { value++; exit(); } value = 99;)", 1 },
-        { R"(value = 0; do { value++; exit(); } while (false); value = 99;)", 1 },
+        { R"(value = 0; for (int i = 0; i < 3; i++) { value++; if (value == 1) exit(); } value = 99;)", 1 },
+        { R"(value = 0; values = {1, 2, 3}; for (item : values) { value += item; if (value == 1) exit(); } value = 99;)", 1 },
+        { R"(value = 0; int i = 0; while (i < 3) { value++; if (value == 1) exit(); } value = 99;)", 1 },
+        { R"(value = 0; do { value++; if (value == 1) exit(); } while (false); value = 99;)", 1 },
     };
 
     const auto runValueCases = [](const ScriptCase* cases, size_t count)
@@ -1495,6 +1495,28 @@ bool goto_test()
         if (!result.isNumber() || result.toDouble() != 4.0)
         {
             return false;
+        }
+    }
+    // 各类循环应将 goto 信号交给外层语句块处理。
+    {
+        struct ScriptCase
+        {
+            const char* script;
+        };
+        const ScriptCase loopCases[] = {
+            { R"(int value = 0; for (int i = 0; i < 3; i++) { value = 1; if (value == 1) goto done; } value = 2; done: return value + 10;)" },
+            { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value = item; if (value == 1) goto done; } value = 9; done: return value + 10;)" },
+            { R"(int value = 0; while (value < 3) { value = 1; if (value == 1) goto done; } value = 2; done: return value + 10;)" },
+            { R"(int value = 0; do { value = 1; if (value == 1) goto done; } while (false); value = 2; done: return value + 10;)" },
+        };
+        for (const auto& loopCase : loopCases)
+        {
+            Cifa c;
+            auto result = c.run_script(loopCase.script);
+            if (!result.isNumber() || result.toDouble() != 11.0)
+            {
+                return false;
+            }
         }
     }
 
