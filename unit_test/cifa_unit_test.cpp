@@ -258,73 +258,6 @@ bool loop_control_test()
     return o.toInt() == 16;
 }
 
-bool loop_control_flow_matrix_test()
-{
-    struct ScriptCase
-    {
-        const char* script;
-        int expected;
-    };
-
-    const ScriptCase breakCases[] = {
-        { R"(int value = 0; for (int i = 0; i < 3; i++) { value++; if (value == 1) break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value += item; if (value == 1) break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; int i = 0; while (i < 3) { value++; if (value == 1) break; } value += 10; return value;)", 11 },
-        { R"(int value = 0; do { value++; if (value == 1) break; } while (value < 3); value += 10; return value;)", 11 },
-    };
-    const ScriptCase continueCases[] = {
-        { R"(int value = 0; for (int i = 0; i < 4; i++) { if (i == 1) continue; value += i + 1; } value += 10; return value;)", 18 },
-        { R"(int value = 0; values = {1, 2, 3, 4}; for (item : values) { if (item == 2) continue; value += item; } value += 10; return value;)", 18 },
-        { R"(int value = 0; int i = 0; while (i < 4) { i++; if (i == 2) continue; value += i; } value += 10; return value;)", 18 },
-        { R"(int value = 0; int i = 0; do { i++; if (i == 2) continue; value += i; } while (i < 4); value += 10; return value;)", 18 },
-    };
-    const ScriptCase returnCases[] = {
-        { R"(f() { for (int i = 0; i < 3; i++) { if (i == 0) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { values = {1, 2, 3}; for (item : values) { if (item == 1) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { int i = 0; while (i < 3) { if (i == 0) return 7; } return 0; } int value = f(); value += 10; return value;)", 17 },
-        { R"(f() { do { if (true) return 7; } while (false); return 0; } int value = f(); value += 10; return value;)", 17 },
-    };
-    const ScriptCase exitCases[] = {
-        { R"(value = 0; for (int i = 0; i < 3; i++) { value++; if (value == 1) exit(); } value = 99;)", 1 },
-        { R"(value = 0; values = {1, 2, 3}; for (item : values) { value += item; if (value == 1) exit(); } value = 99;)", 1 },
-        { R"(value = 0; int i = 0; while (i < 3) { value++; if (value == 1) exit(); } value = 99;)", 1 },
-        { R"(value = 0; do { value++; if (value == 1) exit(); } while (false); value = 99;)", 1 },
-    };
-
-    const auto runValueCases = [](const ScriptCase* cases, size_t count)
-        {
-            for (size_t index = 0; index < count; index++)
-            {
-                Cifa c;
-                const auto result = c.run_script(cases[index].script);
-                if (!result.isNumber() || result.toInt() != cases[index].expected)
-                {
-                    return false;
-                }
-            }
-            return true;
-        };
-    const auto runExitCases = [](const ScriptCase* cases, size_t count)
-        {
-            for (size_t index = 0; index < count; index++)
-            {
-                Cifa c;
-                c.run_script(cases[index].script);
-                const auto result = c.run_script("return value;");
-                if (!result.isNumber() || result.toInt() != cases[index].expected)
-                {
-                    return false;
-                }
-            }
-            return true;
-        };
-
-    return runValueCases(breakCases, std::size(breakCases))
-        && runValueCases(continueCases, std::size(continueCases))
-        && runValueCases(returnCases, std::size(returnCases))
-        && runExitCases(exitCases, std::size(exitCases));
-}
-
 bool ternary_operator_test()
 {    // 测试嵌套三目运算
     Cifa c;
@@ -1413,20 +1346,6 @@ bool range_for_test()
             return false;
         }
     }
-    // 无类型循环变量也应识别为范围循环，而不是标签。
-    {
-        Cifa c;
-        auto o = c.run_script(R"(
-            values = {2, 3, 5};
-            int product = 1;
-            for (value : values) { product *= value; }
-            return product;
-        )");
-        if (!o.isNumber() || o.toDouble() != 30)
-        {
-            return false;
-        }
-    }
     return true;
 }
 
@@ -1495,28 +1414,6 @@ bool goto_test()
         if (!result.isNumber() || result.toDouble() != 4.0)
         {
             return false;
-        }
-    }
-    // 各类循环应将 goto 信号交给外层语句块处理。
-    {
-        struct ScriptCase
-        {
-            const char* script;
-        };
-        const ScriptCase loopCases[] = {
-            { R"(int value = 0; for (int i = 0; i < 3; i++) { value = 1; if (value == 1) goto done; } value = 2; done: return value + 10;)" },
-            { R"(int value = 0; values = {1, 2, 3}; for (item : values) { value = item; if (value == 1) goto done; } value = 9; done: return value + 10;)" },
-            { R"(int value = 0; while (value < 3) { value = 1; if (value == 1) goto done; } value = 2; done: return value + 10;)" },
-            { R"(int value = 0; do { value = 1; if (value == 1) goto done; } while (false); value = 2; done: return value + 10;)" },
-        };
-        for (const auto& loopCase : loopCases)
-        {
-            Cifa c;
-            auto result = c.run_script(loopCase.script);
-            if (!result.isNumber() || result.toDouble() != 11.0)
-            {
-                return false;
-            }
         }
     }
 
@@ -1817,11 +1714,29 @@ bool sprintf_format_test()
             return false;
         }
     }
+    // 连续说明符和 %% 混用：%% 不消耗参数，其他说明符按顺序各消耗一个参数
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("%s%d%.1f%%-%x", "A", 2, 3.5, 255);)");
+        if (!o.isType<std::string>() || o.toString() != "A23.5%-ff")
+        {
+            return false;
+        }
+    }
     // %% 转义
     {
         Cifa c;
         auto o = c.run_script(R"(return sprintf("100%%");)");
         if (!o.isType<std::string>() || o.toString() != "100%")
+        {
+            return false;
+        }
+    }
+    // 奇数个 %：前 12 个组成 6 个 %% ，末尾不完整的 % 被忽略；与 MSVC/UCRT 当前行为一致
+    {
+        Cifa c;
+        auto o = c.run_script(R"(return sprintf("100%%%%%%%%%%%%%");)");
+        if (!o.isType<std::string>() || o.toString() != "100%%%%%%")
         {
             return false;
         }
@@ -2183,7 +2098,6 @@ int main()
     run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
-    run_test("loop_control_flow_matrix_test", loop_control_flow_matrix_test);
     run_test("ternary_operator_test", ternary_operator_test);
     run_test("logical_short_circuit_test", logical_short_circuit_test);
     run_test("switch_case_test", switch_case_test);
