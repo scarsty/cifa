@@ -1,5 +1,7 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <print>
@@ -17,6 +19,34 @@ namespace cifa
 {
 
 static std::string normalize_path(const std::string& path);
+
+static bool parse_number_literal(const std::string& text, double& value)
+{
+    const bool is_hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    const bool is_binary = text.size() > 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B');
+    const bool is_octal = text.size() > 1 && text[0] == '0'
+        && text.find_first_of(".eE") == std::string::npos;
+
+    if (is_hex || is_binary || is_octal)
+    {
+        const char* digits = text.c_str() + (is_hex || is_binary ? 2 : 0);
+        const int base = is_hex ? 16 : (is_binary ? 2 : 8);
+        char* end = nullptr;
+        errno = 0;
+        const auto integer = std::strtoull(digits, &end, base);
+        if (errno == ERANGE || end == digits || *end != '\0')
+        {
+            return false;
+        }
+        value = static_cast<double>(integer);
+        return true;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(text.c_str(), &end);
+    return errno != ERANGE && end != text.c_str() && *end == '\0';
+}
 
 //构造函数：注册内置函数（print, println, 数学函数等）
 Cifa::Cifa()
@@ -872,7 +902,13 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
     else if (c.type == CalUnitType::Constant)
     {
-        return Object(atof(c.str.c_str()));
+        double value = 0;
+        if (!parse_number_literal(c.str, value))
+        {
+            set_runtime_error("invalid numeric literal '" + c.str + "'");
+            return Object();
+        }
+        return Object(value);
     }
     else if (c.type == CalUnitType::String)
     {
@@ -1406,6 +1442,13 @@ std::list<CalUnit> Cifa::split(std::string& str)
         else if (g == CalUnitType::Parameter)
         {
             if ((c == 'E' || c == 'e') && stat == CalUnitType::Constant)
+            {
+            }
+            else if (stat == CalUnitType::Constant && r == "0" && (c == 'x' || c == 'X' || c == 'b' || c == 'B'))
+            {
+            }
+            else if (stat == CalUnitType::Constant && r.size() >= 2 && r[0] == '0'
+                && (r[1] == 'x' || r[1] == 'X') && std::isxdigit(static_cast<unsigned char>(c)))
             {
             }
             else
