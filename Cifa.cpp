@@ -2351,10 +2351,71 @@ void Cifa::combine_structs(std::list<CalUnit>& ppp)
     }
 }
 
-//注册宿主程序中的 C++ 函数
-void Cifa::register_function(const std::string& name, func_type func)
+bool Cifa::is_valid_key(const std::string& key)
 {
+    const auto is_identifier_start = [](unsigned char c)
+        {
+            return c == '_' || std::isalpha(c) || c >= 0x80;
+        };
+    const auto is_identifier_char = [&](unsigned char c)
+        {
+            return is_identifier_start(c) || std::isdigit(c);
+        };
+
+    const bool is_identifier = !key.empty()
+        && is_identifier_start(static_cast<unsigned char>(key.front()))
+        && std::all_of(key.begin() + 1, key.end(), [&](char c)
+            {
+                return is_identifier_char(static_cast<unsigned char>(c));
+            });
+    return is_identifier && key != "struct" && !vector_have(keys, key) && !vector_have(types, key)
+        && !op_representations.contains(key);
+}
+
+std::string Cifa::revise_key(const std::string& key)
+{
+    const auto is_identifier_start = [](unsigned char c)
+        {
+            return c == '_' || std::isalpha(c) || c >= 0x80;
+        };
+    const auto is_identifier_char = [&](unsigned char c)
+        {
+            return is_identifier_start(c) || std::isdigit(c);
+        };
+
+    std::string revised = key.empty() ? "_" : key;
+    for (size_t index = 0; index < revised.size(); ++index)
+    {
+        const unsigned char c = static_cast<unsigned char>(revised[index]);
+        const bool valid = index == 0 ? is_identifier_start(c) : is_identifier_char(c);
+        if (!valid)
+        {
+            revised[index] = '_';
+        }
+    }
+    if (!is_valid_key(revised))
+    {
+        revised += '_';
+    }
+    return revised;
+}
+
+bool Cifa::validate_registration_name(const std::string& name)
+{
+    if (is_valid_key(name))
+    {
+        return true;
+    }
+    set_runtime_error("invalid registration name '" + name + "'");
+    return false;
+}
+
+//注册宿主程序中的 C++ 函数
+bool Cifa::register_function(const std::string& name, func_type func)
+{
+    if (!validate_registration_name(name)) { return false; }
     functions[name] = std::move(func);
+    return true;
 }
 
 bool Cifa::import_module(const std::string& path)
@@ -2447,15 +2508,19 @@ void Cifa::import_literal_modules(CalUnit& c)
 }
 
 //注册用户自定义数据指针
-void Cifa::register_user_data(const std::string& name, void* p)
+bool Cifa::register_user_data(const std::string& name, void* p)
 {
+    if (!validate_registration_name(name)) { return false; }
     user_data[name] = p;
+    return true;
 }
 
 //注册一个全局参数变量
-void Cifa::register_parameter(const std::string& name, Object o)
+bool Cifa::register_parameter(const std::string& name, Object o)
 {
+    if (!validate_registration_name(name)) { return false; }
     global_variables[name] = std::move(o);
+    return true;
 }
 
 void Cifa::set_include_dirs(const std::vector<std::string>& dirs)

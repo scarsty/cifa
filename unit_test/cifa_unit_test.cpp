@@ -73,6 +73,42 @@ bool register_function_template_test()
     return o.isNumber() && o.toDouble() == 16.0;
 }
 
+bool registration_name_validation_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    int context = 0;
+    if (!c.register_function("valid_function", template_square)
+        || !c.register_parameter("valid_parameter", 1)
+        || !c.register_vector("valid_vector", std::vector<int>{ 1, 2 })
+        || !c.register_user_data("valid_context", &context))
+    {
+        return false;
+    }
+
+    Cifa invalid;
+    invalid.set_output_error(false);
+    const bool template_registration_failed = !invalid.register_function("1bad", template_square)
+        && invalid.has_runtime_error()
+        && invalid.get_runtime_error().find("invalid registration name '1bad'") != std::string::npos;
+
+    Cifa default_output;
+    const bool standard_registration_failed = !default_output.register_parameter("bad-key", 1)
+        && default_output.has_runtime_error()
+        && default_output.get_runtime_error().find("invalid registration name 'bad-key'") != std::string::npos;
+
+    return Cifa::is_valid_key("valid_key")
+        && Cifa::is_valid_key("_value2")
+        && !Cifa::is_valid_key("1bad")
+        && !Cifa::is_valid_key("bad-key")
+        && !Cifa::is_valid_key("return")
+        && Cifa::revise_key("1bad-key") == "_bad_key"
+        && Cifa::revise_key("return") == "return_"
+        && Cifa::revise_key("") == "_"
+        && template_registration_failed
+        && standard_registration_failed;
+}
+
 bool exit_function_test()
 {
     {
@@ -2097,6 +2133,7 @@ int main()
 
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
+    run_test("registration_name_validation_test", registration_name_validation_test);
     run_test("exit_function_test", exit_function_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);

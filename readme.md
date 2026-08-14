@@ -48,6 +48,10 @@ int main()
 }
 ```
 
+`register_function`、`register_parameter`、`register_vector` 和 `register_user_data` 在注册成功时返回 `true`。变量、函数及用户数据的名称遵循相同规则：首字符必须是英文字母、下划线 `_` 或 UTF-8 字符；后续字符还可使用数字；不能包含空白或运算符，且不能使用关键字、类型名或替代运算符词。注册失败时返回 `false`，并可通过 `get_runtime_error()` 获取原因。
+
+可通过 `Cifa::is_valid_key(key)` 检查名称是否符合此规则。`Cifa::revise_key(key)` 会把不合规字符替换为 `_`；空名称会变为 `_`，关键字等保留名称会追加 `_`，使返回值始终是可用名称，例如 `1bad-key` 会修订为 `_bad_key`。
+
 其中1.c文件即为脚本内容，一个例子为：
 
 ```c++

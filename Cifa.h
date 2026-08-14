@@ -442,11 +442,18 @@ public:
     Cifa(Cifa&&) = delete;
     Cifa& operator=(Cifa&&) = delete;
 
-    void register_function(const std::string& name, func_type func);
+    static bool is_valid_key(const std::string& key);
+    static std::string revise_key(const std::string& key);
+
+    bool register_function(const std::string& name, func_type func);
 
     template <typename R, typename... Args>
-    void register_function(const std::string& name, R (*func)(Args...))
+    bool register_function(const std::string& name, R (*func)(Args...))
     {
+        if (!validate_registration_name(name))
+        {
+            return false;
+        }
         functions[name] = [this, name, func](ObjectVector& args) -> Object
         {
             constexpr size_t argc = sizeof...(Args);
@@ -457,25 +464,35 @@ public:
             }
             return call_registered_function(func, args, std::index_sequence_for<Args...>{});
         };
+        return true;
     }
 
-    void register_user_data(const std::string& name, void* p);
-    void register_parameter(const std::string& name, Object o);
+    bool register_user_data(const std::string& name, void* p);
+    bool register_parameter(const std::string& name, Object o);
 
     template <typename T>
-    void register_parameter(const std::string& name, std::map<std::string, T> m)
+    bool register_parameter(const std::string& name, std::map<std::string, T> m)
     {
+        if (!validate_registration_name(name))
+        {
+            return false;
+        }
         ObjectMap omap;
         for (auto& [k, v] : m)
         {
             omap[k] = Object(v);
         }
         global_variables[name] = Object(std::move(omap));
+        return true;
     }
 
     template <typename T>
-    void register_vector(const std::string& name, const std::vector<T>& v)
+    bool register_vector(const std::string& name, const std::vector<T>& v)
     {
+        if (!validate_registration_name(name))
+        {
+            return false;
+        }
         std::vector<Object> arr;
         arr.reserve(v.size());
         for (auto& o : v)
@@ -483,6 +500,7 @@ public:
             arr.emplace_back(Object(o));
         }
         global_variables[name] = Object(std::move(arr));
+        return true;
     }
 
     void* get_user_data(const std::string& name);
@@ -547,6 +565,7 @@ private:
     Object& resolve_nested_index(Object& element, CalUnit& c, size_t dim_index, ScopeStack& scopes, bool only_check);
     bool try_eval_array_literal(CalUnit& c, ScopeStack& scopes, Object& out);
     bool is_array_literal_candidate(CalUnit& c) const;
+    bool validate_registration_name(const std::string& name);
     Object* find_object_from_inner(ScopeStack& scopes, const std::string& name);
     bool has_return_value() const;
     Object& return_value();
