@@ -230,22 +230,6 @@ bool builtin_type_function_test()
     return o.isNumber() && o.toDouble() == 1.0;
 }
 
-bool import_dll_test()
-{
-    Cifa c;
-#ifdef _DEBUG
-    constexpr const char* plugin_path = "build/cifa_import_example_debug.dll";
-#else
-    constexpr const char* plugin_path = "build/cifa_import_example_release.dll";
-#endif
-    auto o = c.run_script(R"(
-        import(")" + std::string(plugin_path) + R"(");
-        import(")" + std::string(plugin_path) + R"(");
-        return plugin_square(3) + plugin_add(2, 4) + plugin_sin(0);
-    )");
-    return o.isNumber() && std::fabs(o.toDouble() - 15.0) < 1e-9;
-}
-
 bool loop_math_test()
 {
     Cifa c1;
@@ -420,13 +404,14 @@ bool script_function_argument_count_test()
 bool script_function_global_scope_test()
 {
     Cifa c;
+    c.set_output_error(false);
     int captured_value = 0;
     c.register_function("capture", [&captured_value](ObjectVector& args) -> Object
         {
             captured_value = args.empty() ? 0 : args[0].toInt();
             return Object();
         });
-    auto global_result = c.run_script(R"(
+    auto program = c.compile_script(R"(
         b = 304;
         update_b() {
             capture(b);
@@ -436,6 +421,11 @@ bool script_function_global_scope_test()
         result = update_b();
         return b * 1000 + result;
     )");
+    if (!program)
+    {
+        return false;
+    }
+    auto global_result = c.run(program);
     if (!global_result.isNumber() || global_result.toInt() != 305305 || captured_value != 304)
     {
         return false;
@@ -453,8 +443,8 @@ bool script_function_global_scope_test()
         return false;
     }
 
-    c.run_script("broken() { return missing_function(); }");
-    if (!c.has_error())
+    auto broken = c.compile_script("broken() { return missing_function(); }");
+    if (broken || !c.has_error())
     {
         return false;
     }
@@ -708,13 +698,13 @@ bool else_if_chain_test()
 bool multi_dimensional_array_test()
 {
     Cifa c;
-    // 假设你的引擎支持这种嵌套方式
     std::string script = R"(
         grid = {{1, 2}, {3, 4}};
-        return grid[1][0]; // 应该返回 3
+        grid[2][1] = 5;
+        return grid[1][0] + grid[2][1];
     )";
     auto o = c.run_script(script);
-    return o.toInt() == 3;
+    return o.toInt() == 8;
 }
 
 bool compound_assignment_test()
@@ -1722,16 +1712,11 @@ bool struct_test()
             return false;
         }
     }
-    // 第二次 run_script 不重复写 struct 定义
+    // 全局 struct 定义在执行后注册到 Cifa，可供后续脚本使用
     {
         Cifa c;
-        c.run_script(R"(struct Point { int x; int y; };)");
-        auto o = c.run_script(R"(
-            Point p;
-            p.x = 3;
-            p.y = 7;
-            return p.x + p.y;
-        )");
+        c.run_script("struct Point { int x; int y; };");
+        auto o = c.run_script("Point p; p.x = 3; p.y = 7; return p.x + p.y;");
         if (!o.isNumber() || o.toDouble() != 10)
         {
             return false;
@@ -2190,6 +2175,226 @@ bool large_script_performance_test()
     return result.isNumber() && std::fabs(result.toDouble() - expected) < 1e-9;
 }
 
+bool ast_execution_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    int total = 0;
+    c.register_function("record", [&total](ObjectVector& arguments) -> Object
+        {
+            if (arguments.size() != 1 || !arguments[0].isNumber())
+            {
+                return Object();
+            }
+            total += arguments[0].toInt();
+            return Object();
+        });
+
+    auto program = c.compile_script("entry_first: record(1); exit();\nentry_second: record(2); exit();\n");
+    if (!program)
+    {
+        return false;
+    }
+
+    Ast moved_program = std::move(program);
+    if (!moved_program)
+    {
+        return false;
+    }
+    program = std::move(moved_program);
+    if (!program)
+    {
+        return false;
+    }
+
+    c.run(program, "entry_second");
+    if (c.has_runtime_error() || total != 2)
+    {
+        return false;
+    }
+
+    c.run(program, "entry_first");
+    if (c.has_runtime_error() || total != 3)
+    {
+        return false;
+    }
+
+    c.run(program);
+    if (c.has_runtime_error() || total != 4)
+    {
+        return false;
+    }
+
+    c.run(program, "missing_entry");
+    if (!c.has_runtime_error() || c.get_runtime_error().find("missing_entry") == std::string::npos)
+    {
+        return false;
+    }
+
+    auto file_program = c.compile_file("unit_test/test_data/include_simple.cifa");
+    if (!file_program)
+    {
+        return false;
+    }
+    auto file_result = c.run(file_program);
+    return program.valid() && file_result.isNumber() && file_result.toInt() == 15;
+}
+
+bool nested_ast_context_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    int total = 0;
+    c.register_function("record", [&total](ObjectVector& arguments) -> Object
+        {
+            total += arguments[0].toInt();
+            return Object();
+        });
+    Ast replacement;
+    c.register_function("compile_replacement", [&c, &replacement](ObjectVector&) -> Object
+        {
+            replacement = c.compile_script("replacement: record(100); exit();");
+            return Object(replacement.valid());
+        });
+
+    auto outer = c.compile_script("record(1); compile_replacement(); record(2); exit();");
+    if (!outer)
+    {
+        return false;
+    }
+    c.run(outer);
+    if (c.has_runtime_error() || total != 3)
+    {
+        return false;
+    }
+
+    c.run(replacement, "replacement");
+    if (c.has_runtime_error() || total != 103)
+    {
+        return false;
+    }
+
+    c.run_script("record(10);");
+    c.run(replacement, "replacement");
+    return !c.has_runtime_error() && total == 213;
+}
+
+bool compiled_source_map_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    auto program = c.compile_script("double cached_value; return cached_value * 2;");
+    if (!program)
+    {
+        return false;
+    }
+    c.run_script("return 1;");
+    c.run(program);
+    const std::string error = c.get_runtime_error();
+    return error.find("variable 'cached_value' has not been initialized") != std::string::npos
+        && error.find("double cached_value; return cached_value * 2;") != std::string::npos;
+}
+
+bool nested_ast_function_lookup_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.register_function("run_child", [&c](ObjectVector&) -> Object
+        {
+            return c.run_script("return value(5);");
+        });
+    auto result = c.run_script("value(n) { return n + 1; } return run_child();");
+    return result.isNumber() && result.toInt() == 6 && !c.has_runtime_error();
+}
+
+bool global_definition_scope_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+
+    auto nested_function = c.compile_script("if (1) { nested() { return 1; } }");
+    if (nested_function
+        || c.get_errors_str().find("script function 'nested' is only allowed in global scope") == std::string::npos)
+    {
+        return false;
+    }
+
+    auto nested_struct = c.compile_script("if (1) { struct Local { int value; }; }");
+    if (nested_struct
+        || c.get_errors_str().find("struct 'Local' is only allowed in global scope") == std::string::npos)
+    {
+        return false;
+    }
+
+    auto program = c.compile_script("global_fn(value) { return value + 1; } struct Global { int value; }; return 0;");
+    if (!program)
+    {
+        return false;
+    }
+    c.run(program);
+    auto global_definitions = c.run_script("Global item; item.value = 5; return global_fn(item.value);");
+    if (!global_definitions.isNumber() || global_definitions.toInt() != 6)
+    {
+        return false;
+    }
+
+    c.run_script("global_value = 1; { local_value = 2; global_value = 3; }");
+    auto global_value = c.run_script("return global_value;");
+    if (!global_value.isNumber() || global_value.toInt() != 3)
+    {
+        return false;
+    }
+    c.run_script("return local_value;");
+    return c.has_error() && c.get_errors_str().find("local_value") != std::string::npos;
+}
+
+bool nested_script_global_scope_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    c.register_function("run_child", [&c](ObjectVector&) -> Object
+        {
+            return c.run_script("child_global = 5; child_function() { return child_global + 1; } exit(); child_global = 99;");
+        });
+
+    auto outer_result = c.run_script("outer_global = 10; run_child(); outer_global += 1; return outer_global;");
+    if (!outer_result.isNumber() || outer_result.toInt() != 11)
+    {
+        return false;
+    }
+    auto persisted_child = c.run_script("return child_global * 100 + child_function();");
+    if (!persisted_child.isNumber() || persisted_child.toInt() != 506)
+    {
+        return false;
+    }
+
+    c.register_function("read_outer_local", [&c](ObjectVector&) -> Object
+        {
+            return c.run_script("return outer_local;");
+        });
+    c.run_script("{ outer_local = 7; read_outer_local(); }");
+    return c.has_error() && c.get_errors_str().find("outer_local") != std::string::npos;
+}
+
+bool nested_runtime_reporter_test()
+{
+    Cifa outer;
+    Cifa inner;
+    outer.set_output_error(false);
+    inner.set_output_error(false);
+    outer.register_function("run_inner", [&inner](ObjectVector&) -> Object
+        {
+            inner.run_script("double inner_value; return inner_value * 2;");
+            return Object();
+        });
+
+    outer.run_script("run_inner(); double outer_value; return outer_value * 2;");
+    const std::string outer_error = outer.get_runtime_error();
+    const std::string inner_error = inner.get_runtime_error();
+    return outer_error.find("variable 'outer_value'") != std::string::npos
+        && inner_error.find("variable 'inner_value'") != std::string::npos;
+}
+
 int main(int argc, char** argv)
 {
     if (argc > 1 && (std::string(argv[1]) == "--perf" || std::string(argv[1]) == "--perf-large"))
@@ -2216,13 +2421,19 @@ int main(int argc, char** argv)
     run_test("register_function_template_test", register_function_template_test);
     run_test("registration_name_validation_test", registration_name_validation_test);
     run_test("exit_function_test", exit_function_test);
+    run_test("ast_execution_test", ast_execution_test);
+    run_test("nested_ast_context_test", nested_ast_context_test);
+    run_test("compiled_source_map_test", compiled_source_map_test);
+    run_test("nested_ast_function_lookup_test", nested_ast_function_lookup_test);
+    run_test("global_definition_scope_test", global_definition_scope_test);
+    run_test("nested_script_global_scope_test", nested_script_global_scope_test);
+    run_test("nested_runtime_reporter_test", nested_runtime_reporter_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("builtin_type_function_test", builtin_type_function_test);
     run_test("range_for_test", range_for_test);
     run_test("goto_test", goto_test);
-    run_test("import_dll_test", import_dll_test);
     run_test("loop_math_test", loop_math_test);
     run_test("loop_control_test", loop_control_test);
     run_test("ternary_operator_test", ternary_operator_test);

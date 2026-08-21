@@ -79,6 +79,69 @@ return sum;
 
 数值字面量支持十进制整数和浮点数（包括科学计数法），以及 C 风格的整数进制：十六进制 `0xFF`、二进制 `0b1010`、八进制 `077`。非十进制字面量只用于整数，不能包含小数点或指数。
 
+### 运行规则
+
+1. **脚本、文件和 AST 使用相同规则**  
+    `run_script(source)` 等价于先 `compile_script(source)` 再 `run(program)`；`run_file(filename)` 等价于先 `compile_file(filename)` 再 `run(program)`。三种入口最终都执行一份 `cifa::Ast`，不会因为输入形式不同而改变作用域或全局状态规则。
+
+2. **编译不修改运行状态**  
+    `compile_script` 和 `compile_file` 使用独立的编译上下文，只读取 `Cifa` 的全局变量、全局脚本函数和全局 struct 表来生成调用方持有的 AST。编译不会读取当前执行的 AST、代码块局部变量、函数参数、`return` 或 `exit` 状态，也不执行语句或修改全局表。即使在脚本执行期间由宿主回调触发编译，规则也相同。编译失败返回无效 AST，并保留静态错误信息。
+
+3. **执行会更新实例全局状态**  
+    执行脚本或 AST 时，AST 中的顶层函数和 struct 会先注册到当前 `Cifa` 实例。脚本最外层执行的变量创建和赋值直接作用于实例全局变量表。这三张全局表会跨后续脚本、文件和 AST 执行保留；同名同参数个数的脚本函数由后执行的定义覆盖。
+
+4. **只有大括号和函数调用产生局部变量层**  
+    `{}` 代码块进入时压入局部变量层，离开时弹出；函数参数和函数体变量也属于函数调用的局部层。局部变量不会在代码块、函数或本次执行结束后保留。变量查找从最内层局部层向外进行，最后查找实例全局变量表。
+
+5. **函数和 struct 只能在全局空间定义**  
+    脚本函数和 struct 只允许出现在脚本最外层。它们若出现在 `if`、循环、函数体或其他任意大括号内部，会产生静态错误。标签入口不会改变这些定义的注册规则。
+
+6. **嵌套脚本从新的全局执行开始**  
+    在宿主回调或脚本内置 `run_string` / `run_file` 中再次执行脚本时，子脚本共享同一 `Cifa` 实例的全局变量、全局函数和全局 struct，但看不到外层代码块或函数的局部变量。子脚本产生的全局状态会保留。
+
+7. **`return` 和 `exit()` 按当前执行上下文处理**  
+    函数中的 `return` 只返回当前函数；脚本顶层 `return` 产生本次执行结果；子脚本的 `return` 只返回到调用子脚本的位置。`exit()` 结束当前脚本或 AST 执行，子脚本的 `exit()` 不会结束外层脚本。子脚本的静态错误和运行时错误仍会向外传播。
+
+8. **AST 生命周期由调用方管理**  
+    `cifa::Ast` 可移动但不可复制。`run(program)` 是同步调用，调用方必须保证 AST 在 `run` 返回前有效，不能在执行期间移动或重新赋值该 AST。
+
+9. **文件读取使用统一实现**  
+    `run_file` 直接复用 `compile_file`，顶层文件只读取一次。顶层脚本文件和递归 include 文件最终都通过同一个内部 `read_text_file()` 读取；include 预处理器只额外负责候选路径搜索、相对目录处理和重复包含检测。
+
+### 编译 AST 与标签入口
+
+`run_script` 和 `run_file` 保持“解析后立即执行”的便捷行为。若需要保存编译结果、重复运行或从不同标签进入，可使用 `compile_script` 或 `compile_file` 取得调用方持有的 `cifa::Ast`，再将它传给 `run`：
+
+```c++
+Cifa c;
+c.register_function("record", [](ObjectVector& args) -> Object
+    {
+        // 处理宿主回调
+        return Object();
+    });
+
+auto program = c.compile_script(R"(
+entry_start: record(1); exit();
+entry_resume: record(2); exit();
+)"));
+
+if (!program)
+{
+    std::cerr << c.get_errors_str();
+}
+else
+{
+    c.run(program, "entry_start");
+    c.run(program, "entry_resume");
+}
+```
+
+`run(program, "label")` 仅允许从 AST 的顶层标签开始执行；标签不存在时会产生运行时错误。`run(program)` 或 `run(program, "")` 从第一个顶层节点开始执行。每次调用都有独立的局部作用域、返回状态和 `exit()` 状态，同时共享该 `Cifa` 实例的全局变量、全局脚本函数、全局 struct 和宿主回调。
+
+`cifa::Ast` 包含根 AST、顶层标签索引、待注册的全局脚本函数、全局 struct 定义和源码位置映射。它可移动但不可复制，生命周期完全由调用方控制；`Cifa` 内部不保存编译缓存。编译本身不会修改 `Cifa` 的全局定义表；执行 AST 时，其中的函数和 struct 才会注册到当前 `Cifa`。编译失败时返回无效 AST，可通过 `if (program)` 或 `program.valid()` 判断。
+
+三种运行方式最终使用同一执行管线：`run_script(script)` 编译并运行临时 AST，`run_file(filename)` 展开文件及 include 后编译并运行临时 AST，`run(program, label)` 直接运行传入 AST。运行是同步的，调用方必须保证传入 AST 在 `run` 返回前保持有效。
+
 ### 脚本函数与重载
 
 脚本可以直接定义函数，并可按**参数个数**使用同名重载：
@@ -95,19 +158,20 @@ return label(1, 2);
 
 脚本函数名也不能与宿主程序已经注册的函数同名，例如内置 `sqrt` 或通过 `register_function` 注册的名称；这种冲突会产生静态错误。
 
-#### 函数表与多次执行
+#### 全局函数表与 AST
 
-脚本函数保存在 `Cifa` 实例的全局函数表中。一次 `run_script` 或 `run_file` 成功定义的函数，可以在同一个 `Cifa` 实例后续执行的脚本中继续调用：
+编译时，脚本函数先保存在生成的 `cifa::Ast` 中；执行脚本或 AST 时，这些函数会注册到 `Cifa` 实例的全局脚本函数表，因此后续独立脚本也可以调用：
 
 ```c++
 Cifa c;
-c.run_script("add_one(value) { return value + 1; }");
-auto result = c.run_script("return add_one(41);");    // 结果为 42
+auto program = c.compile_script("add_one(value) { return value + 1; } return add_one(41);");
+auto first = c.run(program);                       // 42，同时注册 add_one
+auto second = c.run_script("return add_one(9);"); // 10
 ```
 
-函数调用的词法解析只会为尚未出现的函数名建立待解析占位，不会覆盖已有函数定义。后续脚本若再次定义同名、同参数个数的函数，新定义会覆盖已有版本；同一脚本中也以源码更靠后的定义为准。
+脚本函数和 struct 只允许在脚本最外层定义；任何大括号内部的函数或 struct 定义都会产生静态错误。同名、同参数个数的全局函数采用后执行的定义覆盖旧定义；同一 AST 中则以源码靠后的定义为准。
 
-静态检查只检查本次脚本新增的函数，不会使用当前脚本的变量表重新检查以前已经成功定义的函数。若本次脚本存在静态错误，本次解析过程中新增的函数和待解析占位会整体回滚，不会污染全局函数表；此前已经成功定义的函数仍然保留。
+嵌套执行的脚本仍从新的全局空间开始：它共享 `Cifa` 的全局变量、全局函数和全局 struct，但不会读取外层代码块或函数的局部变量。子脚本执行后产生的全局定义会保留；子脚本自己的 `exit()` 只结束子脚本，不会结束外层脚本。
 
 #### 函数变量作用域
 
@@ -141,7 +205,7 @@ result = add_one(20);    // result 为 21，顶层 b 仍为 10
 
 函数采用词法作用域规则，只访问脚本顶层变量、函数参数和函数自身的局部变量，不访问调用位置所在代码块的局部变量。
 
-脚本顶层变量与脚本函数一样绑定在 `Cifa` 实例上，并跨 `run_script` / `run_file` 保留。由 `register_parameter`、`register_vector` 等接口注册的变量与脚本定义的全局变量使用同一张表，可以互相读取和修改：
+脚本顶层变量绑定在 `Cifa` 实例上，并跨 `run_script` / `run_file` / `run(Ast)` 保留。由 `register_parameter`、`register_vector` 等接口注册的变量与脚本定义的全局变量使用同一张表，可以互相读取和修改：
 
 ```c++
 Cifa c;
@@ -152,19 +216,19 @@ auto result = c.run_script("return value * 100 + script_value;");    // 1230
 
 变量作用域栈不包含全局变量层，只管理 `{}` 代码块和函数参数/局部变量的 RAII 生命周期。变量查找先从最内层局部作用域向外进行，最后查找实例全局变量表；根级新变量直接写入全局表。
 
-宿主函数回调需要调用另一段脚本时，应使用 `run_nested_script` 或 `run_nested_file`，使子脚本拥有独立的执行上下文：
+宿主函数回调需要调用另一段脚本时，可以再次调用 `run_script` 或 `run_file`。每次调用都会在当前 `Cifa` 实例的执行上下文栈上压入一个新上下文：
 
 ```c++
 Cifa c;
 c.register_function("run_child", [&c](ObjectVector&) -> Object
     {
-        return c.run_nested_file("child.cifa");
+        return c.run_file("child.cifa");
     });
 
 c.run_script("shared = 10; run_child(); return shared;");
 ```
 
-嵌套脚本与外层脚本共享同一张实例全局变量表，但不会看到调用者代码块或函数的局部变量。嵌套脚本自己的 `return` 只返回到宿主函数调用处，`exit()` 只结束嵌套脚本；两者都不会终止外层脚本。子脚本的静态错误或运行时错误仍会向外传播，使本次外层求值停止，并保留子脚本的源码位置用于错误报告。
+嵌套脚本从新的全局执行空间开始，共享同一实例的全局变量、全局脚本函数和全局 struct，但不会看到调用者代码块或函数的局部变量。嵌套脚本自己的 `return` 只返回到宿主函数调用处，`exit()` 只结束嵌套脚本；两者都不会终止外层脚本。子脚本的静态错误或运行时错误仍会向外传播，使本次外层求值停止，并保留子脚本的源码位置用于错误报告。
 
 脚本中也可以直接使用内置函数 `run_string(script)` 和 `run_file(filename)` 执行嵌套脚本。两者各接收一个字符串参数，返回子脚本的执行结果；`run_file` 支持 `#include`，并以被执行文件的目录解析相对 include：
 
@@ -175,7 +239,7 @@ run_file("scripts/child.cifa");
 return total;
 ```
 
-它们与 C++ API `run_nested_script` / `run_nested_file` 具有相同的独立 `return` / `exit` 语义。
+它们与宿主回调中再次调用 `run_script` / `run_file` 具有相同的独立 `return` / `exit` 语义。执行上下文通过压栈和出栈管理，不会移动并恢复外层 AST、源码映射或控制状态。
 
 #### 函数错误检查
 
@@ -300,66 +364,6 @@ c1.register_function("pow", static_cast<double(*)(double, double)>(&std::pow));
 
 函数名仍需显式传入，因为 C++ 函数指针本身不携带源码中的名字。
 
-#### 通过动态库导入函数
-
-脚本可以调用 `import("动态库路径")` 加载动态库（Windows 下通常为 `.dll`，Linux 下通常为 `.so`）。动态库需要导出固定入口 `cifa_import`，入口中使用普通 `register_function` 注册函数：
-
-```c++
-#include "../Cifa.h"
-#include <cmath>
-
-#ifdef _WIN32
-#define CIFA_EXPORT __declspec(dllexport)
-#else
-#define CIFA_EXPORT __attribute__((visibility("default")))
-#endif
-
-static double plugin_square(double x)
-{
-    return x * x;
-}
-
-extern "C" CIFA_EXPORT int cifa_import(cifa::Cifa* cifa)
-{
-    if (cifa == nullptr)
-    {
-        return 0;
-    }
-    cifa->register_function("plugin_square", plugin_square);
-    cifa->register_function("plugin_sin", static_cast<double (*)(double)>(&std::sin));
-    return 1;
-}
-```
-
-脚本中使用：
-
-```c++
-import("build/cifa_import_example.dll");
-return plugin_square(3) + plugin_sin(0);
-```
-
-Linux 下路径可写成：
-
-```c++
-import("./build/libcifa_import_example.so");
-return plugin_square(3) + plugin_sin(0);
-```
-
-示例源码见 `examples/cifa_import_example.cpp`。在 Windows/MSVC 下可编译为动态库，例如：
-
-```bat
-cl /std:c++latest /EHsc /utf-8 /I./ /LD /Fe:build/cifa_import_example.dll examples/cifa_import_example.cpp Cifa.cpp
-```
-
-在 Linux/g++ 下可编译为 `.so`，例如：
-
-```bash
-g++ -std=c++23 -fPIC -shared -I./ -o build/libcifa_import_example.so examples/cifa_import_example.cpp Cifa.cpp -ldl
-```
-
-`import()` 当前使用同编译器 C++ ABI：动态库应与宿主程序使用兼容的编译器、运行库和同一份 `Cifa.h`。Cifa 会保留已加载动态库直到 `Cifa` 对象析构，避免动态库中注册的函数指针提前失效。重复导入同一路径会被忽略。
-
-
 此时再运行如下脚本：
 ```c++
 auto pi = 3.1415927;
@@ -430,7 +434,7 @@ int ok = value != 0 && 10 / value > 1;
 
 脚本最外层定义的变量进入 `Cifa` 实例的全局变量表。脚本函数可以访问和修改这一层；函数参数和函数局部变量可以遮蔽同名全局变量。函数不会读取调用者代码块的局部变量，因此不会形成动态作用域。
 
-全局变量表和脚本函数表都绑定在 `Cifa` 实例上，可以跨多次执行保留。变量作用域栈只保存代码块和函数调用产生的局部层，并在离开对应范围时自动弹出，不把栈的任何一层视为全局变量表。
+全局变量、全局脚本函数和全局 struct 表都绑定在 `Cifa` 实例上，可以跨脚本和 AST 执行保留。变量作用域栈只保存大括号代码块和函数调用产生的局部层，并在离开对应范围时自动弹出；未被大括号包裹的脚本最外层变量直接进入全局变量表。
 
 ### 用户的数据类型
 
@@ -942,7 +946,7 @@ Cifa 没有使用 yacc/ANTLR 之类的生成器，也不是传统的递归下降
     `combine_all_cal()` 先处理 `{}`、`[]`、`()`。实现方式是用栈按源码顺序匹配括号，把括号中的 token 列表递归归约成一个 `Union` 节点，再挂回外层列表。圆括号会关联到前面的函数名或关键字，方括号会关联到前面的数组/map 访问对象。这里避免了大量括号时反复扫描整条 token 列表。
 
 4. **声明和结构提取**  
-    `combine_structs()` 会提取 `struct` 定义并注册字段信息。`combine_functions2()` 会把脚本中形如 `foo(a, b) { ... }` 的函数定义提取到 `functions2`，从主语法树中移除。
+    `combine_structs()` 会把全局 `struct` 定义及字段信息提取到当前 `cifa::Ast`。`combine_functions2()` 会把全局空间中形如 `foo(a, b) { ... }` 的函数定义提取到当前 AST 的函数表，并从根语法树中移除。两类定义若出现在任何大括号内部，会产生静态错误。执行 AST 时，这些定义注册到 `Cifa` 实例的全局表。
 
 5. **运算符归约**  
     `combine_ops()` 按 `ops` 表定义的优先级从高到低处理运算符。大多数二元运算符按从左到右归约；赋值和部分一元运算按右结合处理。前置正号/负号会在这里区分一元和二元场景。三元 `?:` 也作为特殊运算符组处理。
