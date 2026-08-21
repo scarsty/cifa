@@ -1,7 +1,9 @@
 ﻿#include "../Cifa.h"
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 
 using namespace cifa;
 
@@ -2114,8 +2116,87 @@ bool include_test()
     return ok;
 }
 
-int main()
+double generated_perf_function_value(int function_index, int a, int b)
 {
+    double sum = 0;
+    for (int j = 0; j < 3; ++j)
+    {
+        if ((a + j) % 2 != 0)
+        {
+            sum += a + b + function_index;
+        }
+        else
+        {
+            sum += a - b + function_index;
+        }
+    }
+    return sum;
+}
+
+bool large_script_performance_test()
+{
+    constexpr int function_count = 1000;
+    constexpr int calls = 300;
+    std::ostringstream script;
+    double expected = 0;
+
+    for (int function_index = 0; function_index < function_count; ++function_index)
+    {
+        script << "perf_func_" << function_index << "(a, b) {\n";
+        script << "    double sum = 0;\n";
+        script << "    for (int j = 0; j < 3; j++) {\n";
+        script << "        if ((a + j) % 2) {\n";
+        script << "            sum += a + b + " << function_index << ";\n";
+        script << "        } else {\n";
+        script << "            sum += a - b + " << function_index << ";\n";
+        script << "        }\n";
+        script << "    }\n";
+        script << "    return sum;\n";
+        script << "}\n";
+    }
+
+    script << "double total = 0;\n";
+    for (int call_index = 0; call_index < calls; ++call_index)
+    {
+        const int first_function = call_index % function_count;
+        const int second_function = (call_index * 7 + 3) % function_count;
+        const int argument_b = call_index % 19 + 1;
+        if (call_index % 5 == 0)
+        {
+            script << "if (" << call_index << " % 5 == 0) { total += perf_func_" << first_function << "(" << call_index << ", " << argument_b << "); } else { total += perf_func_" << second_function << "(" << call_index << ", " << argument_b << "); }\n";
+            expected += generated_perf_function_value(first_function, call_index, argument_b);
+        }
+        else
+        {
+            script << "if (" << call_index << " % 5 == 0) { total += perf_func_" << first_function << "(" << call_index << ", " << argument_b << "); } else { total += perf_func_" << second_function << "(" << call_index << ", " << argument_b << "); }\n";
+            expected += generated_perf_function_value(second_function, call_index, argument_b);
+        }
+    }
+    script << "return total;\n";
+
+    Cifa c;
+    c.set_output_error(false);
+    const auto started = std::chrono::steady_clock::now();
+    auto result = c.run_script(script.str());
+    const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+
+    std::cout << "large_script_performance_test: " << function_count << " script functions, " << calls << " call blocks, "
+        << script.str().size() << " bytes in " << elapsed << " ms" << std::endl;
+    if (result.getSpecialType() == "Error")
+    {
+        std::cerr << c.get_errors_str() << c.get_runtime_error() << std::endl;
+        return false;
+    }
+    return result.isNumber() && std::fabs(result.toDouble() - expected) < 1e-9;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc > 1 && (std::string(argv[1]) == "--perf" || std::string(argv[1]) == "--perf-large"))
+    {
+        return large_script_performance_test() ? 0 : 1;
+    }
+
     int total = 0, ok = 0;
     auto run_test = [&total, &ok](std::string name, bool (*func)())
     {

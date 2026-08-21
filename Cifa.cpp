@@ -1734,102 +1734,105 @@ CalUnit Cifa::combine_all_cal(std::list<CalUnit>& ppp, bool curly, bool square, 
     }
 }
 
-//查找现有最内层括号，并返回位置
-std::list<CalUnit>::iterator Cifa::inside_bracket(std::list<CalUnit>& ppp, std::list<CalUnit>& ppp2, const std::string& bl, const std::string& br)
-{
-    bool have = false;
-    auto it = ppp.begin();
-    for (; it != ppp.end(); ++it)
-    {
-        if (it->str == bl || it->str == br)
-        {
-            have = true;
-            break;
-        }
-    }
-    if (!have)
-    {
-        return ppp.end();
-    }
-    if (it->str == br)
-    {
-        add_error(*it, "unpaired right bracket {}", it->str);
-        ppp.erase(it);
-        return ppp.end();
-    }
-    auto itl0 = it, itr0 = ppp.end();
-    for (auto itr = it; itr != ppp.end(); ++itr)
-    {
-        if (itr->str == br)
-        {
-            itr0 = itr;
-            for (auto itl = std::prev(itr); itl != ppp.begin(); --itl)
-            {
-                if (itl->str == bl)
-                {
-                    itl0 = itl;
-                    break;
-                }
-            }
-            break;
-        }
-    }
-    if (itr0 == ppp.end())
-    {
-        add_error(*it, "unpaired left bracket {}", it->str);
-        ppp.erase(it);
-        return ppp.end();
-    }
-    ppp2.splice(ppp2.begin(), ppp, std::next(itl0), itr0);
-    return itl0;
-}
-
 //合并花括号 {} 为语法树节点
 void Cifa::combine_curly_bracket(std::list<CalUnit>& ppp)
 {
-    while (true)
+    std::vector<std::list<CalUnit>::iterator> stack;
+    for (auto it = ppp.begin(); it != ppp.end(); ++it)
     {
-        std::list<CalUnit> ppp2;
-        auto it = inside_bracket(ppp, ppp2, "{", "}");
-        if (it == ppp.end())
+        if (it->str == "{")
         {
-            break;
+            stack.push_back(it);
         }
-        auto c1 = combine_all_cal(ppp2, false, true, true);    //此处合并多行
-        c1.str = "{}";
-        c1.line = it->line;
-        c1.col = it->col;
-        it = ppp.erase(it);
-        *it = std::move(c1);
+        else if (it->str == "}")
+        {
+            if (stack.empty())
+            {
+                add_error(*it, "unpaired right bracket {}", it->str);
+                it = ppp.erase(it);
+                if (it == ppp.begin())
+                {
+                    continue;
+                }
+                --it;
+                continue;
+            }
+            auto left = stack.back();
+            stack.pop_back();
+            std::list<CalUnit> ppp2;
+            ppp2.splice(ppp2.begin(), ppp, std::next(left), it);
+            auto c1 = combine_all_cal(ppp2, false, true, true);    //此处合并多行
+            c1.str = "{}";
+            c1.line = left->line;
+            c1.col = left->col;
+            auto next = ppp.erase(it);
+            *left = std::move(c1);
+            it = left;
+        }
+    }
+    while (!stack.empty())
+    {
+        auto left = stack.back();
+        stack.pop_back();
+        add_error(*left, "unpaired left bracket {}", left->str);
+        ppp.erase(left);
     }
 }
 
 //合并方括号 [] 为语法树节点，并关联到前置变量名
 void Cifa::combine_square_bracket(std::list<CalUnit>& ppp)
 {
-    while (true)
+    std::vector<std::list<CalUnit>::iterator> left_brackets;
+    for (auto it = ppp.begin(); it != ppp.end();)
     {
-        std::list<CalUnit> ppp2;
-        auto it = inside_bracket(ppp, ppp2, "[", "]");
-        if (it == ppp.end())
+        if (it->str == "[")
         {
-            break;
+            left_brackets.push_back(it);
+            ++it;
+            continue;
         }
+        if (it->str != "]")
+        {
+            ++it;
+            continue;
+        }
+
+        if (left_brackets.empty())
+        {
+            add_error(*it, "unpaired right bracket {}", it->str);
+            it = ppp.erase(it);
+            continue;
+        }
+
+        auto left = left_brackets.back();
+        left_brackets.pop_back();
+        std::list<CalUnit> ppp2;
+        ppp2.splice(ppp2.begin(), ppp, std::next(left), it);
         auto c1 = combine_all_cal(ppp2, true, false, true);
         c1.str = "[]";
-        c1.line = it->line;
-        c1.col = it->col;
-        it = ppp.erase(it);
-        *it = std::move(c1);
-        if (it != ppp.begin())
+        c1.line = left->line;
+        c1.col = left->col;
+
+        auto node = it;
+        *node = std::move(c1);
+        ppp.erase(left);
+        it = std::next(node);
+        if (node != ppp.begin())
         {
-            if (std::prev(it)->type == CalUnitType::Parameter)
+            if (std::prev(node)->type == CalUnitType::Parameter)
             {
                 //多维数组：如果前置变量已有 [] 子节点，追加而非覆盖
-                std::prev(it)->v.push_back(*it);
-                ppp.erase(it);
+                std::prev(node)->v.push_back(std::move(*node));
+                ppp.erase(node);
             }
         }
+    }
+    while (!left_brackets.empty())
+    {
+        auto left = left_brackets.back();
+        left_brackets.pop_back();
+        add_error(*left, "unpaired left bracket {}", left->str);
+        ppp.erase(left);
     }
 }
 
