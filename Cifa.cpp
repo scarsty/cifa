@@ -1,6 +1,7 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -19,6 +20,21 @@ namespace cifa
 {
 
 static std::string normalize_path(const std::string& path);
+
+static std::unordered_set<std::string> make_token_set(const std::vector<std::string>& tokens)
+{
+    return std::unordered_set<std::string>(tokens.begin(), tokens.end());
+}
+
+static std::unordered_set<std::string> make_token_set(const std::vector<std::vector<std::string>>& token_groups)
+{
+    std::unordered_set<std::string> tokens;
+    for (const auto& group : token_groups)
+    {
+        tokens.insert(group.begin(), group.end());
+    }
+    return tokens;
+}
 
 static bool parse_number_literal(const std::string& text, double& value)
 {
@@ -527,6 +543,41 @@ Cifa::~Cifa()
 #endif
         }
     }
+}
+
+const std::unordered_set<std::string>& Cifa::keyword_tokens()
+{
+    static const auto tokens = []()
+        {
+            std::unordered_set<std::string> result;
+            for (const auto& group : keys)
+            {
+                result.insert(group.begin(), group.end());
+            }
+            return result;
+        }();
+    return tokens;
+}
+
+const std::unordered_set<std::string>& Cifa::operator_tokens()
+{
+    static const auto tokens = make_token_set(ops);
+    return tokens;
+}
+
+const std::vector<std::unordered_set<std::string>>& Cifa::operator_precedence_token_groups()
+{
+    static const auto groups = []()
+        {
+            std::vector<std::unordered_set<std::string>> result;
+            result.reserve(ops.size());
+            for (const auto& group : ops)
+            {
+                result.push_back(make_token_set(group));
+            }
+            return result;
+        }();
+    return groups;
 }
 
 //从局部作用域栈的最内层向外查找变量，最后查找实例全局变量表
@@ -1522,43 +1573,32 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 }
             }
         }
-        for (auto& keys1 : keys)
+        if (keyword_tokens().contains(it->str))
         {
-            if (vector_have(keys1, it->str))
-            {
-                it->type = CalUnitType::Key;
-            }
+            it->type = CalUnitType::Key;
         }
-        if (it->type == CalUnitType::Parameter && vector_have(types, it->str))
+        if (it->type == CalUnitType::Parameter && types.contains(it->str))
         {
             it->type = CalUnitType::Type;
         }
     }
 
     //合并多字节运算符
-    for (auto& ops1 : ops)
+    for (auto it = rv.begin(); it != rv.end();)
     {
-        for (auto& op : ops1)
+        auto itr = std::next(it);
+        if (itr != rv.end() && it->type == CalUnitType::Operator && itr->type == CalUnitType::Operator
+            && it->line == itr->line && it->col == itr->col - 1)
         {
-            if (op.size() == 2)
+            std::string op = it->str + itr->str;
+            if (op.size() == 2 && operator_tokens().contains(op))
             {
-                for (auto it = rv.begin(); it != rv.end();)
-                {
-                    auto itr = std::next(it);
-                    if (itr != rv.end()
-                        && it->str == std::string(1, op[0]) && itr->str == std::string(1, op[1])
-                        && it->line == itr->line && it->col == itr->col - 1)    //合并的两个字符在同一行，列相邻
-                    {
-                        it->str = op;
-                        it = rv.erase(std::next(it));
-                    }
-                    else
-                    {
-                        ++it;
-                    }
-                }
+                it->str = std::move(op);
+                it = rv.erase(itr);
+                continue;
             }
         }
+        ++it;
     }
 
     //不处理类型符号
@@ -1796,60 +1836,96 @@ void Cifa::combine_square_bracket(std::list<CalUnit>& ppp)
 //合并圆括号 () 为语法树节点，并关联到前置函数名或关键字
 void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
 {
-    while (true)
+    std::vector<std::list<CalUnit>::iterator> left_brackets;
+    for (auto it = ppp.begin(); it != ppp.end();)
     {
-        std::list<CalUnit> ppp2;
-        //auto size = ppp.size();
-        auto it = inside_bracket(ppp, ppp2, "(", ")");
-        if (it == ppp.end())
+        if (it->str == "(")
         {
-            break;
+            left_brackets.push_back(it);
+            ++it;
+            continue;
         }
-        const bool is_for_header = it != ppp.begin() && std::prev(it)->type == CalUnitType::Key && std::prev(it)->str == "for";
-        it = ppp.erase(it);
+        if (it->str != ")")
+        {
+            ++it;
+            continue;
+        }
+
+        if (left_brackets.empty())
+        {
+            add_error(*it, "unpaired right bracket {}", it->str);
+            it = ppp.erase(it);
+            continue;
+        }
+
+        auto left = left_brackets.back();
+        left_brackets.pop_back();
+        const bool is_for_header = left != ppp.begin() && std::prev(left)->type == CalUnitType::Key && std::prev(left)->str == "for";
+
+        std::list<CalUnit> ppp2;
+        ppp2.splice(ppp2.begin(), ppp, std::next(left), it);
         auto c1 = combine_all_cal(ppp2, true, true, false, !is_for_header);
         c1.str = "()";
-        c1.line = it->line;
-        c1.col = it->col;
-        if (c1.v.size() == 0)
+        c1.line = left->line;
+        c1.col = left->col;
+
+        auto node = it;
+        if (c1.v.empty())
         {
-            it->type = CalUnitType::None;
+            node->type = CalUnitType::None;
+            node->str.clear();
+            node->v.clear();
+            node->line = c1.line;
+            node->col = c1.col;
         }
         else if (c1.v.size() == 1)
         {
-            *it = std::move(c1.v[0]);
+            *node = std::move(c1.v[0]);
         }
         else
         {
-            *it = std::move(c1);
+            *node = std::move(c1);
         }
-        //括号前
-        if (it != ppp.begin())
+        ppp.erase(left);
+
+        if (node != ppp.begin())
         {
-            auto itl = std::prev(it);
+            auto itl = std::prev(node);
             if (itl->type == CalUnitType::Function || itl->type == CalUnitType::Parameter || itl->type == CalUnitType::Constant)
             {
-                itl->v = { std::move(*it) };
-                ppp.erase(it);
+                itl->v = { std::move(*node) };
+                it = ppp.erase(node);
+                continue;
             }
-            else if (itl->type == CalUnitType::Key && vector_have(keys[2], itl->str))
+            else if (itl->type == CalUnitType::Key && keys[2].contains(itl->str))
             {
-                itl->v = { std::move(*it) };
-                ppp.erase(it);
+                itl->v = { std::move(*node) };
+                it = ppp.erase(node);
+                continue;
             }
         }
+        it = std::next(node);
+    }
+
+    for (auto left = left_brackets.rbegin(); left != left_brackets.rend(); ++left)
+    {
+        add_error(**left, "unpaired left bracket {}", (*left)->str);
+        ppp.erase(*left);
     }
 }
 
 //按优先级合并运算符到语法树，处理左结合和右结合
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
-    for (const auto& ops1 : ops)
+    const auto& op_groups = operator_precedence_token_groups();
+    for (size_t group_index = 0; group_index < ops.size(); ++group_index)
     {
+        const auto& ops1 = ops[group_index];
+        const auto& ops1_tokens = op_groups[group_index];
         for (auto& op : ops1)
         {
             bool is_right = false;
-            if (vector_have(ops_single, op) || vector_have(ops_right, op) || op == "+" || op == "-")    //右结合
+            if (ops_single.contains(op) || ops_right.contains(op) || op == "+" || op == "-")    //右结合
             {
                 auto it = ppp.end();
                 for (; it != ppp.begin();)
@@ -1861,7 +1937,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                     if (it->type == CalUnitType::Operator && it->str == op && it->v.size() == 0)
                     {
-                        if (it == ppp.begin() || vector_have(ops_single, it->str)
+                        if (it == ppp.begin() || ops_single.contains(it->str)
                             || !std::prev(it)->can_cal() && (op == "+" || op == "-"))    //+-退化为单目运算的情况
                         {
                             is_right = true;
@@ -1903,7 +1979,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     }
                 }
             }
-            if (!is_right && vector_have(ops1, std::string("?")))    //三目运算符组需按固定顺序（:先?后）逐符号合并
+            if (!is_right && ops1_tokens.contains("?"))    //三目运算符组需按固定顺序（:先?后）逐符号合并
             {
                 for (auto it = ppp.begin(); it != ppp.end();)
                 {
@@ -1928,7 +2004,7 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
         }
         //同优先级运算符按源码出现顺序从左到右合并，确保左结合性（如 a/b*c 解析为 (a/b)*c 而非 a/(b*c)）
         //三目运算符组 {":","?"} 已在上方用逐符号方式处理，此处跳过
-        if (!vector_have(ops1, std::string("?")))
+        if (!ops1_tokens.contains("?"))
         {
             for (auto it = ppp.begin(); it != ppp.end();)
             {
@@ -1938,9 +2014,9 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                     continue;
                 }
                 if (it->type == CalUnitType::Operator && it->v.size() == 0 && it != ppp.begin()
-                    && vector_have(ops1, it->str)
-                    && !vector_have(ops_single, it->str)
-                    && !vector_have(ops_right, it->str))
+                    && ops1_tokens.contains(it->str)
+                    && !ops_single.contains(it->str)
+                    && !ops_right.contains(it->str))
                 {
                     auto prev_it = std::prev(it);
                     auto itr = std::next(it);
@@ -2117,8 +2193,7 @@ void Cifa::combine_keys(std::list<CalUnit>& ppp)
         --it;
         for (size_t para_count = 1; para_count < keys.size(); para_count++)
         {
-            auto& keys1 = keys[para_count];
-            if (it->type == CalUnitType::Key && it->v.size() < para_count && vector_have(keys1, it->str))
+            if (it->type == CalUnitType::Key && it->v.size() < para_count && keys[para_count].contains(it->str))
             {
                 while (it->v.size() < para_count)
                 {
@@ -2368,7 +2443,7 @@ bool Cifa::is_valid_key(const std::string& key)
             {
                 return is_identifier_char(static_cast<unsigned char>(c));
             });
-    return is_identifier && key != "struct" && !vector_have(keys, key) && !vector_have(types, key)
+    return is_identifier && key != "struct" && !keyword_tokens().contains(key) && !types.contains(key)
         && !op_representations.contains(key);
 }
 
@@ -2977,14 +3052,14 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
     //若提前return，表示不再检查其下的结构
     if (c.type == CalUnitType::Operator && c.un_combine == false)
     {
-        if (vector_have(ops_single, c.str))
+        if (ops_single.contains(c.str))
         {
             if (c.v.size() != 1)
             {
                 add_error(c, "operator {} has wrong operands", c.str);
             }
         }
-        else if (vector_have(ops, c.str) && !vector_have(ops_single, c.str))
+        else if (operator_tokens().contains(c.str) && !ops_single.contains(c.str))
         {
             if (c.str == "=")
             {

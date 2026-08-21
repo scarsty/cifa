@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <any>
+#include <array>
 #include <cmath>
 #include <format>
 #include <functional>
@@ -11,6 +12,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -348,13 +350,17 @@ private:
     //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
     inline static const std::vector<std::vector<std::string>> ops = { { "::", ".", "++", "--" }, { "~", "!" }, { "*", "/", "%" }, { "+", "-" }, { "<<", ">>" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "^" }, { "|" }, { "&&" }, { ":", "?" }, { "||" }, { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" }, { "," } };
     //单目运算符全部是右结合
-    inline static const std::vector<std::string> ops_single = { "++", "--", "~", "!", "()++", "()--" };
+    inline static const std::unordered_set<std::string> ops_single = { "++", "--", "~", "!", "()++", "()--" };
     //右结合的运算符，注意+-既有单目又有双目，因此不能简单地放在单目列表中
-    inline static const std::vector<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };
-    //关键字，在表中的位置为其所需参数个数
-    inline static const std::vector<std::vector<std::string>> keys = { { "true", "false" }, { "break", "continue", "else", "return", "default", "goto" }, { "if", "for", "while", "do", "switch", "case" } };
+    inline static const std::unordered_set<std::string> ops_right = { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" };
+    //关键字，在表中的下标为其所需子节点个数
+    inline static const std::array<std::unordered_set<std::string>, 3> keys = { {
+        { "true", "false" },
+        { "break", "continue", "else", "return", "default", "goto" },
+        { "if", "for", "while", "do", "switch", "case" },
+    } };
     //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
-    inline static const std::vector<std::string> types = { "auto", "int", "float", "double", "string", "char" };
+    inline static const std::unordered_set<std::string> types = { "auto", "int", "float", "double", "string", "char" };
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
     inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
     //内置的数组/map方法列表
@@ -535,6 +541,10 @@ public:
         user_shift_left, user_shift_right;
 
 private:
+    static const std::unordered_set<std::string>& keyword_tokens();
+    static const std::unordered_set<std::string>& operator_tokens();
+    static const std::vector<std::unordered_set<std::string>>& operator_precedence_token_groups();
+
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
     Object run_execution(const std::function<Object()>& action);
