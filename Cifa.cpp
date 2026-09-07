@@ -596,7 +596,7 @@ FunctionOverloads* Cifa::find_script_function(const std::string& name)
             return &function->second;
         }
     }
-    if (!compilation_ast.compiling && !execution_contexts.empty())
+    else if (!execution_contexts.empty())
     {
         auto& program = execution_contexts.back().program;
         auto function = program.functions.find(name);
@@ -620,7 +620,7 @@ const std::vector<std::string>* Cifa::find_struct_definition(const std::string& 
             return &definition->second;
         }
     }
-    if (!compilation_ast.compiling && !execution_contexts.empty())
+    else if (!execution_contexts.empty())
     {
         const auto& program = execution_contexts.back().program;
         auto definition = program.struct_defs.find(name);
@@ -3299,9 +3299,7 @@ Object Cifa::run_script(std::string script)
 
 Object Cifa::make_error_result() const
 {
-    Object result = std::string("");
-    result.type1 = "Error";
-    return result;
+    return Object("", "Error");
 }
 
 Ast Cifa::compile_script(std::string script)
@@ -3357,7 +3355,6 @@ Object Cifa::run(Ast& program, const std::string& entry_label)
     {
         errors.clear();
         clear_runtime_error();
-        last_exit_requested = false;
     }
 
     execution_contexts.emplace_back(program);
@@ -3443,7 +3440,6 @@ void Cifa::run_compilation(const std::function<void(Ast&)>& action)
     {
         errors.clear();
         clear_runtime_error();
-        last_exit_requested = false;
     }
     compilation_ast = Ast{ };
     compilation_ast.compiling = true;
@@ -3451,23 +3447,9 @@ void Cifa::run_compilation(const std::function<void(Ast&)>& action)
     compilation_ast.compiling = false;
 }
 
-//脚本编译管线：建立源码映射，完成词法分析、语法树构建和静态检查，最后填充独立 AST
+//脚本编译管线：完成词法分析、语法树构建和静态检查，最后填充独立 AST
 void Cifa::compile_pipeline(std::string str, Ast& program)
 {
-    {
-        std::stringstream source_stream(str);
-        std::string source_line;
-        size_t line_index = 0;
-        while (std::getline(source_stream, source_line))
-        {
-            if (line_index >= program.source_line_infos.size())
-            {
-                program.source_line_infos.push_back({ "<script>", line_index + 1, source_line });
-            }
-            ++line_index;
-        }
-    }
-
     str += ";";    //方便处理仅有一行的情况
     auto rv = split(str);
     auto c = combine_all_cal(rv);    //结果必定是一个Union
@@ -3605,23 +3587,15 @@ std::string Cifa::preprocess_includes(const std::string& source, const std::stri
     {
         ++line_num;
         //查找行首的#include指令（允许前导空白）
-        std::string trimmed = line;
-        size_t first_non_space = trimmed.find_first_not_of(" \t");
-        if (first_non_space == std::string::npos || trimmed[first_non_space] != '#')
-        {
-            result += line + "\n";
-            source_line_infos.push_back({ current_file, line_num, line });
-            continue;
-        }
-        std::string directive = trimmed.substr(first_non_space);
-        if (directive.substr(0, 8) != "#include")
+        size_t first_non_space = line.find_first_not_of(" \t");
+        if (first_non_space == std::string::npos || line.compare(first_non_space, 8, "#include") != 0)
         {
             result += line + "\n";
             source_line_infos.push_back({ current_file, line_num, line });
             continue;
         }
         //解析文件名
-        std::string rest = directive.substr(8);
+        std::string rest = line.substr(first_non_space + 8);
         size_t filename_start = rest.find_first_not_of(" \t");
         if (filename_start == std::string::npos)
         {
