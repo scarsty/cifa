@@ -609,30 +609,6 @@ FunctionOverloads* Cifa::find_script_function(const std::string& name)
     return function != functions2.end() ? &function->second : nullptr;
 }
 
-const FunctionOverloads* Cifa::find_script_function(const std::string& name) const
-{
-    if (compilation_ast.compiling)
-    {
-        const auto& program = compilation_ast;
-        auto function = program.functions.find(name);
-        if (function != program.functions.end())
-        {
-            return &function->second;
-        }
-    }
-    if (!compilation_ast.compiling && !execution_contexts.empty())
-    {
-        const auto& program = execution_contexts.back().program;
-        auto function = program.functions.find(name);
-        if (function != program.functions.end())
-        {
-            return &function->second;
-        }
-    }
-    auto function = functions2.find(name);
-    return function != functions2.end() ? &function->second : nullptr;
-}
-
 const std::vector<std::string>* Cifa::find_struct_definition(const std::string& name) const
 {
     if (compilation_ast.compiling)
@@ -1122,14 +1098,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 
                 const auto values = range.ref<std::vector<Object>>();
                 Object o;
-                std::size_t loop_count = 0;
                 for (const auto& value : values)
                 {
-                    if (++loop_count > max_loop_iterations)
-                    {
-                        set_runtime_error("range for exceeded max iterations");
-                        break;
-                    }
                     scopes.emplace_back();
                     scopes.back()[loop_var] = value;
                     scopes.back()[loop_var].name = loop_var;
@@ -1145,18 +1115,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
 
             Object o;
-            std::size_t loop_count = 0;
             for (
                 eval_scoped(c.v[0].v[0], scopes);    //执行 [语句1]
                 eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
                 eval_scoped(c.v[0].v[2], scopes)     //执行 [语句2]
             )
             {
-                if (++loop_count > max_loop_iterations)
-                {
-                    set_runtime_error("for loop exceeded max iterations");
-                    break;
-                }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
@@ -1169,14 +1133,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "while")    //while (条件1) {语句1}
         {
             Object o;
-            std::size_t loop_count = 0;
             while (eval_scoped(c.v[0], scopes))    //判断 [条件1]
             {
-                if (++loop_count > max_loop_iterations)
-                {
-                    set_runtime_error("while loop exceeded max iterations");
-                    break;
-                }
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
@@ -1189,14 +1147,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "do")    //do {语句1} while (条件1);
         {
             Object o;
-            std::size_t loop_count = 0;
             do
             {
-                if (++loop_count > max_loop_iterations)
-                {
-                    set_runtime_error("do-while loop exceeded max iterations");
-                    break;
-                }
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (is_exit_requested()) { return o; }
                 if (o.type1 == "__goto") { return o; }
@@ -1313,7 +1265,6 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
         }
         Object o;
-        std::size_t goto_count = 0;
         size_t index = is_compiled_root ? context.start_index : 0;
         for (; index < c.v.size(); ++index)
         {
@@ -1336,15 +1287,6 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 auto target = labels->find(o.toString());
                 if (target != labels->end())
                 {
-                    if (++goto_count > max_loop_iterations)
-                    {
-                        set_runtime_error("goto exceeded max iterations");
-                        if (is_block_scope)
-                        {
-                            scopes.pop_back();
-                        }
-                        return Object();
-                    }
                     index = target->second;
                     continue;
                 }
@@ -1437,17 +1379,6 @@ void Cifa::expand_comma(CalUnit& c1, std::vector<CalUnit>& v)
             v.push_back(c1);
         }
     }
-}
-
-//查找语法树最右侧叶节点
-CalUnit& Cifa::find_right_side(CalUnit& c1)
-{
-    CalUnit* p = &c1;
-    while (p->v.size() > 0)
-    {
-        p = &(p->v.back());
-    }
-    return *p;
 }
 
 //根据字符推断词法类型（数字、运算符、标识符、分隔符、字符串）
@@ -1655,24 +1586,9 @@ std::list<CalUnit> Cifa::split(std::string& str)
     for (auto it = rv.begin(); it != rv.end(); ++it)
     {
         //括号前的变量视为函数
-        if (it->str == "(")
+        if (it->str == "(" && it != rv.begin() && std::prev(it)->type == CalUnitType::Parameter)
         {
-            if (it != rv.begin() && std::prev(it)->type == CalUnitType::Parameter)
-            {
-                std::prev(it)->type = CalUnitType::Function;
-                if (functions.count(std::prev(it)->str))
-                {
-                }
-                else
-                {
-                    //脚本中的自定义函数
-                    const auto& function_name = std::prev(it)->str;
-                    if (find_script_function(function_name) == nullptr)
-                    {
-                        compilation_ast.functions.try_emplace(function_name);
-                    }
-                }
-            }
+            std::prev(it)->type = CalUnitType::Function;
         }
         if (keyword_tokens().contains(it->str))
         {
@@ -2650,11 +2566,6 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
 {
     auto& context = execution_contexts.back();
     auto& runtime_stack = context.runtime_call_stack;
-    if (runtime_stack.size() > max_call_depth)
-    {
-        set_runtime_error("max call depth exceeded (possible infinite recursion)");
-        return Object();
-    }
     runtime_stack.push_back("func " + name + "()");
     RaiiGuard frame_guard([&runtime_stack]() { runtime_stack.pop_back(); });
 
@@ -3112,19 +3023,10 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             add_error(c, "function '{}' has no operands", c.str);
         }
         //内置方法名不视为未定义函数
-        if (!functions.contains(c.str) && script_overloads == nullptr)
+        if (!functions.contains(c.str) && !builtin_methods.contains(c.str)
+            && (script_overloads == nullptr || script_overloads->empty()))
         {
-            if (!builtin_methods.contains(c.str))
-            {
-                add_error(c, "function '{}' is not defined", c.str);
-            }
-        }
-        else if (!functions.contains(c.str) && script_overloads != nullptr && script_overloads->empty())
-        {
-            if (!builtin_methods.contains(c.str))
-            {
-                add_error(c, "function '{}' is not defined", c.str);
-            }
+            add_error(c, "function '{}' is not defined", c.str);
         }
     }
     else if (c.type == CalUnitType::Key)
@@ -3195,18 +3097,6 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 p[range_clause->v[0].str].name = range_clause->v[0].str;
             }
-            //检测 for(;; ) 和 for(; true/1; ) 形式的潜在死循环
-            if (!is_range_for && c.v[0].type == CalUnitType::Union && c.v[0].str == "()" && c.v[0].v.size() == 3)
-            {
-                auto& cond = c.v[0].v[1];
-                bool is_always_true = (cond.type == CalUnitType::None)
-                    || (cond.type == CalUnitType::Constant && cond.str == "1")
-                    || (cond.type == CalUnitType::Key && cond.str == "true");
-                if (is_always_true)
-                {
-                    add_error(c, "for loop may cause infinite loop");
-                }
-            }
             if (c.v.size() >= 2 && !c.v[1].is_statement())
             {
                 add_error(c.v[1], "missing ;");
@@ -3226,16 +3116,6 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             if (c.v.size() >= 1 && c.v[0].type == CalUnitType::None)
             {
                 add_error(c, "while has empty condition");
-            }
-            //检测 while(1)/while(true) 形式的潜在死循环
-            if (c.v.size() >= 1 && !(father && father->str == "do"))
-            {
-                auto& cond = c.v[0];
-                if ((cond.type == CalUnitType::Constant && cond.str == "1")
-                    || (cond.type == CalUnitType::Key && cond.str == "true"))
-                {
-                    add_error(c, "while has constant true condition, may cause infinite loop");
-                }
             }
             if (c.v.size() == 1 && !(father && father->str == "do"))
             {
@@ -3469,49 +3349,8 @@ Ast Cifa::compile_file(const std::string& filename)
     return std::move(compilation_ast);
 }
 
-//执行调用方持有的 AST：验证 AST 与顶层标签，并将解析出的入口位置交给执行上下文
+//执行调用方持有的 AST：管理执行上下文，验证入口并注册全局声明后求值
 Object Cifa::run(Ast& program, const std::string& entry_label)
-{
-    return run_execution(program, [this, &program, entry_label]()
-        {
-            if (!program)
-            {
-                set_runtime_error("cannot run an invalid AST");
-                return make_error_result();
-            }
-
-            size_t start_index = 0;
-            if (!entry_label.empty())
-            {
-                const auto entry = program.labels.find(entry_label);
-                if (entry == program.labels.end())
-                {
-                    set_runtime_error("AST entry label '" + entry_label + "' is not defined");
-                    return make_error_result();
-                }
-                start_index = entry->second;
-            }
-            return execute_program(program, start_index);
-        });
-}
-
-//管理一次编译的临时 AST：清理旧状态、标记编译阶段，并保证离开时恢复非编译状态
-void Cifa::run_compilation(const std::function<void(Ast&)>& action)
-{
-    if (execution_contexts.empty())
-    {
-        errors.clear();
-        clear_runtime_error();
-        last_exit_requested = false;
-    }
-    compilation_ast = Ast{ };
-    compilation_ast.compiling = true;
-    action(compilation_ast);
-    compilation_ast.compiling = false;
-}
-
-//管理一次 AST 执行的上下文栈：隔离 return/exit/错误，并在嵌套执行结束后合并诊断状态
-Object Cifa::run_execution(Ast& program, const std::function<Object()>& action)
 {
     const bool is_root = execution_contexts.empty();
     if (is_root)
@@ -3528,11 +3367,11 @@ Object Cifa::run_execution(Ast& program, const std::function<Object()>& action)
         context.runtime_call_stack = execution_contexts[execution_contexts.size() - 2].runtime_call_stack;
     }
 
-    RaiiGuard context_guard([this, is_root]()
+    RaiiGuard context_guard([this]()
         {
+            auto& completed = execution_contexts.back();
             if (execution_contexts.size() > 1)
             {
-                auto& completed = execution_contexts.back();
                 auto& parent = execution_contexts[execution_contexts.size() - 2];
                 parent.errors.insert(std::make_move_iterator(completed.errors.begin()),
                     std::make_move_iterator(completed.errors.end()));
@@ -3541,12 +3380,9 @@ Object Cifa::run_execution(Ast& program, const std::function<Object()>& action)
                     parent.runtime_error_message = std::move(completed.runtime_error_message);
                     parent.runtime_error_call_stack = std::move(completed.runtime_error_call_stack);
                 }
-                execution_contexts.pop_back();
-                return;
             }
-            if (is_root)
+            else
             {
-                auto& completed = execution_contexts.back();
                 errors = std::move(completed.errors);
                 runtime_error_call_stack = std::move(completed.runtime_error_call_stack);
                 runtime_error_message = std::move(completed.runtime_error_message);
@@ -3554,11 +3390,69 @@ Object Cifa::run_execution(Ast& program, const std::function<Object()>& action)
             }
             execution_contexts.pop_back();
         });
-    return action();
+
+    if (!program)
+    {
+        set_runtime_error("cannot run an invalid AST");
+        return make_error_result();
+    }
+    if (!entry_label.empty())
+    {
+        const auto entry = program.labels.find(entry_label);
+        if (entry == program.labels.end())
+        {
+            set_runtime_error("AST entry label '" + entry_label + "' is not defined");
+            return make_error_result();
+        }
+        context.start_index = entry->second;
+    }
+
+    for (const auto& [name, overloads] : program.functions)
+    {
+        for (const auto& [argument_count, function] : overloads)
+        {
+            functions2[name][argument_count] = function;
+        }
+    }
+    for (const auto& [name, fields] : program.struct_defs)
+    {
+        struct_defs[name] = fields;
+    }
+
+    Object::set_runtime_error_reporter([this](const std::string& message, const Object* source)
+        {
+            set_runtime_error(message, source);
+        });
+    context.return_states.emplace_back();
+
+    ScopeStack run_scopes;
+    auto result = eval_scoped(program.root, run_scopes);
+    context.return_states.pop_back();
+    Object::clear_runtime_error_reporter();
+    if (has_runtime_error())
+    {
+        return make_error_result();
+    }
+    return result;
+}
+
+//管理一次编译的临时 AST：清理旧状态并标记编译阶段
+void Cifa::run_compilation(const std::function<void(Ast&)>& action)
+{
+    if (execution_contexts.empty())
+    {
+        errors.clear();
+        clear_runtime_error();
+        last_exit_requested = false;
+    }
+    compilation_ast = Ast{ };
+    compilation_ast.compiling = true;
+    action(compilation_ast);
+    compilation_ast.compiling = false;
 }
 
 //脚本编译管线：建立源码映射，完成词法分析、语法树构建和静态检查，最后填充独立 AST
-bool Cifa::compile_pipeline(std::string str, Ast& program)
+void Cifa::compile_pipeline(std::string str, Ast& program)
 {
     {
         std::stringstream source_stream(str);
@@ -3610,74 +3504,20 @@ bool Cifa::compile_pipeline(std::string str, Ast& program)
             }
         }
         program.compiled = true;
-        return true;
+        return;
     }
 
     if (output_error)
     {
         print_errors();
     }
-    return false;
-}
-
-//执行已验证的 AST：注册全局声明，建立运行时 reporter、return 和变量作用域，然后进入递归求值
-Object Cifa::execute_program(Ast& program, size_t start_index)
-{
-    Object result;
-    auto& context = execution_contexts.back();
-    context.start_index = start_index;
-
-    for (const auto& [name, overloads] : program.functions)
-    {
-        for (const auto& [argument_count, function] : overloads)
-        {
-            functions2[name][argument_count] = function;
-        }
-    }
-    for (const auto& [name, fields] : program.struct_defs)
-    {
-        struct_defs[name] = fields;
-    }
-
-    Object::set_runtime_error_reporter([this](const std::string& message, const Object* source)
-        {
-            set_runtime_error(message, source);
-        });
-
-    context.return_states.emplace_back();
-
-    ScopeStack run_scopes;
-    auto o = eval_scoped(program.root, run_scopes);
-    context.return_states.pop_back();
-    Object::clear_runtime_error_reporter();
-    if (has_runtime_error())
-    {
-        result = std::string("");
-        result.type1 = "Error";
-        return result;
-    }
-    return o;
 }
 
 //获取文件路径中的目录部分
 std::string Cifa::get_directory(const std::string& filepath)
 {
-    auto pos1 = filepath.find_last_of('/');
-    auto pos2 = filepath.find_last_of('\\');
-    size_t pos = std::string::npos;
-    if (pos1 != std::string::npos)
-    {
-        pos = pos1;
-    }
-    if (pos2 != std::string::npos && (pos == std::string::npos || pos2 > pos))
-    {
-        pos = pos2;
-    }
-    if (pos != std::string::npos)
-    {
-        return filepath.substr(0, pos);
-    }
-    return ".";
+    const auto separator = filepath.find_last_of("/\\");
+    return separator == std::string::npos ? "." : filepath.substr(0, separator);
 }
 
 bool Cifa::is_absolute_path(const std::string& filepath)

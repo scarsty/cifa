@@ -344,6 +344,42 @@ bool recursion_test()
     return o.hasValue() && std::fabs(o.toDouble() - 120.0) < 1e-9;
 }
 
+bool script_void_function_test()
+{
+    Cifa c;
+    const std::string script = R"(
+        total = 0;
+        empty();
+        increment();
+        add(4);
+        void empty() {}
+        void increment() { total += 1; }
+        void add(int amount) { total += amount; }
+        return total;
+    )";
+    auto result = c.run_script(script);
+    if (c.has_error() || c.has_runtime_error() || !result.isNumber() || result.toInt() != 5)
+    {
+        return false;
+    }
+
+    auto program = c.compile_script(script);
+    if (!program)
+    {
+        return false;
+    }
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        result = c.run(program);
+        if (c.has_error() || c.has_runtime_error() || !result.isNumber() || result.toInt() != 5)
+        {
+            return false;
+        }
+    }
+    result = c.run_script("increment(); add(3); return total;");
+    return !c.has_error() && !c.has_runtime_error() && result.isNumber() && result.toInt() == 9;
+}
+
 bool script_function_argument_count_test()
 {
     const auto expect_runtime_error = [](const char* label, const std::string& script, const std::string& expected)
@@ -1099,7 +1135,7 @@ bool static_syntax_error_test()
     ok &= expect_no_error("valid var in subscript",
         R"(arr = {10, 20, 30}; int i = 1; return arr[i];)");
 
-    // ==== 空条件与死循环检测 ====
+    // ==== 空条件检查 ====
 
     // 26. if 空条件
     ok &= expect_error("if empty condition",
@@ -1111,32 +1147,25 @@ bool static_syntax_error_test()
         R"(while () { int x = 1; })",
         "empty condition");
 
-    // 28. while(1) 死循环
-    ok &= expect_error("while(1) infinite loop",
-        R"(while (1) { int x = 1; })",
-        "infinite loop");
+    ok &= expect_no_error("while(1) with break",
+        R"(while (1) { break; })");
 
-    // 29. while(true) 死循环
-    ok &= expect_error("while(true) infinite loop",
-        R"(while (true) { int x = 1; })",
-        "infinite loop");
+    ok &= expect_no_error("while(true) with break",
+        R"(while (true) { break; })");
 
-    // 30. for(;;) 死循环
-    ok &= expect_error("for(;;) infinite loop",
-        R"(for (;;) { int x = 1; })",
-        "infinite loop");
+    ok &= expect_no_error("for(;;) with break",
+        R"(for (;;) { break; })");
 
-    // 31. for(;1;) 死循环
-    ok &= expect_error("for(;1;) infinite loop",
-        R"(int i = 0; for (; 1; i++) { int x = 1; })",
-        "infinite loop");
+    ok &= expect_no_error("for(;1;) with break",
+        R"(int i = 0; for (; 1; i++) { break; })");
 
-    // 32. 正常 while 不应报死循环
+    ok &= expect_no_error("for(;true;) with return",
+        R"(for (; true;) { return 7; })");
+
     ok &= expect_no_error("valid while loop",
         R"(int i = 0; while (i < 5) { i++; } return i;)");
 
-    // 33. 正常 for 不应报死循环
-    ok &= expect_no_error("valid for loop no warning",
+    ok &= expect_no_error("valid for loop",
         R"(int s = 0; for (int i = 0; i < 10; i++) { s += i; } return s;)");
 
     return ok;
@@ -1176,58 +1205,29 @@ bool string_key_map_test()
     return o2.getSpecialType() == "Error";
 }
 
-bool infinite_loop_protection_test()
+bool loop_and_recursion_execution_test()
 {
-    // while loop with variable condition (checker can't detect as infinite)
+    const std::pair<const char*, int> cases[] = {
+        { "value = 0; while (1) { value++; if (value == 5) break; } return value;", 5 },
+        { "while (true) { return 7; }", 7 },
+        { "value = 0; for (;;) { value++; if (value == 5) break; } return value;", 5 },
+        { "value = 0; for (; 1; value++) { if (value == 5) break; } return value;", 5 },
+        { "for (; true;) { return 7; }", 7 },
+        { "value = 0; while (value < 500) { value++; } return value;", 500 },
+        { "total = 0; for (int index = 0; index < 500; index++) { total += index; } return total;", 124750 },
+        { "value = 0; do { value++; } while (value < 500); return value;", 500 },
+        { "values = {1, 2, 3, 4, 5}; total = 0; for (value : values) { total += value; } return total;", 15 },
+        { "value = 0; again: value++; if (value < 500) goto again; return value;", 500 },
+        { "sum_to(depth) { if (depth <= 0) return 0; return depth + sum_to(depth - 1); } return sum_to(4);", 10 },
+    };
+    for (const auto& [script, expected] : cases)
     {
-        Cifa c1;
-        c1.set_output_error(false);
-        c1.max_loop_iterations = 100;
-        auto o = c1.run_script("int x = 0; int go = 1; while(go) { x++; } return x;");
-        if (o.getSpecialType() != "Error")
+        Cifa interpreter;
+        const auto result = interpreter.run_script(script);
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || !result.isNumber() || result.toInt() != expected)
         {
-            return false;
-        }
-    }
-    // for loop with variable condition
-    {
-        Cifa c1;
-        c1.set_output_error(false);
-        c1.max_loop_iterations = 100;
-        auto o = c1.run_script("int x = 0; int go = 1; for(; go;) { x++; } return x;");
-        if (o.getSpecialType() != "Error")
-        {
-            return false;
-        }
-    }
-    // do-while loop with variable condition
-    {
-        Cifa c1;
-        c1.set_output_error(false);
-        c1.max_loop_iterations = 100;
-        auto o = c1.run_script("int x = 0; int go = 1; do { x++; } while(go); return x;");
-        if (o.getSpecialType() != "Error")
-        {
-            return false;
-        }
-    }
-    // infinite recursion should be stopped
-    {
-        Cifa c1;
-        c1.max_call_depth = 10;
-        auto o = c1.run_script("f(n) { return f(n); } return f(1);");
-        if (o.getSpecialType() != "Error")
-        {
-            return false;
-        }
-    }
-    // normal loops within limit should work fine
-    {
-        Cifa c1;
-        c1.max_loop_iterations = 1000;
-        auto o = c1.run_script("int s = 0; for(int i = 0; i < 500; i++) { s += i; } return s;");
-        if (!o.hasValue() || o.toInt() != 124750)
-        {
+            std::cerr << "  loop/recursion execution failed: " << script << "\n";
             return false;
         }
     }
@@ -2190,6 +2190,14 @@ bool ast_execution_test()
             return Object();
         });
 
+    Ast invalid_program;
+    const auto invalid_result = c.run(invalid_program);
+    if (invalid_result.getSpecialType() != "Error" || !c.has_runtime_error()
+        || c.get_runtime_error().find("cannot run an invalid AST") == std::string::npos)
+    {
+        return false;
+    }
+
     auto program = c.compile_script("entry_first: record(1); exit();\nentry_second: record(2); exit();\n");
     if (!program)
     {
@@ -2441,6 +2449,7 @@ int main(int argc, char** argv)
     run_test("numeric_literal_radix_test", numeric_literal_radix_test);
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
+    run_test("script_void_function_test", script_void_function_test);
     run_test("script_function_argument_count_test", script_function_argument_count_test);
     run_test("script_function_global_scope_test", script_function_global_scope_test);
     run_test("string_operation_test", string_operation_test);
@@ -2469,7 +2478,7 @@ int main(int argc, char** argv)
     run_test("mixed_array_literal_test", mixed_array_literal_test);
     run_test("string_key_map_test", string_key_map_test);
     run_test("static_syntax_error_test", static_syntax_error_test);
-    run_test("infinite_loop_protection_test", infinite_loop_protection_test);
+    run_test("loop_and_recursion_execution_test", loop_and_recursion_execution_test);
     run_test("array_methods_test", array_methods_test);
     run_test("map_methods_test", map_methods_test);
     run_test("non_block_branch_declaration_test", non_block_branch_declaration_test);

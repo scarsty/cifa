@@ -393,6 +393,8 @@ print(myfun(3));
 ```
 可以得到输出为40。
 
+函数返回类型前缀可写也可省略，例如 `void notify() { println("done"); }`。`void` 与 `auto`、`int`、`float`、`double`、`string`、`char` 一样，会在解析时被忽略；它不强制函数无返回值，也不进行返回类型检查。
+
 脚本函数当前按参数个数重载，不按参数类型重载，也不进行完整的静态类型检查。参数和返回值仍使用动态 `Object`，不兼容的数值/字符串转换会在运行时报告错误。
 
 ### 预定义变量
@@ -577,7 +579,7 @@ return value; // 3
 
 标签写作 `label:`，跳转写作 `goto label;`。为保持作用域与控制流可预测，目标标签必须位于当前代码块或其祖先代码块中：不能跳入嵌套块或兄弟块，也不能跨函数或跨嵌套脚本跳转。标签名在同一脚本/函数中必须唯一。
 
-静态检查会报告 `duplicate label '...'`、`goto target '...' is not defined` 或 `goto '...' jumps into a nested or sibling block`。反复跳转受 `max_loop_iterations` 限制，超过时产生运行时错误 `goto exceeded max iterations`。
+静态检查会报告 `duplicate label '...'`、`goto target '...' is not defined` 或 `goto '...' jumps into a nested or sibling block`。运行时不限制跳转次数。
 
 #### 从宿主注册向量
 
@@ -840,6 +842,8 @@ Syntax Error: else has no if
 
 语法错误在 `run_script` 返回前会自动打印到 stderr（`output_error` 为 `true` 时，这是默认行为），也可手动调用 `print_errors()` 或 `get_errors_str()` 获取。
 
+Cifa 不根据恒真条件判断死循环，`while(1)`、`while(true)`、`for(;;)` 等写法合法。循环是否终止由使用者负责；`while()` 空条件和循环结构错误仍会报告。
+
 静态检查可检出的语法错误列表：
 
 | 错误 | 说明 |
@@ -854,8 +858,6 @@ Syntax Error: else has no if
 | if/while has empty condition | `if()` 或 `while()` 条件为空 |
 | if has no condition/statement | `if` 缺少条件或语句体 |
 | else has no if | `else` 无对应 `if` |
-| while has constant true condition, may cause infinite loop | `while(1)` / `while(true)` 静态检测到潜在死循环 |
-| for loop may cause infinite loop | `for(;;)` 等无终止条件 |
 | for loop condition is not right | `for` 循环条件格式不正确 |
 | while/do while has no statement/condition | 循环缺少必要部分 |
 | switch has no condition/statement | `switch` 缺少条件或语句体 |
@@ -898,25 +900,7 @@ Call Stack (most recent call last):
                            ^
 ```
 
-**无限递归**（脚本：`f(n){ return f(n); } return f(0);`）：
-```
-Runtime Error: max call depth exceeded (possible infinite recursion)
-Call Stack (most recent call last):
-  at line 1, col 14: f(n){ return f(n); }
-                                  ^
-  at func f()
-  at func f()
-  at line 2, col 8: return f(0);
-                           ^
-```
-
-**循环超限**（脚本：`for (int i = 0; i < 99999999; i++) {}`）：
-```
-Runtime Error: for loop exceeded max iterations
-Call Stack (most recent call last):
-  at line 1, col 1: for (int i = 0; i < 99999999; i++) {}
-                    ^
-```
+Cifa 不设置运行时循环次数、`goto` 跳转次数或函数调用深度上限，也不提供相应的限制参数。脚本应自行保证终止；递归仍受宿主进程的栈空间和可用内存约束。
 
 运行时错误列表：
 
@@ -924,8 +908,6 @@ Call Stack (most recent call last):
 |------|------|
 | type conversion failed: variable '...' from ... to double | 将非数值类型（空值、字符串等）转换为 double 时失败 |
 | type conversion failed: variable '...' from ... to string | 将非字符串类型转换为 string 时失败 |
-| max call depth exceeded (possible infinite recursion) | 函数递归调用过深，超过最大调用深度 |
-| for/while/do-while loop exceeded max iterations | 循环次数超过最大限制 |
 | function ... is not defined | 调用了运行时未找到的函数 |
 | ...() is not supported on arrays/maps | 对数组或 map 调用了不支持的内置方法 |
 | ...() requires an array or map | 对非数组、非 map 的变量调用了内置方法 |

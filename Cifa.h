@@ -2,12 +2,10 @@
 #include <any>
 #include <array>
 #include <cmath>
-#include <cstddef>
 #include <deque>
 #include <format>
 #include <functional>
 #include <list>
-#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -368,7 +366,7 @@ private:
         { "if", "for", "while", "do", "switch", "case" },
     } };
     //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
-    inline static const std::unordered_set<std::string> types = { "auto", "int", "float", "double", "string", "char" };
+    inline static const std::unordered_set<std::string> types = { "auto", "void", "int", "float", "double", "string", "char" };
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
     inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
     //内置的数组/map方法列表
@@ -448,9 +446,6 @@ private:
     bool output_error = true;
 
 public:
-    std::size_t max_loop_iterations = std::numeric_limits<std::size_t>::max();  //循环最大迭代次数
-    std::size_t max_call_depth = std::numeric_limits<std::size_t>::max();       //函数最大调用深度
-
     Cifa();
     ~Cifa() = default;
     Cifa(const Cifa&) = delete;
@@ -561,7 +556,6 @@ private:
 
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
     Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
-    Object run_execution(Ast& program, const std::function<Object()>& action);
     void run_compilation(const std::function<void(Ast&)>& action);
     Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
     ErrorSet& active_errors();
@@ -569,11 +563,9 @@ private:
     const std::vector<SourceLineInfo>& active_source_line_infos() const;
     void record_error(ErrorMessage error);
     FunctionOverloads* find_script_function(const std::string& name);
-    const FunctionOverloads* find_script_function(const std::string& name) const;
     const std::vector<std::string>* find_struct_definition(const std::string& name) const;
 
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
-    CalUnit& find_right_side(CalUnit& c1);
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
     CalUnit combine_all_cal(std::list<CalUnit>& ppp, bool curly = true, bool square = true, bool round = true,
@@ -606,8 +598,7 @@ private:
     std::string format_runtime_error() const;
     void print_runtime_error() const;
     Object make_error_result() const;
-    bool compile_pipeline(std::string str, Ast& program);
-    Object execute_program(Ast& program, size_t start_index = 0);
+    void compile_pipeline(std::string str, Ast& program);
 
     void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
@@ -649,21 +640,7 @@ private:
     template <typename... Args>
     void add_error(CalUnit& c, std::format_string<Args...> format, Args&&... args)
     {
-        ErrorMessage e;
-        e.expanded_line = c.line;
-        e.line = c.line;
-        e.col = c.col;
-        const auto& source_line_infos = active_source_line_infos();
-        if (c.line > 0 && c.line <= source_line_infos.size())
-        {
-            const auto& source_line = source_line_infos[c.line - 1];
-            e.filename = source_line.filename;
-            e.line = source_line.line;
-            e.source_text = source_line.text;
-            e.has_source_text = true;
-        }
-        e.message = std::format(format, std::forward<Args>(args)...);
-        record_error(std::move(e));
+        add_error(c.line, c.col, format, std::forward<Args>(args)...);
     }
 
     //四则运算准许用户增加自定义功能
