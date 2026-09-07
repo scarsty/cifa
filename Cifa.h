@@ -2,10 +2,12 @@
 #include <any>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <deque>
 #include <format>
 #include <functional>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -446,8 +448,8 @@ private:
     bool output_error = true;
 
 public:
-    int max_loop_iterations = 10000000;    //循环最大迭代次数，防止死循环
-    int max_call_depth = 1000;             //函数最大调用深度，防止无限递归
+    std::size_t max_loop_iterations = std::numeric_limits<std::size_t>::max();  //循环最大迭代次数
+    std::size_t max_call_depth = std::numeric_limits<std::size_t>::max();       //函数最大调用深度
 
     Cifa();
     ~Cifa() = default;

@@ -1122,7 +1122,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 
                 const auto values = range.ref<std::vector<Object>>();
                 Object o;
-                int loop_count = 0;
+                std::size_t loop_count = 0;
                 for (const auto& value : values)
                 {
                     if (++loop_count > max_loop_iterations)
@@ -1145,7 +1145,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
 
             Object o;
-            int loop_count = 0;
+            std::size_t loop_count = 0;
             for (
                 eval_scoped(c.v[0].v[0], scopes);    //执行 [语句1]
                 eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
@@ -1169,7 +1169,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "while")    //while (条件1) {语句1}
         {
             Object o;
-            int loop_count = 0;
+            std::size_t loop_count = 0;
             while (eval_scoped(c.v[0], scopes))    //判断 [条件1]
             {
                 if (++loop_count > max_loop_iterations)
@@ -1189,7 +1189,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "do")    //do {语句1} while (条件1);
         {
             Object o;
-            int loop_count = 0;
+            std::size_t loop_count = 0;
             do
             {
                 if (++loop_count > max_loop_iterations)
@@ -1313,7 +1313,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
         }
         Object o;
-        int goto_count = 0;
+        std::size_t goto_count = 0;
         size_t index = is_compiled_root ? context.start_index : 0;
         for (; index < c.v.size(); ++index)
         {
@@ -2650,7 +2650,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
 {
     auto& context = execution_contexts.back();
     auto& runtime_stack = context.runtime_call_stack;
-    if ((int)runtime_stack.size() > max_call_depth)
+    if (runtime_stack.size() > max_call_depth)
     {
         set_runtime_error("max call depth exceeded (possible infinite recursion)");
         return Object();
