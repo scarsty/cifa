@@ -829,7 +829,7 @@ Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, st
 //核心求值函数：递归遍历语法树节点并执行对应操作
 Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 {
-    if (has_runtime_error() || is_exit_requested())
+    if (should_stop_execution())
     {
         return Object("RuntimeError", "Error");
     }
@@ -900,12 +900,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     {
                         std::vector<CalUnit> v = { c.v[0] };
                         expand_comma(c.v[1].v[0], v);
-                        return run_function(c.v[1].str, v, scopes);
+                        return run_function(c.v[1], v, scopes);
                     }
                     else
                     {
                         std::vector<CalUnit> v = { c.v[0] };
-                        return run_function(c.v[1].str, v, scopes);
+                        return run_function(c.v[1], v, scopes);
                     }
                 }
                 if (c.v[1].type == CalUnitType::Parameter)
@@ -1055,7 +1055,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         {
             expand_comma(c.v[0], v);
         }
-        return run_function(c.str, v, scopes);
+        return run_function(c, v, scopes);
     }
     else if (c.type == CalUnitType::Goto)
     {
@@ -1092,7 +1092,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 Object range = eval_scoped(range_clause->v[1], scopes);
                 if (!range.isType<std::vector<Object>>())
                 {
-                    set_runtime_error("range for requires an array");
+                    if (!range.report_no_value())
+                    {
+                        set_runtime_error("range for requires an array");
+                    }
                     return Object();
                 }
 
@@ -1105,7 +1108,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     scopes.back()[loop_var].name = loop_var;
                     o = eval_scoped(c.v[1], scopes);
                     scopes.pop_back();
-                    if (is_exit_requested()) { return o; }
+                    if (should_stop_execution()) { return o; }
                     if (o.type1 == "__goto") { return o; }
                     if (is_control_signal(o, "break")) { break; }
                     if (is_control_signal(o, "continue")) { continue; }
@@ -1117,12 +1120,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             Object o;
             for (
                 eval_scoped(c.v[0].v[0], scopes);    //执行 [语句1]
-                eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
+                !is_exit_requested() && eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
                 eval_scoped(c.v[0].v[2], scopes)     //执行 [语句2]
             )
             {
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
-                if (is_exit_requested()) { return o; }
+                if (should_stop_execution()) { return o; }
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
@@ -1133,10 +1136,10 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "while")    //while (条件1) {语句1}
         {
             Object o;
-            while (eval_scoped(c.v[0], scopes))    //判断 [条件1]
+            while (!is_exit_requested() && eval_scoped(c.v[0], scopes))    //判断 [条件1]
             {
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
-                if (is_exit_requested()) { return o; }
+                if (should_stop_execution()) { return o; }
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
@@ -1150,12 +1153,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             do
             {
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
-                if (is_exit_requested()) { return o; }
+                if (should_stop_execution()) { return o; }
                 if (o.type1 == "__goto") { return o; }
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value()) { return return_value(); }
-            } while (eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
+            } while (!is_exit_requested() && eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
             return Object(0);
         }
         if (c.str == "switch")
@@ -1165,6 +1168,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             scopes.emplace_back();
             for (auto& c1 : c.v[1].v)
             {
+                if (should_stop_execution()) { break; }
                 if (c1.str == "case")
                 {
                     if (skip)
@@ -1185,7 +1189,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 else if (!skip)
                 {
                     auto o = eval_scoped(c1, scopes);
-                    if (is_exit_requested())
+                    if (should_stop_execution())
                     {
                         scopes.pop_back();
                         return o;
@@ -1274,7 +1278,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 continue;
             }
             o = eval_scoped(c1, scopes);
-            if (is_exit_requested())
+            if (should_stop_execution())
             {
                 if (is_block_scope)
                 {
@@ -2562,8 +2566,9 @@ void* Cifa::get_user_data(const std::string& name)
 }
 
 //执行函数调用：查找已注册函数或脚本定义函数并执行
-Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes)
+Object Cifa::run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, ScopeStack& scopes)
 {
+    const auto& name = call_site.str;
     auto& context = execution_contexts.back();
     auto& runtime_stack = context.runtime_call_stack;
     runtime_stack.push_back("func " + name + "()");
@@ -2583,6 +2588,7 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
             {
                 v.emplace_back(eval_scoped(c, scopes));
             }
+            if (has_runtime_error()) { return make_error_result(); }
         }
         for (auto& value : v)
         {
@@ -2592,9 +2598,16 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
         const auto* previous_values = context.active_function_values;
         context.active_function_arguments = &vc;
         context.active_function_values = &v;
+        RaiiGuard arguments_guard([&context, previous_arguments, previous_values]()
+            {
+                context.active_function_arguments = previous_arguments;
+                context.active_function_values = previous_values;
+            });
         auto result = host_function->second(v);
-        context.active_function_arguments = previous_arguments;
-        context.active_function_values = previous_values;
+        if (has_runtime_error())
+        {
+            return make_error_result();
+        }
         return result;
     }
     auto* overloads = find_script_function(name);
@@ -2629,11 +2642,17 @@ Object Cifa::run_function(const std::string& name, std::vector<CalUnit>& vc, Sco
         for (size_t i = 0; i < function.arguments.size(); i++)
         {
             fn_scopes.back()[function.arguments[i]] = eval_scoped(vc[i], scopes);
+            if (has_runtime_error()) { return make_error_result(); }
         }
         context.return_states.emplace_back();
         auto result = eval_scoped(function.body, fn_scopes);
+        const auto& state = context.return_states.back();
+        if (!has_runtime_error() && !is_exit_requested() && (!state.has_value || !state.value.hasValue()))
+        {
+            result = Object::make_no_value(name, format_runtime_frame(call_site));
+        }
         context.return_states.pop_back();
-        return result;
+        return has_runtime_error() ? make_error_result() : result;
     }
     else
     {
@@ -3420,12 +3439,12 @@ Object Cifa::run(Ast& program, const std::string& entry_label)
         {
             set_runtime_error(message, source);
         });
+    RaiiGuard reporter_guard([]() { Object::clear_runtime_error_reporter(); });
     context.return_states.emplace_back();
 
     ScopeStack run_scopes;
     auto result = eval_scoped(program.root, run_scopes);
     context.return_states.pop_back();
-    Object::clear_runtime_error_reporter();
     if (has_runtime_error())
     {
         return make_error_result();
@@ -3793,13 +3812,13 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
         }
         return;
     }
+    request_exit();
     auto& context = execution_contexts.back();
-    auto& call_stack = context.runtime_call_stack;
     auto& error_call_stack = context.runtime_error_call_stack;
+    error_call_stack = context.runtime_call_stack;
     auto& error_message = context.runtime_error_message;
     const auto* function_arguments = context.active_function_arguments;
     const auto* function_values = context.active_function_values;
-    bool pushed_argument_frame = false;
     if (source != nullptr && function_arguments != nullptr && function_values != nullptr)
     {
         const Object* origin = source->argument_origin != nullptr ? source->argument_origin : source;
@@ -3808,21 +3827,27 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
         {
             if (&(*function_values)[index] == origin)
             {
-                call_stack.push_back(format_runtime_frame((*function_arguments)[index]));
-                pushed_argument_frame = true;
+                error_call_stack.push_back(format_runtime_frame((*function_arguments)[index]));
                 break;
             }
         }
     }
     error_message = message.empty() ? "runtime error" : message;
-    error_call_stack = call_stack;
+    if (source != nullptr && source->getSpecialType() == "NoValue")
+    {
+        const auto* no_value = std::any_cast<Object::NoValue>(&source->value);
+        if (no_value != nullptr && !no_value->call_frame.empty())
+        {
+            error_message += "\nNo return value originated at:\n" + no_value->call_frame;
+            if (!error_call_stack.empty() && error_call_stack.back() == no_value->call_frame)
+            {
+                error_call_stack.pop_back();
+            }
+        }
+    }
     if (output_error)
     {
         print_runtime_error();
-    }
-    if (pushed_argument_frame)
-    {
-        call_stack.pop_back();
     }
 }
 
@@ -3859,7 +3884,7 @@ std::string Cifa::format_runtime_error() const
     {
         return result;
     }
-    result += "Call Stack (most recent call last):\n";
+    result += "Call Stack (most recent call first):\n";
     // Keep distinct columns from a shared source line; only remove exact duplicates.
     std::string last_frame;
     for (auto it = error_call_stack.rbegin(); it != error_call_stack.rend(); ++it)

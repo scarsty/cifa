@@ -134,6 +134,115 @@ bool exit_function_test()
     return true;
 }
 
+bool runtime_error_abort_test()
+{
+    const std::vector<std::string> scripts = {
+        "sum = 0; for (int i = 0; i < 10; i++) { sum += missing_value(i); } return sum;",
+        "for (int i = !missing_value(); i < 10; i++) { touch(); }",
+        "for (int i = 0; missing_value(); i++) { touch(); }",
+        "for (int i = 0; i < 10; i += !missing_value()) { }",
+        "while (missing_value()) { touch(); }",
+        "int i = 0; while (i < 10) { sum += !missing_value(); i++; }",
+        "do { sum += !missing_value(); } while (sum < 10);",
+        "do { } while (missing_value());",
+        "for (item : missing_value()) { touch(); }",
+        "values = {1, 2}; for (item : values) { sum += !missing_value(); touch(); }",
+        "bad() { sum += !missing_value(); touch(); } bad();",
+        "touch(!missing_value());",
+        "sum = !missing_value();",
+        "run_string(\"bad = {1}; return !bad;\");",
+        "for (int i = 0; i < 10; i++) { run_string(\"bad = {1}; return !bad;\"); touch(); }",
+        "int i = 0; while (i < 10) { run_string(\"bad = {1}; return !bad;\"); i++; touch(); }",
+        "do { run_string(\"bad = {1}; return !bad;\"); touch(); } while (1);",
+        "for (; run_string(\"bad = {1}; return !bad;\");) { touch(); }",
+        "while (run_string(\"bad = {1}; return !bad;\")) { touch(); }",
+        "do {} while (run_string(\"bad = {1}; return !bad;\"));",
+        "convert({1});"
+    };
+    for (const auto& script : scripts)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        int calls = 0;
+        interpreter.register_function("touch", [&calls](ObjectVector&) -> Object
+            {
+                ++calls;
+                return 0;
+            });
+        interpreter.register_function("missing_value", [](ObjectVector&) -> Object { return Object(); });
+        interpreter.register_function("convert", [&calls, &interpreter](ObjectVector& arguments) -> Object
+            {
+                auto value = arguments[0].toDouble();
+            if (interpreter.has_runtime_error()) { return Object(); }
+                ++calls;
+                return value;
+            });
+        auto result = interpreter.run_script("sum = 7; " + script + " touch();");
+        if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || calls != 0)
+        {
+            std::cerr << "Runtime abort failed: " << script << " (calls=" << calls
+                << ", result=" << result.getSpecialType() << ")\n" << interpreter.get_errors_str()
+                << interpreter.get_runtime_error() << std::endl;
+            return false;
+        }
+        if (script.find("run_string(") != std::string::npos && interpreter.is_exit_requested())
+        {
+            std::cerr << "Nested exit flag leaked: " << script << std::endl;
+            return false;
+        }
+        result = interpreter.run_script("touch(); return 42;");
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || !result.isNumber() || result.toInt() != 42 || calls != 1)
+        {
+            return false;
+        }
+    }
+
+    Cifa interpreter;
+    interpreter.set_output_error(false);
+    auto exit_result = interpreter.run_script(
+        "total = 0; for (int i = 0; i < 3; i++) { run_string(\"exit();\"); total++; } return total;");
+    if (interpreter.has_error() || interpreter.has_runtime_error() || interpreter.is_exit_requested()
+        || !exit_result.isNumber() || exit_result.toInt() != 3)
+    {
+        return false;
+    }
+    auto program = interpreter.compile_script("stored = 7; bad = {1}; !bad; stored = 9;");
+    if (!program)
+    {
+        return false;
+    }
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        auto result = interpreter.run(program);
+        if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error()
+            || interpreter.get_runtime_error().find("type conversion failed") == std::string::npos)
+        {
+            return false;
+        }
+        result = interpreter.run_script("return stored;");
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || !result.isNumber() || result.toInt() != 7)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool object_conversion_fallback_test()
+{
+    Object value(std::string("not a number"));
+    auto& invalid = value.ref<ObjectMap>();
+    if (!invalid.empty())
+    {
+        return false;
+    }
+    invalid["discarded"] = 1;
+    const Object& constant = value;
+    return constant.ref<ObjectMap>().empty() && value.toString() == "not a number";
+}
+
 bool typed_function_argument_error_test()
 {
     Cifa c;
@@ -165,16 +274,10 @@ bool object_vector_argument_error_test()
                 {
                     return Object(args[3].ref<ObjectMap>().size());
                 });
-            try
-            {
-                c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
-            }
-            catch (const std::bad_any_cast&)
-            {
-                return c.get_runtime_error().find("variable 'strs'") != std::string::npos
-                    && c.get_runtime_error().find(typeid(ObjectMap).name()) != std::string::npos;
-            }
-            return false;
+            auto result = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
+            return result.getSpecialType() == "Error"
+                && c.get_runtime_error().find("variable 'strs'") != std::string::npos
+                && c.get_runtime_error().find(typeid(ObjectMap).name()) != std::string::npos;
         };
 
     return expect_conversion_error([](ObjectVector& args) -> Object
@@ -378,6 +481,210 @@ bool script_void_function_test()
     }
     result = c.run_script("increment(); add(3); return total;");
     return !c.has_error() && !c.has_runtime_error() && result.isNumber() && result.toInt() == 9;
+}
+
+bool script_function_return_check_test()
+{
+    const std::vector<std::string> invalid_scripts = {
+        R"(int sum = 0;
+int myrandom(int a) {
+}
+for (int i = 0; i < 10; i++) {
+    sum += myrandom(i);
+}
+return sum;)",
+        "empty() {} empty() + 1;",
+    "empty() {} value = empty(); return value + 1;",
+        "empty() {} if (empty()) return 1;",
+        "empty() {} while (empty()) {}",
+        "empty() {} do {} while (empty());",
+        "empty() {} for (int index = 0; empty(); index++) {}",
+        "empty() {} for (item : empty()) {}",
+        "empty() {} return abs(empty());",
+        "empty() {} values = {1, 2}; return values[empty()];",
+        "empty() {} values = {empty()}; return values[0] + 1;",
+        "empty() {} return to_number(empty());",
+        "empty() {} wrapper() { return empty(); } return wrapper() + 1;",
+        "empty() { 42; } return empty() + 1;",
+        "empty() { return; } return empty() + 1;",
+        "empty() {} empty(value) { return value; } return empty() + 1;",
+        "value(number) { if (number > 0) return number; } return value(-1) + 1;",
+        "empty() {} addone(value) { return value + 1; } return addone(empty());"
+    };
+    for (const auto& script : invalid_scripts)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        auto program = interpreter.compile_script(script);
+        if (!program || interpreter.has_error())
+        {
+            std::cerr << "Unexpected static return check: " << script << '\n'
+                << interpreter.get_errors_str() << std::endl;
+            return false;
+        }
+        auto result = interpreter.run(program);
+        const auto error = interpreter.get_runtime_error();
+        if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || interpreter.has_error()
+            || error.find("has no return value") == std::string::npos || error.find("^") == std::string::npos)
+        {
+            std::cerr << "NoValue use did not fail: " << script << '\n' << error << std::endl;
+            return false;
+        }
+    }
+
+    Cifa caret_interpreter;
+    caret_interpreter.set_output_error(false);
+    auto caret_result = caret_interpreter.run_script(invalid_scripts.front());
+    const auto caret_error = caret_interpreter.get_runtime_error();
+    if (caret_result.getSpecialType() != "Error" || !caret_interpreter.has_runtime_error()
+        || caret_error.find("col 12") == std::string::npos)
+    {
+        std::cerr << "NoValue error did not point to the function call:\n" << caret_error << std::endl;
+        return false;
+    }
+
+    for (const bool delayed : {false, true})
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        const std::string script = delayed
+            ? "empty() {}\nsaved = empty();\nreturn abs(saved);"
+            : "empty() {}\nreturn abs(empty());";
+        auto result = interpreter.run_script(script);
+        const auto error = interpreter.get_runtime_error();
+        const std::string origin = delayed ? "<script>:2, col 9:" : "<script>:2, col 12:";
+        const std::string source_line = delayed ? "saved = empty();" : "return abs(empty());";
+        const std::string expected_source = "No return value originated at:\n" + origin + " " + source_line
+            + "\n" + std::string(origin.size() + 1 + (delayed ? 8 : 11), ' ') + "^\n";
+        const auto position = error.find(origin);
+        if (result.getSpecialType() != "Error" || position == std::string::npos
+            || error.find(expected_source) == std::string::npos
+            || error.find("Call Stack (most recent call first):") == std::string::npos
+            || error.find(origin, position + origin.size()) != std::string::npos
+            || (delayed && error.find("<script>:3, col 12:") == std::string::npos))
+        {
+            std::cerr << "Invalid NoValue diagnostic frames:\n" << error << std::endl;
+            return false;
+        }
+    }
+
+    const std::vector<std::string> valid_scripts = {
+        "empty() {} empty(); return 42;",
+        "void empty() { return; } empty(); return 42;",
+        "empty() {} if (true) empty(); else empty(); return 42;",
+        "empty() {} for (int index = 0; index < 2; index++) empty(); return 42;",
+        "empty() {} for (empty(); 0; empty()) {} return 42;",
+        "empty() {} true ? empty() : empty(); return 42;",
+        "empty() {} (empty()); return 42;",
+        "empty() {} empty(), empty(); return 42;",
+        "empty() {} value = empty(); return 42;",
+        "empty() {} values = {empty()}; return 42;",
+        "empty() {} ignore(value) { return 42; } return ignore(empty());",
+        "empty() {} if (0) return empty() + 1; return 42;",
+        "empty() {} 0 && empty(); 1 || empty(); return 42;",
+        "empty() {} int i = 0; for (empty(); i < 2; empty()) { i++; } return 42;",
+        "value() {} value(number) { return number; } value(); return value(42);",
+        "return value(42); value(number) { return number; }",
+        "void value() { return 42; } return value();",
+        "value(number) { if (number > 0) return number; } value(-1); return value(42);"
+    };
+    for (const auto& script : valid_scripts)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        auto result = interpreter.run_script(script);
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || !result.isNumber() || result.toInt() != 42)
+        {
+            std::cerr << "Valid return use rejected: " << script << '\n'
+                << interpreter.get_errors_str() << interpreter.get_runtime_error() << std::endl;
+            return false;
+        }
+    }
+
+    const std::vector<std::string> no_value_scripts = {
+        "empty() {} return empty();",
+        "empty() { 42; } return empty();",
+        "empty() { return; } return empty();",
+        "empty() {} value = empty(); return value;",
+        "empty() {} values = {empty()}; return values[0];",
+        "empty() {} wrapper() { return empty(); } return wrapper();",
+        "inner() { return 42; } outer() { inner(); } return outer();",
+        "empty() {} return true ? empty() : 1;",
+        "empty() {} empty(value) { return value; } return empty();",
+        "value(number) { if (number > 0) return number; } return value(-1);"
+    };
+    for (const auto& script : no_value_scripts)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        auto result = interpreter.run_script(script);
+        if (interpreter.has_error() || interpreter.has_runtime_error() || result.getSpecialType() != "NoValue"
+            || result.isNumber() || result.isType<std::string>())
+        {
+            std::cerr << "Missing NoValue result: " << script << '\n'
+                << interpreter.get_errors_str() << interpreter.get_runtime_error() << std::endl;
+            return false;
+        }
+    }
+
+    Cifa interpreter;
+    interpreter.set_output_error(false);
+    interpreter.run_script("saved() {}");
+    auto program = interpreter.compile_script("return saved();");
+    if (!program)
+    {
+        return false;
+    }
+    auto result = interpreter.run(program);
+    if (interpreter.has_error() || interpreter.has_runtime_error() || result.getSpecialType() != "NoValue")
+    {
+        return false;
+    }
+    result = interpreter.run_script("return type(saved());");
+    if (interpreter.has_error() || interpreter.has_runtime_error()
+        || !result.isType<std::string>() || result.toString() != "NoValue")
+    {
+        return false;
+    }
+    result = interpreter.run_script("value = saved(); return value + 1;");
+    if (result.getSpecialType() != "Error"
+        || interpreter.get_runtime_error().find("function 'saved' has no return value") == std::string::npos)
+    {
+        return false;
+    }
+    result = interpreter.run_script("saved(); return 42;");
+    if (interpreter.has_error() || interpreter.has_runtime_error()
+        || !result.isNumber() || result.toInt() != 42)
+    {
+        std::cerr << "Saved function call failed: " << interpreter.get_errors_str()
+            << interpreter.get_runtime_error() << std::endl;
+        return false;
+    }
+    result = interpreter.run_script("saved() { return 42; } return saved();");
+    if (interpreter.has_error() || interpreter.has_runtime_error() || !result.isNumber() || result.toInt() != 42)
+    {
+        return false;
+    }
+    interpreter.register_parameter("argument", 42);
+    program = interpreter.compile_script("branch(number) { if (number > 0) return number; } return branch(argument);");
+    if (!program)
+    {
+        return false;
+    }
+    for (int argument : {42, -1, 7})
+    {
+        interpreter.register_parameter("argument", argument);
+        result = interpreter.run(program);
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || (argument > 0 && (!result.isNumber() || result.toInt() != argument))
+            || (argument <= 0 && result.getSpecialType() != "NoValue"))
+        {
+            return false;
+        }
+    }
+    result = interpreter.run_script("stop() { exit(); } return stop() + 1;");
+    return !interpreter.has_error() && !interpreter.has_runtime_error() && interpreter.is_exit_requested();
 }
 
 bool script_function_argument_count_test()
@@ -844,7 +1151,7 @@ bool runtime_error_stack_test()
     const std::string error = c.get_runtime_error();
     return o.getSpecialType() == "Error"
         && error.find("type conversion failed") != std::string::npos
-        && error.find("Call Stack (most recent call last):") != std::string::npos
+        && error.find("Call Stack (most recent call first):") != std::string::npos
         && error.find("func inner()") != std::string::npos
         && error.find("func middle()") != std::string::npos
         && error.find("func outer()") != std::string::npos;
@@ -2409,6 +2716,11 @@ int main(int argc, char** argv)
     {
         return large_script_performance_test() ? 0 : 1;
     }
+    if (argc > 1 && std::string(argv[1]) == "--error-checks")
+    {
+        return object_conversion_fallback_test() && runtime_error_abort_test() && object_vector_argument_error_test()
+            && script_function_return_check_test() ? 0 : 1;
+    }
 
     int total = 0, ok = 0;
     auto run_test = [&total, &ok](std::string name, bool (*func)())
@@ -2438,6 +2750,7 @@ int main(int argc, char** argv)
     run_test("nested_runtime_reporter_test", nested_runtime_reporter_test);
     run_test("typed_function_argument_error_test", typed_function_argument_error_test);
     run_test("object_vector_argument_error_test", object_vector_argument_error_test);
+    run_test("object_conversion_fallback_test", object_conversion_fallback_test);
     run_test("builtin_math_function_test", builtin_math_function_test);
     run_test("builtin_type_function_test", builtin_type_function_test);
     run_test("range_for_test", range_for_test);
@@ -2450,6 +2763,7 @@ int main(int argc, char** argv)
     run_test("switch_case_test", switch_case_test);
     run_test("recursion_test", recursion_test);
     run_test("script_void_function_test", script_void_function_test);
+    run_test("script_function_return_check_test", script_function_return_check_test);
     run_test("script_function_argument_count_test", script_function_argument_count_test);
     run_test("script_function_global_scope_test", script_function_global_scope_test);
     run_test("string_operation_test", string_operation_test);
@@ -2471,6 +2785,7 @@ int main(int argc, char** argv)
     run_test("compound_assignment_test", compound_assignment_test);
     run_test("c_string_library_test", c_string_library_test);
     run_test("runtime_error_stack_test", runtime_error_stack_test);
+    run_test("runtime_error_abort_test", runtime_error_abort_test);
     run_test("uninitialized_variable_runtime_test", uninitialized_variable_runtime_test);
     run_test("nested_execution_state_test", nested_execution_state_test);
     run_test("nested_error_preservation_test", nested_error_preservation_test);

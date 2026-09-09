@@ -96,9 +96,7 @@ struct Object
         {
             return std::any_cast<double>(value);
         }
-        const std::string object_name = name.empty() ? "<temporary>" : name;
-        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to double", this);
+        report_conversion_error("double");
         return NAN;
     }
 
@@ -108,9 +106,7 @@ struct Object
         {
             return std::any_cast<std::string>(value);
         }
-        const std::string object_name = name.empty() ? "<temporary>" : name;
-        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to string", this);
+        report_conversion_error("string");
         return "";
     }
 
@@ -122,9 +118,7 @@ struct Object
         {
             return std::any_cast<T>(value);
         }
-        const std::string object_name = name.empty() ? "<temporary>" : name;
-        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
+        report_conversion_error(typeid(T).name());
         return T();
     }
 
@@ -137,10 +131,8 @@ struct Object
         {
             return std::any_cast<const T&>(value);
         }
-        const std::string object_name = name.empty() ? "<temporary>" : name;
-        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
-        throw std::bad_any_cast();
+        report_conversion_error(typeid(T).name());
+        return empty_reference<T>();
     }
 
     template <typename T>
@@ -150,10 +142,8 @@ struct Object
         {
             return std::any_cast<T&>(value);
         }
-        const std::string object_name = name.empty() ? "<temporary>" : name;
-        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
-        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + typeid(T).name(), this);
-        throw std::bad_any_cast();
+        report_conversion_error(typeid(T).name());
+        return empty_reference<T>();
     }
 
     template <typename T>
@@ -172,6 +162,48 @@ struct Object
     std::type_info const& getType() const { return value.type(); }
 
 private:
+    struct NoValue
+    {
+        std::string function_name;
+        std::string call_frame;
+    };
+
+    static Object make_no_value(const std::string& function_name, std::string call_frame)
+    {
+        Object result;
+        result.value = NoValue{ function_name, std::move(call_frame) };
+        result.type1 = "NoValue";
+        return result;
+    }
+
+    bool report_no_value() const
+    {
+        if (type1 != "NoValue")
+        {
+            return false;
+        }
+        const auto* no_value = std::any_cast<NoValue>(&value);
+        const std::string function_name = no_value == nullptr ? "<unknown>" : no_value->function_name;
+        report_runtime_error("function '" + function_name + "' has no return value", this);
+        return true;
+    }
+
+    void report_conversion_error(const std::string& target_type) const
+    {
+        if (report_no_value()) { return; }
+        const std::string object_name = name.empty() ? "<temporary>" : name;
+        const std::string source_type = value.has_value() ? value.type().name() : "<empty>";
+        report_runtime_error("type conversion failed: variable '" + object_name + "' from " + source_type + " to " + target_type, this);
+    }
+
+    template <typename T>
+    static T& empty_reference()
+    {
+        static thread_local T empty{};
+        empty = T{};
+        return empty;
+    }
+
     static void report_runtime_error(const std::string& message, const Object* source)
     {
         if (!runtime_error_reporters.empty())
@@ -555,7 +587,7 @@ private:
     static const std::vector<std::unordered_set<std::string>>& operator_precedence_token_groups();
 
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
-    Object run_function(const std::string& name, std::vector<CalUnit>& vc, ScopeStack& scopes);
+    Object run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, ScopeStack& scopes);
     void run_compilation(const std::function<void(Ast&)>& action);
     Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
     ErrorSet& active_errors();
@@ -594,6 +626,7 @@ private:
     std::string format_runtime_frame(const CalUnit& c) const;
     void set_runtime_error(const std::string& message, const Object* source = nullptr);
     void clear_runtime_error();
+    bool should_stop_execution() const { return has_runtime_error() || is_exit_requested(); }
     bool is_control_signal(const Object& value, const std::string& signal) const;
     std::string format_runtime_error() const;
     void print_runtime_error() const;
@@ -646,6 +679,11 @@ private:
     //四则运算准许用户增加自定义功能
 
 #define OPERATOR(o1, o2, op, userop_v, trans_type) \
+    if (o1.type1 == "NoValue" || o2.type1 == "NoValue") \
+    { \
+        (o1.type1 == "NoValue" ? o1 : o2).toDouble(); \
+        return Object(); \
+    } \
     if (o1.isNumber() && o2.isNumber()) \
     { \
         return double(trans_type(o1) op trans_type(o2)); \
