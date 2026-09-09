@@ -587,9 +587,10 @@ private:
     static const std::vector<std::unordered_set<std::string>>& operator_precedence_token_groups();
 
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
+    bool eval_condition(CalUnit& c, ScopeStack& scopes);
     Object run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, ScopeStack& scopes);
     void run_compilation(const std::function<void(Ast&)>& action);
-    Object eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
+    Object eval_builtin_method(const CalUnit& method, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
     ErrorSet& active_errors();
     const ErrorSet& active_errors() const;
     const std::vector<SourceLineInfo>& active_source_line_infos() const;
@@ -624,7 +625,7 @@ private:
     bool has_return_value() const;
     Object& return_value();
     std::string format_runtime_frame(const CalUnit& c) const;
-    void set_runtime_error(const std::string& message, const Object* source = nullptr);
+    void set_runtime_error(const std::string& message, const Object* source = nullptr, const CalUnit* location = nullptr);
     void clear_runtime_error();
     bool should_stop_execution() const { return has_runtime_error() || is_exit_requested(); }
     bool is_control_signal(const Object& value, const std::string& signal) const;

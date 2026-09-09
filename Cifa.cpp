@@ -267,7 +267,7 @@ Cifa::Cifa()
                 {
                     return Object(double(x[0].ref<ObjectMap>().size()));
                 }
-                set_runtime_error("function 'size' requires a string, array, or map");
+                set_runtime_error("function 'size' requires a string, array, or map", &x[0]);
                 return Object();
             }
             set_runtime_error("function 'size' expects 0 or 1 arguments, got " + std::to_string(x.size()));
@@ -705,8 +705,9 @@ Object& Cifa::return_value()
 
 //对数组或 map 对象执行内置方法（push_back / erase / contains 等）
 //obj 必须是对原始变量的引用；args 是已展开的参数列表（CalUnit）
-Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes)
+Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes)
 {
+    const auto& method_name = method.str;
     if (obj.isType<std::vector<Object>>())
     {
         auto& arr = obj.ref<std::vector<Object>>();
@@ -773,7 +774,7 @@ Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, st
         }
         if (method_name == "keys")
         {
-            set_runtime_error("keys() is not supported on arrays");
+            set_runtime_error("keys() is not supported on arrays", nullptr, &method);
             return Object();
         }
     }
@@ -815,18 +816,29 @@ Object Cifa::eval_builtin_method(const std::string& method_name, Object& obj, st
         if (method_name == "push_back" || method_name == "pop_back"
             || method_name == "resize" || method_name == "insert")
         {
-            set_runtime_error(method_name + "() is not supported on maps");
+            set_runtime_error(method_name + "() is not supported on maps", nullptr, &method);
             return Object();
         }
     }
     else
     {
-        set_runtime_error(method_name + "() requires an array or map");
+        set_runtime_error(method_name + "() requires an array or map", nullptr, &method);
     }
     return Object();
 }
 
 //核心求值函数：递归遍历语法树节点并执行对应操作
+bool Cifa::eval_condition(CalUnit& c, ScopeStack& scopes)
+{
+    auto value = eval_scoped(c, scopes);
+    if (should_stop_execution()) { return false; }
+    Object::set_runtime_error_reporter([this, &c](const std::string& message, const Object* source)
+        { set_runtime_error(message, source, &c); });
+    RaiiGuard reporter_guard([]() { Object::clear_runtime_error_reporter(); });
+    const bool result = value.toBool();
+    return !should_stop_execution() && result;
+}
+
 Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
 {
     if (should_stop_execution())
@@ -894,19 +906,14 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                             expand_comma(c.v[1].v[0], args);
                         }
                         auto& obj = get_parameter_for_assign(c.v[0], scopes);
-                        return eval_builtin_method(method_name, obj, args, scopes);
+                        return eval_builtin_method(c.v[1], obj, args, scopes);
                     }
+                    std::vector<CalUnit> v = { c.v[0] };
                     if (c.v[1].v[0].type != CalUnitType::None)
                     {
-                        std::vector<CalUnit> v = { c.v[0] };
                         expand_comma(c.v[1].v[0], v);
-                        return run_function(c.v[1], v, scopes);
                     }
-                    else
-                    {
-                        std::vector<CalUnit> v = { c.v[0] };
-                        return run_function(c.v[1], v, scopes);
-                    }
+                    return run_function(c.v[1], v, scopes);
                 }
                 if (c.v[1].type == CalUnitType::Parameter)
                 {
@@ -1000,7 +1007,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             }
             if (c.str == "?")    //条件1 ? 语句1 : 语句2;
             {
-                if (eval_scoped(c.v[0], scopes))    //比较?运算符左侧的 [条件1]
+                if (eval_condition(c.v[0], scopes))    //比较?运算符左侧的 [条件1]
                 {
                     return eval_scoped(c.v[1].v[0], scopes);    //取:运算符左侧 [语句1] 的结果
                 }
@@ -1065,7 +1072,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     {
         if (c.str == "if")    //if(条件1){语句1}else{语句2}
         {
-            if (eval_scoped(c.v[0], scopes))    //判断 [条件1]
+            if (eval_condition(c.v[0], scopes))    //判断 [条件1]
             {
                 return eval_scoped(c.v[1], scopes);    //取: [语句1] 执行结果
             }
@@ -1094,7 +1101,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 {
                     if (!range.report_no_value())
                     {
-                        set_runtime_error("range for requires an array");
+                        set_runtime_error("range for requires an array", nullptr, &range_clause->v[1]);
                     }
                     return Object();
                 }
@@ -1120,7 +1127,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             Object o;
             for (
                 eval_scoped(c.v[0].v[0], scopes);    //执行 [语句1]
-                !is_exit_requested() && eval_scoped(c.v[0].v[1], scopes);    //判断 [条件1]
+                !is_exit_requested() && eval_condition(c.v[0].v[1], scopes);    //判断 [条件1]
                 eval_scoped(c.v[0].v[2], scopes)     //执行 [语句2]
             )
             {
@@ -1136,7 +1143,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         if (c.str == "while")    //while (条件1) {语句1}
         {
             Object o;
-            while (!is_exit_requested() && eval_scoped(c.v[0], scopes))    //判断 [条件1]
+            while (!is_exit_requested() && eval_condition(c.v[0], scopes))    //判断 [条件1]
             {
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (should_stop_execution()) { return o; }
@@ -1158,7 +1165,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 if (is_control_signal(o, "break")) { break; }
                 if (is_control_signal(o, "continue")) { continue; }
                 if (has_return_value()) { return return_value(); }
-            } while (!is_exit_requested() && eval_scoped(c.v[1].v[0], scopes));    //判断 [条件1]
+            } while (!is_exit_requested() && eval_condition(c.v[1].v[0], scopes));    //判断 [条件1]
             return Object(0);
         }
         if (c.str == "switch")
@@ -3015,7 +3022,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 //所有表达式上下文中的参数都需要初始化检查
                 if (!p.count(c.str))
                 {
-                    add_error(c, "parameter '{}' is at right of = but not been initialized", c.str);
+                    add_error(c, "parameter '{}' has not been initialized", c.str);
                 }
             }
         }
@@ -3028,7 +3035,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 if (!p.count(c.str))
                 {
-                    add_error(c, "parameter '{}' is at right of = but not been initialized", c.str);
+                    add_error(c, "parameter '{}' has not been initialized", c.str);
                 }
             }
         }
@@ -3796,7 +3803,7 @@ std::string Cifa::format_runtime_frame(const CalUnit& c) const
 }
 
 //设置运行时错误消息（仅记录第一个错误，后续错误忽略）
-void Cifa::set_runtime_error(const std::string& message, const Object* source)
+void Cifa::set_runtime_error(const std::string& message, const Object* source, const CalUnit* location)
 {
     if (has_runtime_error())
     {
@@ -3816,6 +3823,10 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source)
     auto& context = execution_contexts.back();
     auto& error_call_stack = context.runtime_error_call_stack;
     error_call_stack = context.runtime_call_stack;
+    if (location != nullptr)
+    {
+        error_call_stack.push_back(format_runtime_frame(*location));
+    }
     auto& error_message = context.runtime_error_message;
     const auto* function_arguments = context.active_function_arguments;
     const auto* function_values = context.active_function_values;
@@ -3870,7 +3881,7 @@ void Cifa::clear_runtime_error()
     }
 }
 
-//格式化运行时错误和调用栈（相同源码行的栈帧会去重）
+//格式化运行时错误和调用栈（仅去除相邻且内容完全相同的栈帧）
 std::string Cifa::format_runtime_error() const
 {
     const auto& error_message = execution_contexts.empty() ? runtime_error_message : execution_contexts.back().runtime_error_message;
@@ -3886,15 +3897,15 @@ std::string Cifa::format_runtime_error() const
     }
     result += "Call Stack (most recent call first):\n";
     // Keep distinct columns from a shared source line; only remove exact duplicates.
-    std::string last_frame;
+    const std::string* last_frame = nullptr;
     for (auto it = error_call_stack.rbegin(); it != error_call_stack.rend(); ++it)
     {
         const std::string& frame = *it;
-        if (frame == last_frame)
+        if (last_frame != nullptr && frame == *last_frame)
         {
             continue;
         }
-        last_frame = frame;
+        last_frame = &frame;
         size_t newline_pos = frame.find('\n');
         if (newline_pos == std::string::npos)
         {

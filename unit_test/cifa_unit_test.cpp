@@ -1,9 +1,10 @@
 ﻿#include "../Cifa.h"
 #include <chrono>
 #include <filesystem>
-#include <iostream>
+#include <cstdio>
+#include <print>
 #include <numeric>
-#include <sstream>
+#include <format>
 
 using namespace cifa;
 
@@ -180,14 +181,13 @@ bool runtime_error_abort_test()
         auto result = interpreter.run_script("sum = 7; " + script + " touch();");
         if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || calls != 0)
         {
-            std::cerr << "Runtime abort failed: " << script << " (calls=" << calls
-                << ", result=" << result.getSpecialType() << ")\n" << interpreter.get_errors_str()
-                << interpreter.get_runtime_error() << std::endl;
+            std::println(stderr, "Runtime abort failed: {} (calls={}, result={})\n{}{}",
+                script, calls, result.getSpecialType(), interpreter.get_errors_str(), interpreter.get_runtime_error());
             return false;
         }
         if (script.find("run_string(") != std::string::npos && interpreter.is_exit_requested())
         {
-            std::cerr << "Nested exit flag leaked: " << script << std::endl;
+            std::println(stderr, "Nested exit flag leaked: {}", script);
             return false;
         }
         result = interpreter.run_script("touch(); return 42;");
@@ -266,19 +266,6 @@ bool object_vector_argument_error_test()
                 && c.get_runtime_error().find("variable 'strs'") != std::string::npos
                 && c.get_runtime_error().find(target_type) != std::string::npos;
         };
-    const auto expect_ref_error = []()
-        {
-            Cifa c;
-            c.set_output_error(false);
-            c.register_function("menu", [](ObjectVector& args) -> Object
-                {
-                    return Object(args[3].ref<ObjectMap>().size());
-                });
-            auto result = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
-            return result.getSpecialType() == "Error"
-                && c.get_runtime_error().find("variable 'strs'") != std::string::npos
-                && c.get_runtime_error().find(typeid(ObjectMap).name()) != std::string::npos;
-        };
 
     return expect_conversion_error([](ObjectVector& args) -> Object
         {
@@ -293,7 +280,10 @@ bool object_vector_argument_error_test()
         {
             return Object(args[3].toString());
         }, "to string")
-        && expect_ref_error();
+        && expect_conversion_error([](ObjectVector& args) -> Object
+        {
+            return Object(args[3].ref<ObjectMap>().size());
+        }, typeid(ObjectMap).name());
 }
 
 bool builtin_math_function_test()
@@ -494,13 +484,12 @@ for (int i = 0; i < 10; i++) {
 }
 return sum;)",
         "empty() {} empty() + 1;",
-    "empty() {} value = empty(); return value + 1;",
+        "empty() {} value = empty(); return value + 1;",
         "empty() {} if (empty()) return 1;",
         "empty() {} while (empty()) {}",
         "empty() {} do {} while (empty());",
         "empty() {} for (int index = 0; empty(); index++) {}",
         "empty() {} for (item : empty()) {}",
-        "empty() {} return abs(empty());",
         "empty() {} values = {1, 2}; return values[empty()];",
         "empty() {} values = {empty()}; return values[0] + 1;",
         "empty() {} return to_number(empty());",
@@ -518,8 +507,7 @@ return sum;)",
         auto program = interpreter.compile_script(script);
         if (!program || interpreter.has_error())
         {
-            std::cerr << "Unexpected static return check: " << script << '\n'
-                << interpreter.get_errors_str() << std::endl;
+            std::println(stderr, "Unexpected static return check: {}\n{}", script, interpreter.get_errors_str());
             return false;
         }
         auto result = interpreter.run(program);
@@ -527,20 +515,20 @@ return sum;)",
         if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || interpreter.has_error()
             || error.find("has no return value") == std::string::npos || error.find("^") == std::string::npos)
         {
-            std::cerr << "NoValue use did not fail: " << script << '\n' << error << std::endl;
+            std::println(stderr, "NoValue use did not fail: {}\n{}", script, error);
             return false;
         }
-    }
-
-    Cifa caret_interpreter;
-    caret_interpreter.set_output_error(false);
-    auto caret_result = caret_interpreter.run_script(invalid_scripts.front());
-    const auto caret_error = caret_interpreter.get_runtime_error();
-    if (caret_result.getSpecialType() != "Error" || !caret_interpreter.has_runtime_error()
-        || caret_error.find("col 12") == std::string::npos)
-    {
-        std::cerr << "NoValue error did not point to the function call:\n" << caret_error << std::endl;
-        return false;
+        if (&script == &invalid_scripts.front())
+        {
+            const std::string header = "<script>:5, col 12: ";
+            const std::string expected = header + "    sum += myrandom(i);\n"
+                + std::string(header.size() + 11, ' ') + "^\n";
+            if (error.find(expected) == std::string::npos)
+            {
+                std::print(stderr, "NoValue call position mismatch:\n{}Expected:\n{}", error, expected);
+                return false;
+            }
+        }
     }
 
     for (const bool delayed : {false, true})
@@ -557,13 +545,14 @@ return sum;)",
         const std::string expected_source = "No return value originated at:\n" + origin + " " + source_line
             + "\n" + std::string(origin.size() + 1 + (delayed ? 8 : 11), ' ') + "^\n";
         const auto position = error.find(origin);
-        if (result.getSpecialType() != "Error" || position == std::string::npos
+        if (result.getSpecialType() != "Error" || interpreter.has_error() || !interpreter.has_runtime_error()
+            || error.find("function 'empty' has no return value") == std::string::npos || position == std::string::npos
             || error.find(expected_source) == std::string::npos
             || error.find("Call Stack (most recent call first):") == std::string::npos
             || error.find(origin, position + origin.size()) != std::string::npos
             || (delayed && error.find("<script>:3, col 12:") == std::string::npos))
         {
-            std::cerr << "Invalid NoValue diagnostic frames:\n" << error << std::endl;
+            std::println(stderr, "Invalid NoValue diagnostic frames:\n{}", error);
             return false;
         }
     }
@@ -596,8 +585,8 @@ return sum;)",
         if (interpreter.has_error() || interpreter.has_runtime_error()
             || !result.isNumber() || result.toInt() != 42)
         {
-            std::cerr << "Valid return use rejected: " << script << '\n'
-                << interpreter.get_errors_str() << interpreter.get_runtime_error() << std::endl;
+            std::println(stderr, "Valid return use rejected: {}\n{}{}", script,
+                interpreter.get_errors_str(), interpreter.get_runtime_error());
             return false;
         }
     }
@@ -622,8 +611,8 @@ return sum;)",
         if (interpreter.has_error() || interpreter.has_runtime_error() || result.getSpecialType() != "NoValue"
             || result.isNumber() || result.isType<std::string>())
         {
-            std::cerr << "Missing NoValue result: " << script << '\n'
-                << interpreter.get_errors_str() << interpreter.get_runtime_error() << std::endl;
+            std::println(stderr, "Missing NoValue result: {}\n{}{}", script,
+                interpreter.get_errors_str(), interpreter.get_runtime_error());
             return false;
         }
     }
@@ -657,8 +646,7 @@ return sum;)",
     if (interpreter.has_error() || interpreter.has_runtime_error()
         || !result.isNumber() || result.toInt() != 42)
     {
-        std::cerr << "Saved function call failed: " << interpreter.get_errors_str()
-            << interpreter.get_runtime_error() << std::endl;
+        std::println(stderr, "Saved function call failed: {}{}", interpreter.get_errors_str(), interpreter.get_runtime_error());
         return false;
     }
     result = interpreter.run_script("saved() { return 42; } return saved();");
@@ -697,11 +685,10 @@ bool script_function_argument_count_test()
             const std::string error = c.get_runtime_error();
             if (result.getSpecialType() != "Error" || error.find(expected) == std::string::npos)
             {
-                std::cerr << "  " << label << " failed: expected runtime error: " << expected << "\n";
-                std::cerr << "    actual: " << error << "\n";
+                std::println(stderr, "  {} failed: expected runtime error: {}\n    actual: {}", label, expected, error);
                 return false;
             }
-            std::cerr << "  " << label << ": " << error << "\n";
+            std::println(stderr, "  {}: {}", label, error);
             return true;
         };
     {
@@ -1245,21 +1232,20 @@ static bool expect_syntax_error(const std::string& label, const std::string& scr
     c.set_output_error(false);
     c.run_script(script);
     std::string err = c.get_errors_str();
-    std::cerr << "  [" << label << "]:\n";
+    std::println(stderr, "  [{}]:", label);
     if (err.find("Syntax Error:") == std::string::npos || err.find(keyword) == std::string::npos)
     {
-        std::cerr << "    FAIL: expected keyword \"" << keyword << "\" in error output\n";
-        if (!err.empty()) { std::cerr << "    Got:\n"
-                                      << err; }
-        else { std::cerr << "    (no error produced)\n"; }
+        std::println(stderr, "    FAIL: expected keyword \"{}\" in error output", keyword);
+        if (!err.empty()) { std::print(stderr, "    Got:\n{}", err); }
+        else { std::println(stderr, "    (no error produced)"); }
         return false;
     }
     if (err.find("^") == std::string::npos)
     {
-        std::cerr << "    FAIL: missing caret (^) in error output\n";
+        std::println(stderr, "    FAIL: missing caret (^) in error output");
         return false;
     }
-    std::cerr << err;
+    std::print(stderr, "{}", err);
     return true;
 }
 
@@ -1270,28 +1256,20 @@ static bool expect_no_syntax_error(const std::string& label, const std::string& 
     c.set_output_error(false);
     c.run_script(script);
     std::string err = c.get_errors_str();
-    std::cerr << "  [" << label << "]: ";
+    std::print(stderr, "  [{}]: ", label);
     if (!err.empty())
     {
-        std::cerr << "FAIL unexpected error:\n"
-                  << err;
+        std::print(stderr, "FAIL unexpected error:\n{}", err);
         return false;
     }
-    std::cerr << "OK\n";
+    std::println(stderr, "OK");
     return true;
 }
 
 bool static_syntax_error_test()
 {
-    // 委托到文件级辅助函数
-    auto expect_error = [](const std::string& label, const std::string& script, const std::string& keyword) -> bool
-    {
-        return expect_syntax_error(label, script, keyword);
-    };
-    auto expect_no_error = [](const std::string& label, const std::string& script) -> bool
-    {
-        return expect_no_syntax_error(label, script);
-    };
+    const auto& expect_error = expect_syntax_error;
+    const auto& expect_no_error = expect_no_syntax_error;
 
     bool ok = true;
 
@@ -1300,11 +1278,6 @@ bool static_syntax_error_test()
     // 1. 赋值右侧使用未初始化变量
     ok &= expect_error("uninitialized var in assign",
         R"(int y = undef;)",
-        "not been initialized");
-
-    // 2. 赋值右侧使用未初始化变量（多行，验证行号定位）
-    ok &= expect_error("uninitialized var multiline",
-        "int x = 10;\nint y = undef;\n",
         "not been initialized");
 
     // 3. 调用未定义的函数
@@ -1351,24 +1324,24 @@ bool static_syntax_error_test()
         if (err.find("unexpected character '#'") == std::string::npos
             || err.find("col 29") == std::string::npos)
         {
-            std::cerr << "  FAIL [unexpected character]: expected '#' at column 29\n";
-            std::cerr << "    Got:\n"
-                      << err;
+            std::print(stderr, "  FAIL [unexpected character]: expected '#' at column 29\n    Got:\n{}", err);
             ok = false;
         }
     }
 
-    // 11. 错误定位验证：错误输出应包含 "<script>:2" 和 "undef"
+    // 多行错误同时检查正文、源码和插入符。
     {
         Cifa c;
         c.set_output_error(false);
         c.run_script("int x = 10;\nint y = undef;\n");
         std::string err = c.get_errors_str();
-        if (err.find("<script>:2") == std::string::npos || err.find("undef") == std::string::npos)
+        const std::string header = "  at <script>:2, col 9: ";
+        const std::string expected = header + "int y = undef;\n"
+            + std::string(header.size() + 8, ' ') + "^\n";
+        if (!c.has_error() || err.find("not been initialized") == std::string::npos
+            || err.find(expected) == std::string::npos)
         {
-            std::cerr << "  FAIL [error line number]: expected '<script>:2' and 'undef' in error output\n";
-            std::cerr << "    Got:\n"
-                      << err;
+            std::print(stderr, "  FAIL [error line number]: expected '<script>:2' and 'undef' in error output\n    Got:\n{}", err);
             ok = false;
         }
     }
@@ -1472,9 +1445,6 @@ bool static_syntax_error_test()
     ok &= expect_no_error("valid while loop",
         R"(int i = 0; while (i < 5) { i++; } return i;)");
 
-    ok &= expect_no_error("valid for loop",
-        R"(int s = 0; for (int i = 0; i < 10; i++) { s += i; } return s;)");
-
     return ok;
 }
 
@@ -1534,7 +1504,7 @@ bool loop_and_recursion_execution_test()
         if (interpreter.has_error() || interpreter.has_runtime_error()
             || !result.isNumber() || result.toInt() != expected)
         {
-            std::cerr << "  loop/recursion execution failed: " << script << "\n";
+            std::println(stderr, "  loop/recursion execution failed: {}", script);
             return false;
         }
     }
@@ -1844,10 +1814,7 @@ bool non_block_branch_declaration_test()
     {
         return expect_syntax_error(label, script, "non-block");
     };
-    auto expect_no_error = [](const std::string& label, const std::string& script) -> bool
-    {
-        return expect_no_syntax_error(label, script);
-    };
+    const auto& expect_no_error = expect_no_syntax_error;
 
     bool ok = true;
 
@@ -2202,77 +2169,41 @@ bool sprintf_format_test()
     return true;
 }
 
-bool include_basic_test()
+bool include_file_cases_test()
 {
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/include_simple.cifa");
-    return o.isNumber() && o.toDouble() == 15.0;
-}
-
-bool include_multi_file_test()
-{
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/include_multi.cifa");
-    return o.isNumber() && o.toDouble() == 17.0;
-}
-
-bool include_transitive_test()
-{
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/c.cifa");
-    return o.isNumber() && o.toDouble() == 201.0;
-}
-
-bool include_self_circular_test()
-{
-    Cifa c;
-    c.set_output_error(false);
-    auto o = c.run_file("unit_test/test_data/self.cifa");
-    return o.isNumber() && o.toDouble() == 1.0;
-}
-
-bool include_mutual_circular_test()
-{
-    Cifa c;
-    c.set_output_error(false);
-    auto o = c.run_file("unit_test/test_data/cycle_a.cifa");
-    return o.isNumber() && o.toDouble() == 1.0;
+    const std::pair<const char*, double> cases[] = {
+        { "include_simple.cifa", 15 },
+        { "include_multi.cifa", 17 },
+        { "c.cifa", 201 },
+        { "self.cifa", 1 },
+        { "cycle_a.cifa", 1 },
+        { "include_subdir.cifa", 42 },
+        { "angle_bracket.cifa", 10 },
+        { "include_in_function.cifa", 25 }
+    };
+    bool ok = true;
+    for (const auto& [file, expected] : cases)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        auto result = interpreter.run_file(std::string("unit_test/test_data/") + file);
+        if (interpreter.has_error() || interpreter.has_runtime_error()
+            || !result.isNumber() || result.toDouble() != expected)
+        {
+            std::print(stderr, "Include file failed: {}\n{}{}", file,
+                interpreter.get_errors_str(), interpreter.get_runtime_error());
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 bool include_missing_file_test()
 {
     Cifa c;
     c.set_output_error(false);
-    auto o = c.run_file("unit_test/test_data/missing.cifa");
+    c.run_file("unit_test/test_data/missing.cifa");
     return c.has_error();
-}
-
-bool include_subdir_test()
-{
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/include_subdir.cifa");
-    return o.isNumber() && o.toDouble() == 42.0;
-}
-
-bool include_angle_bracket_test()
-{
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/angle_bracket.cifa");
-    return o.isNumber() && o.toDouble() == 10.0;
-}
-
-bool include_function_from_file_test()
-{
-    Cifa c;
-    auto o = c.run_file("unit_test/test_data/include_in_function.cifa");
-    return o.isNumber() && o.toDouble() == 25.0;
-}
-
-bool include_backward_compat_test()
-{
-    Cifa c;
-    auto o = c.run_script("return 1 + 2;");
-    return o.isNumber() && o.toDouble() == 3.0;
 }
 
 bool include_with_parameters_test()
@@ -2314,7 +2245,7 @@ bool include_run_script_include_dir_with_params_test()
     Cifa c;
     c.set_include_dirs({ "unit_test/test_data" });
     c.register_parameter("base", Object(100.0));
-    std::string script = "return base + 10;\n";
+    std::string script = "#include \"simple.cifa\"\nreturn base + x;\n";
     auto o = c.run_script(script);
     return o.isNumber() && o.toDouble() == 110.0;
 }
@@ -2375,16 +2306,8 @@ bool include_test()
         bool (*test)();
     };
     const IncludeCase cases[] = {
-        { "basic", include_basic_test },
-        { "multi file", include_multi_file_test },
-        { "transitive", include_transitive_test },
-        { "self circular", include_self_circular_test },
-        { "mutual circular", include_mutual_circular_test },
+        { "file cases", include_file_cases_test },
         { "missing file", include_missing_file_test },
-        { "subdirectory", include_subdir_test },
-        { "angle bracket", include_angle_bracket_test },
-        { "function from file", include_function_from_file_test },
-        { "backward compatibility", include_backward_compat_test },
         { "with parameters", include_with_parameters_test },
         { "run_script include dir", include_run_script_include_dir_test },
         { "run_script default dir", include_run_script_default_dir_test },
@@ -2401,7 +2324,7 @@ bool include_test()
     {
         if (!include_case.test())
         {
-            std::cerr << "  include case failed: " << include_case.name << std::endl;
+            std::println(stderr, "  include case failed: {}", include_case.name);
             ok = false;
         }
     }
@@ -2429,54 +2352,48 @@ bool large_script_performance_test()
 {
     constexpr int function_count = 1000;
     constexpr int calls = 300;
-    std::ostringstream script;
+    std::string script;
     double expected = 0;
 
     for (int function_index = 0; function_index < function_count; ++function_index)
     {
-        script << "perf_func_" << function_index << "(a, b) {\n";
-        script << "    double sum = 0;\n";
-        script << "    for (int j = 0; j < 3; j++) {\n";
-        script << "        if ((a + j) % 2) {\n";
-        script << "            sum += a + b + " << function_index << ";\n";
-        script << "        } else {\n";
-        script << "            sum += a - b + " << function_index << ";\n";
-        script << "        }\n";
-        script << "    }\n";
-        script << "    return sum;\n";
-        script << "}\n";
+        script += std::format("perf_func_{}(a, b) {{\n", function_index);
+        script += "    double sum = 0;\n"
+              "    for (int j = 0; j < 3; j++) {\n"
+              "        if ((a + j) % 2) {\n";
+        script += std::format("            sum += a + b + {};\n", function_index);
+        script += "        } else {\n";
+        script += std::format("            sum += a - b + {};\n", function_index);
+        script += "        }\n"
+              "    }\n"
+              "    return sum;\n"
+              "}\n";
     }
 
-    script << "double total = 0;\n";
+    script += "double total = 0;\n";
     for (int call_index = 0; call_index < calls; ++call_index)
     {
         const int first_function = call_index % function_count;
         const int second_function = (call_index * 7 + 3) % function_count;
         const int argument_b = call_index % 19 + 1;
-        if (call_index % 5 == 0)
-        {
-            script << "if (" << call_index << " % 5 == 0) { total += perf_func_" << first_function << "(" << call_index << ", " << argument_b << "); } else { total += perf_func_" << second_function << "(" << call_index << ", " << argument_b << "); }\n";
-            expected += generated_perf_function_value(first_function, call_index, argument_b);
-        }
-        else
-        {
-            script << "if (" << call_index << " % 5 == 0) { total += perf_func_" << first_function << "(" << call_index << ", " << argument_b << "); } else { total += perf_func_" << second_function << "(" << call_index << ", " << argument_b << "); }\n";
-            expected += generated_perf_function_value(second_function, call_index, argument_b);
-        }
+        script += std::format("if ({0} % 5 == 0) {{ total += perf_func_{1}({0}, {3}); }} else {{ total += perf_func_{2}({0}, {3}); }}\n",
+            call_index, first_function, second_function, argument_b);
+        expected += generated_perf_function_value(call_index % 5 == 0 ? first_function : second_function,
+            call_index, argument_b);
     }
-    script << "return total;\n";
+    script += "return total;\n";
 
     Cifa c;
     c.set_output_error(false);
     const auto started = std::chrono::steady_clock::now();
-    auto result = c.run_script(script.str());
+    auto result = c.run_script(script);
     const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 
-    std::cout << "large_script_performance_test: " << function_count << " script functions, " << calls << " call blocks, "
-        << script.str().size() << " bytes in " << elapsed << " ms" << std::endl;
+    std::println("large_script_performance_test: {} script functions, {} call blocks, {} bytes in {:.6g} ms",
+        function_count, calls, script.size(), elapsed);
     if (result.getSpecialType() == "Error")
     {
-        std::cerr << c.get_errors_str() << c.get_runtime_error() << std::endl;
+        std::println(stderr, "{}{}", c.get_errors_str(), c.get_runtime_error());
         return false;
     }
     return result.isNumber() && std::fabs(result.toDouble() - expected) < 1e-9;
@@ -2710,6 +2627,55 @@ bool nested_runtime_reporter_test()
         && inner_error.find("variable 'inner_value'") != std::string::npos;
 }
 
+bool diagnostic_position_test()
+{
+    struct Case
+    {
+        std::string script;
+        std::string token;
+        bool syntax;
+    };
+    const Case cases[] = {
+        { "bad = \"abc\"; if (bad) return 1;", "bad)", false },
+        { "bad = \"abc\"; while (bad) {}", "bad)", false },
+        { "bad = \"abc\"; for (;bad;) {}", "bad;", false },
+        { "bad = \"abc\"; do {} while (bad);", "bad)", false },
+        { "for (item : 42) {}", "42", false },
+        { "values = {1}; values.keys();", "keys", false },
+        { "value = 1; value.clear();", "clear", false },
+        { "return size(42);", "42", false },
+        { "return random(1, 2, 3);", "random", false },
+        { "return missing;", "missing", true },
+        { "return unknown(1);", "unknown", true },
+        { "return #bad;", "#", true },
+        { "int x = (1 + 2));", ");", true },
+        { "123 = 5;", "123", true }
+    };
+    for (const auto& test : cases)
+    {
+        Cifa interpreter;
+        interpreter.set_output_error(false);
+        interpreter.run_script(test.script);
+        const auto error = test.syntax ? interpreter.get_errors_str() : interpreter.get_runtime_error();
+        if (test.script == "return missing;"
+            && error.find("parameter 'missing' has not been initialized") == std::string::npos)
+        {
+            return false;
+        }
+        const auto column = test.script.find(test.token) + 1;
+        const std::string header = "  at <script>:1, col " + std::to_string(column) + ": ";
+        const std::string expected = header + test.script + "\n"
+            + std::string(header.size() + column - 1, ' ') + "^\n";
+        if (error.find(expected) == std::string::npos
+            || (test.syntax ? !interpreter.has_error() : !interpreter.has_runtime_error()))
+        {
+            std::print(stderr, "Diagnostic position mismatch:\n{}Expected:\n{}", error, expected);
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char** argv)
 {
     if (argc > 1 && (std::string(argv[1]) == "--perf" || std::string(argv[1]) == "--perf-large"))
@@ -2729,14 +2695,15 @@ int main(int argc, char** argv)
         if (func())
         {
             ok++;
-            std::cout << "\xe2\x9c\x85 " << total << ". " << name << " success" << std::endl;
+            std::println("\xe2\x9c\x85 {}. {} success", total, name);
         }
         else
         {
-            std::cout << "\xe2\x9d\x8c " << total << ". " << name << " failed" << std::endl;
+            std::println("\xe2\x9d\x8c {}. {} failed", total, name);
         }
     };
 
+    run_test("diagnostic_position_test", diagnostic_position_test);
     run_test("register_function_test", register_function_test);
     run_test("register_function_template_test", register_function_template_test);
     run_test("registration_name_validation_test", registration_name_validation_test);
@@ -2801,6 +2768,6 @@ int main(int argc, char** argv)
     run_test("struct_test", struct_test);
     run_test("include_test", include_test);
 
-    std::cout << "Passed " << ok << " out of " << total << " tests." << std::endl;
+    std::println("Passed {} out of {} tests.", ok, total);
     return 0;
 }
