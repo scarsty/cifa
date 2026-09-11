@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include <any>
 #include <array>
+#include <concepts>
 #include <cstdint>
 #include <cmath>
 #include <deque>
@@ -15,6 +16,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <typeindex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -24,24 +26,6 @@ namespace cifa
 {
 struct CalUnit;
 class Cifa;
-
-enum class ValueType
-{
-    Empty,
-    Auto,
-    Void,
-    Int,
-    Float,
-    Double,
-    Bool,
-    Char,
-    String,
-    Array,
-    Map,
-    Struct,
-    NoValue,
-    Dynamic,
-};
 
 struct Object
 {
@@ -53,64 +37,66 @@ struct Object
     Object(double v)
     {
         value = v;
-        stored_type = ValueType::Double;
     }
 
     Object(double v, const std::string& t)
     {
         value = v;
-        stored_type = ValueType::Double;
         type1 = t;
     }
 
     Object(float v)
     {
-        value = v;
-        stored_type = ValueType::Float;
+        value = static_cast<double>(v);
     }
 
     Object(float v, const std::string& t)
     {
-        value = v;
-        stored_type = ValueType::Float;
+        value = static_cast<double>(v);
         type1 = t;
     }
 
     Object(const std::string& str)
     {
         value = str;
-        stored_type = ValueType::String;
     }
 
     Object(const std::string& str, const std::string& t)
     {
         value = str;
-        stored_type = ValueType::String;
         type1 = t;
     }
 
-    template <typename T, typename std::enable_if<std::is_arithmetic_v<std::decay_t<T>>
-        && !std::is_same_v<std::decay_t<T>, double>
-        && !std::is_same_v<std::decay_t<T>, float>
-        && !std::is_same_v<std::decay_t<T>, int>
-        && !std::is_same_v<std::decay_t<T>, bool>
-        && !std::is_same_v<std::decay_t<T>, char>, int>::type = 0>
+    template <typename T>
+        requires ((std::integral<std::decay_t<T>> || std::floating_point<std::decay_t<T>>)
+            && !std::same_as<std::decay_t<T>, double>
+            && !std::same_as<std::decay_t<T>, float>
+            && !std::same_as<std::decay_t<T>, int>
+            && !std::same_as<std::decay_t<T>, bool>
+            && !std::same_as<std::decay_t<T>, char>)
     Object(T v)
     {
         if constexpr (std::is_integral_v<std::decay_t<T>>)
         {
-            value = static_cast<std::int32_t>(v);
-            stored_type = ValueType::Int;
+            if constexpr (std::is_unsigned_v<std::decay_t<T>>)
+            {
+                if (v > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    report_runtime_error("integer value out of range", this);
+                    return;
+                }
+            }
+            value = static_cast<std::int64_t>(v);
         }
         else
         {
             value = static_cast<double>(v);
-            stored_type = ValueType::Double;
         }
     }
 
-    template <typename T, typename std::enable_if<!std::is_same_v<std::decay_t<T>, Object>
-        && !std::is_arithmetic_v<std::decay_t<T>>, int>::type = 0>
+    template <typename T>
+        requires (!std::same_as<std::decay_t<T>, Object>
+            && !std::integral<std::decay_t<T>> && !std::floating_point<std::decay_t<T>>)
     Object(const T& v)
     {
         value = v;
@@ -118,20 +104,17 @@ struct Object
 
     Object(int v)
     {
-        value = static_cast<std::int32_t>(v);
-        stored_type = ValueType::Int;
+        value = static_cast<std::int64_t>(v);
     }
 
     Object(bool v)
     {
         value = v;
-        stored_type = ValueType::Bool;
     }
 
     Object(char v)
     {
-        value = v;
-        stored_type = ValueType::Char;
+        value = static_cast<std::int64_t>(v);
     }
 
     operator bool() const { return toDouble() != 0; }
@@ -144,23 +127,15 @@ struct Object
 
     bool toBool() const
     {
-        if (stored_type == ValueType::Bool)
+        if (isType<bool>())
         {
             return std::any_cast<bool>(value);
         }
-        if (stored_type == ValueType::Int)
+        if (isType<std::int64_t>())
         {
-            return std::any_cast<std::int32_t>(value) != 0;
+            return std::any_cast<std::int64_t>(value) != 0;
         }
-        if (stored_type == ValueType::Char)
-        {
-            return std::any_cast<char>(value) != 0;
-        }
-        if (stored_type == ValueType::Float)
-        {
-            return std::any_cast<float>(value) != 0.0f;
-        }
-        if (stored_type == ValueType::Double)
+        if (isType<double>())
         {
             return std::any_cast<double>(value) != 0.0;
         }
@@ -168,43 +143,31 @@ struct Object
         return false;
     }
 
-    int toInt() const { return static_cast<int>(toInt32()); }
-
-    std::int32_t toInt32() const
+    int toInt() const
     {
-        if (stored_type == ValueType::Int)
+        const auto number = toInt64();
+        if (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max())
         {
-            return std::any_cast<std::int32_t>(value);
+            report_conversion_error("C++ int");
+            return 0;
         }
-        if (stored_type == ValueType::Bool)
-        {
-            return std::any_cast<bool>(value) ? 1 : 0;
-        }
-        if (stored_type == ValueType::Char)
-        {
-            return static_cast<std::int32_t>(std::any_cast<char>(value));
-        }
-        if (stored_type == ValueType::Float)
-        {
-            const float number = std::any_cast<float>(value);
-            if (!std::isfinite(number) || number > std::numeric_limits<std::int32_t>::max()
-                || number < std::numeric_limits<std::int32_t>::min())
-            {
-                report_conversion_error("int");
-                return 0;
-            }
-            return static_cast<std::int32_t>(number);
-        }
-        if (stored_type == ValueType::Double)
+        return static_cast<int>(number);
+    }
+
+    std::int64_t toInt64() const
+    {
+        if (isType<std::int64_t>()) { return std::any_cast<std::int64_t>(value); }
+        if (isType<bool>()) { return std::any_cast<bool>(value) ? 1 : 0; }
+        if (isType<double>())
         {
             const double number = std::any_cast<double>(value);
-            if (!std::isfinite(number) || number > std::numeric_limits<std::int32_t>::max()
-                || number < std::numeric_limits<std::int32_t>::min())
+            if (!std::isfinite(number) || number >= 9223372036854775808.0
+                || number < -9223372036854775808.0)
             {
                 report_conversion_error("int");
                 return 0;
             }
-            return static_cast<std::int32_t>(number);
+            return static_cast<std::int64_t>(number);
         }
         report_conversion_error("int");
         return 0;
@@ -212,34 +175,22 @@ struct Object
 
     float toFloat() const
     {
-        if (stored_type == ValueType::Float)
-        {
-            return std::any_cast<float>(value);
-        }
         return static_cast<float>(toDouble());
     }
 
     double toDouble() const
     {
-        if (stored_type == ValueType::Double)
+        if (isType<double>())
         {
             return std::any_cast<double>(value);
         }
-        if (stored_type == ValueType::Float)
+        if (isType<std::int64_t>())
         {
-            return static_cast<double>(std::any_cast<float>(value));
+            return static_cast<double>(std::any_cast<std::int64_t>(value));
         }
-        if (stored_type == ValueType::Int)
-        {
-            return static_cast<double>(std::any_cast<std::int32_t>(value));
-        }
-        if (stored_type == ValueType::Bool)
+        if (isType<bool>())
         {
             return std::any_cast<bool>(value) ? 1.0 : 0.0;
-        }
-        if (stored_type == ValueType::Char)
-        {
-            return static_cast<double>(std::any_cast<char>(value));
         }
         report_conversion_error("double");
         return NAN;
@@ -296,32 +247,23 @@ struct Object
 
     bool isNumber() const
     {
-        return stored_type == ValueType::Int || stored_type == ValueType::Float
-            || stored_type == ValueType::Double || stored_type == ValueType::Bool
-            || stored_type == ValueType::Char;
+        return isInteger() || isType<double>();
     }
 
     bool isInteger() const
     {
-        return stored_type == ValueType::Int || stored_type == ValueType::Bool
-            || stored_type == ValueType::Char;
+        return isType<std::int64_t>() || isType<bool>();
     }
 
     bool isEffectNumber() const { return isNumber() && !std::isnan(toDouble()) && !std::isinf(toDouble()); }
 
     bool hasValue() const { return value.has_value(); }
 
-    const std::vector<Object>& subV() const { return v; }
-
     const std::string& getSpecialType() const { return type1; }
-
-    ValueType getStoredType() const { return stored_type; }
-
-    ValueType getDeclaredType() const { return declared_type; }
 
     const std::string& getDeclaredTypeName() const { return declared_type_name; }
 
-    bool isTyped() const { return type_fixed; }
+    bool isTyped() const { return !declared_type_name.empty(); }
 
     std::type_info const& getType() const { return value.type(); }
 
@@ -336,7 +278,6 @@ private:
     {
         Object result;
         result.value = NoValue{ function_name, std::move(call_frame) };
-        result.stored_type = ValueType::NoValue;
         result.type1 = "NoValue";
         return result;
     }
@@ -393,13 +334,10 @@ private:
     inline static thread_local std::vector<std::function<void(const std::string&, const Object*)>> runtime_error_reporters;
 
     std::any value;
-    ValueType stored_type = ValueType::Empty;
-    ValueType declared_type = ValueType::Dynamic;
+    std::type_index bound_type = typeid(void);
     std::string declared_type_name;
     std::string element_type_name;
-    bool type_fixed = false;
     std::string type1;        //特别的类型，用于Error、break、continue
-    std::vector<Object> v;    //仅用于处理逗号表达式
     std::string name;
     const Object* argument_origin = nullptr;
 };
@@ -541,7 +479,13 @@ private:
         }
         else if constexpr (std::is_integral_v<T>)
         {
-            return static_cast<T>(o.toInt());
+            const auto number = o.toInt64();
+            if (!std::in_range<T>(number))
+            {
+                o.report_conversion_error(typeid(T).name());
+                return T{};
+            }
+            return static_cast<T>(number);
         }
         else if constexpr (std::is_floating_point_v<T>)
         {
@@ -584,7 +528,13 @@ private:
         { "if", "for", "while", "do", "switch", "case" },
     } };
     //类型列表；auto 在初始化或首次赋值时推导，string 为 Cifa 独有类型
-    inline static const std::unordered_set<std::string> types = { "auto", "void", "int", "float", "double", "bool", "string", "char" };
+    struct RegisteredType
+    {
+        std::type_index identity;
+        std::function<Object(const Object&)> convert;
+    };
+    std::unordered_map<std::string, RegisteredType> registered_types;
+    std::unordered_map<std::type_index, std::string> type_names;
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
     inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
     //内置的数组/map方法列表
@@ -674,8 +624,7 @@ public:
 
     static bool is_valid_key(const std::string& key);
     static std::string revise_key(const std::string& key);
-    static ValueType value_type_from_name(const std::string& name);
-    static std::string value_type_name(ValueType type);
+    std::string registered_type_name(const Object& object) const;
 
     bool register_function(const std::string& name, func_type func);
 
@@ -765,9 +714,34 @@ public:
     bool has_runtime_error() const;
 
     //用户可扩展的运算符函数列表
-    std::vector<std::function<Object(const Object&, const Object&)>> user_add, user_sub, user_mul, user_div, user_mod,
-        user_less, user_more, user_less_equal, user_more_equal,
-        user_equal, user_not_equal, user_bit_and, user_bit_or, user_bit_xor, user_logic_and, user_logic_or,
+    template <typename T>
+    bool register_type(const std::string& name)
+    {
+        if (!is_valid_key(name) || registered_types.contains(name) || functions.contains(name)
+            || functions2.contains(name) || global_variables.contains(name) || struct_defs.contains(name))
+        {
+            set_runtime_error("invalid or duplicate type name '" + name + "'");
+            return false;
+        }
+        using Stored = std::conditional_t<std::is_same_v<T, bool>, bool,
+            std::conditional_t<std::is_integral_v<T>, std::int64_t,
+            std::conditional_t<std::is_floating_point_v<T>, double, T>>>;
+        type_names.try_emplace(typeid(Stored), name);
+        registered_types.emplace(name, RegisteredType{typeid(Stored), [](const Object& source) -> Object
+            {
+                if (source.isType<Stored>()) { return source; }
+                if constexpr (std::is_same_v<T, bool>) { return Object(source.toBool()); }
+                else if constexpr (std::is_integral_v<T>) { return Object(source.toInt64()); }
+                else if constexpr (std::is_floating_point_v<T>) { return Object(static_cast<T>(source.toDouble())); }
+                else { return Object(source.to<T>()); }
+            }});
+        return true;
+    }
+
+    using OperatorCallbacks = std::vector<std::function<Object(const Object&, const Object&)>>;
+    OperatorCallbacks user_add, user_sub, user_mul, user_div, user_mod,
+        user_less, user_more, user_less_equal, user_more_equal, user_equal, user_not_equal,
+        user_bit_and, user_bit_or, user_bit_xor, user_logic_and, user_logic_or,
         user_shift_left, user_shift_right;
 
 private:
@@ -872,6 +846,9 @@ private:
     }
 
     //四则运算准许用户增加自定义功能。数值运算优先使用内建类型规则。
+    template <char Symbol, bool Extended = false>
+    Object evaluate_binary(const Object& o1, const Object& o2, OperatorCallbacks& callbacks);
+
     Object add(const Object& o1, const Object& o2);
     Object sub(const Object& o1, const Object& o2);
     Object mul(const Object& o1, const Object& o2);

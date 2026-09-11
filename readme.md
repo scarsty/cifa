@@ -394,7 +394,7 @@ print(myfun(3));
 ```
 可以得到输出为40。
 
-函数返回类型前缀可写也可省略，例如 `void notify() { println("done"); }`。`void` 与 `auto`、`int`、`float`、`double`、`string`、`char` 一样，会在解析时被忽略；它不强制函数无返回值，也不进行返回类型检查。
+函数返回类型前缀可写也可省略，例如 `void notify() { println("done"); }`。注册类型前缀会在返回时执行类型转换；省略类型或使用 `auto` 时保留返回值的真实类型。`void` 保持兼容行为，不强制函数无返回值。
 
 脚本函数当前按参数个数重载，不按参数类型重载，也不进行完整的静态类型检查。参数和返回值仍使用动态 `Object`，不兼容的数值/字符串转换会在运行时报告错误。
 
@@ -753,7 +753,7 @@ string s = "hello" + " " + "world";
 - `to_number("3.14")` → 将字符串转为数值
 
 类型检查：
-- `type(x)` → 返回变量或表达式的类型字符串。内置类型返回 `empty`、`number`、`string`、`array`、`map`；宿主程序注册的自定义对象返回对应的 C++ 类型名。
+- `type(x)` → 返回变量或表达式的类型字符串。内置值返回 `empty`、`int`、`double`、`bool`、`string`、`array`、`map`；注册对象返回规范注册名，未注册对象返回 C++ 类型名。
 
 ### 内置函数汇总
 
@@ -763,7 +763,7 @@ string s = "hello" + " " + "world";
 | `println(...)` | 输出一个或多个值，最后换行 |
 | `to_string(x)` | 将数值转为字符串 |
 | `to_number(s)` | 将字符串转为数值 |
-| `type(x)` | 返回变量或表达式的类型字符串，如 `empty`、`number`、`string`、`array`、`map` |
+| `type(x)` | 返回变量或表达式的类型字符串，如 `empty`、`int`、`double`、`bool`、`string`、`array`、`map` |
 | `size(x)` | 返回数组、map 或字符串的大小 |
 | `pow(x, y)` | x 的 y 次方 |
 | `max(a, b, ...)` | 多个数中的最大值 |
@@ -959,7 +959,28 @@ Cifa 没有使用 yacc/ANTLR 之类的生成器，也不是传统的递归下降
 
 ### 语法上的注意事项
 
-- Cifa的变量定义其实不需要指定类型，但是为了实现“简单C（C++）代码可以直接被Cifa运行”这一目的，auto、int、float、double等类型名会被忽略。- 结构体（struct）名用作类型时同理，声明变量时只需使用结构体名，字段声明中的类型名同样被忽略。- 未经初始化即出现在赋值号右侧的变量值为空，即std::any的`<empty>`，相当于强制要求显式初始化。
+- 未写类型的变量和形参是动态的，可以改变值的类型；写注册类型或 `auto` 的变量是静态的，后续赋值受绑定类型约束。赋值和传参不会继承源变量的静态约束。
+- 普通整数统一保存为 `std::int64_t`，浮点数统一保存为 `double`，布尔值保存为 `bool`。`float` 是 `double` 的兼容别名，`char` 是 `int` 的兼容别名，不保留独立的 float/char 数值表示。
+- `auto` 按右值真实类型绑定；`auto value;` 在首次有效赋值时推导，暂存 `NoValue` 不触发推导。未经初始化的变量在需要读取具体值时报告错误。
+- 整数加减乘和左移按 64 位补码回绕，整数除零、除法溢出、非法移位数量和越界数值转换报告错误。整数之间的算术和比较不经过 double。
+
+### 注册类型与自定义运算
+
+类型应在编译脚本前注册，同名重复注册被拒绝：
+
+```cpp
+cifa::Cifa interpreter;
+interpreter.register_type<std::int64_t>("Index");
+interpreter.register_type<MyObject>("MyObject");
+interpreter.register_parameter("source", MyObject{});
+interpreter.run_script("MyObject value = source; auto copy = source; Index index = 3.9;");
+```
+
+类型注册保存 C++ 类型身份和转换函数，不需要扩展类型枚举。数值注册自动归一化为 int64_t/double；自定义类型默认只允许同类型赋值。同一 C++ 类型的第一个注册名是 `type()` 的规范名称，因此 `Index` 值的规范名仍为 `int`。数组和 map 默认不占用类型关键字，保留原有同名变量语法。
+
+`user_add`、`user_mod`、`user_equal` 等扩展列表仍可使用。回调返回空 `Object()` 表示未匹配并继续尝试下一个回调；返回任何有值对象（包括数字和 bool）表示成功。旧回调若使用数值作为未匹配标记，需要改为空对象。自定义对象与数字的混合运算可以进入回调，内置纯数值运算优先。脚本 `&&`、`||` 先将左操作数转换为 bool 并进行短路判断；未短路时才进入对应二元运算分派，因此不是无条件调用自定义逻辑回调。
+
+`Object::subV()` 及其逗号结果缓存已移除。逗号表达式仍按顺序求值左右操作数，保持原有空结果语义，不保存两个操作数的结果副本。
 - 函数调用时，a.func(c)等价于func(a, c)。但对于内置数组/map方法（push_back、erase等），仅能通过 `.` 语法调用，不能写成 `push_back(arr, x)` 的形式——这是因为内置方法需要直接修改原始变量，而普通函数调用传的是值的副本，无法修改原始对象。
 - 自加算符不支持++++或----这种写法，请不要瞎折腾。
 - 没有goto。

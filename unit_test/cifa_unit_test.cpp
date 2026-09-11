@@ -318,7 +318,7 @@ bool builtin_type_function_test()
         return type(empty_value) == "int"
             && type(pending_value) == "empty"
             && type(1) == "int"
-            && type(1.0f) == "float"
+            && type(1.0f) == "double"
             && type(1.0) == "double"
             && type(true) == "bool"
             && type("abc") == "string"
@@ -1006,7 +1006,7 @@ bool typed_numeric_storage_test()
         bool u = 0.0;
         return i == 1
             && type(i) == "int"
-            && type(f) == "float"
+            && type(f) == "double"
             && type(d) == "double"
             && type(t) == "bool"
             && type(abs(-3)) == "int"
@@ -1042,7 +1042,7 @@ bool auto_type_inference_test()
         i = 3.9;
         b = 0.0;
         return type(i) == "int" && i == 3
-            && type(f) == "float" && type(d) == "double"
+            && type(f) == "double" && type(d) == "double"
             && type(b) == "bool" && !b
             && first == 1 && second == 2
             && last_type == "double" && sum == 4.0
@@ -1068,8 +1068,8 @@ bool c_style_cast_test()
         bool u = (bool)0.0;
         float precision = 0.1;
         return b == 1 && c == -3 && e == 3 && g == 4 && t && !u
-            && precision != 0.1
-            && type(b) == "int" && type(f) == "float"
+            && precision == 0.1
+            && type(b) == "int" && type(f) == "double"
             && type(d) == "double" && type(t) == "bool";
     )");
     return o.hasValue() && o.toBool();
@@ -1085,7 +1085,7 @@ bool integer_arithmetic_test()
             && 1.0f / 2.0f == 0.5f
             && type(5 / 2) == "int"
             && type(5 / 2.0) == "double"
-            && type(1.0f / 2.0f) == "float";
+            && type(1.0f / 2.0f) == "double";
     )");
     return o.hasValue() && o.toBool();
 }
@@ -1127,7 +1127,7 @@ bool typed_array_and_struct_test()
             && type(matrix[0][0]) == "int"
             && type(s) == "S"
             && type(s.i) == "int"
-            && type(s.f) == "float"
+            && type(s.f) == "double"
             && type(s.b) == "bool";
     )");
     return o.hasValue() && o.toBool();
@@ -1161,6 +1161,120 @@ bool typed_conversion_error_test()
         {
             return false;
         }
+    }
+    return true;
+}
+
+struct RegisteredTestValue
+{
+    int number = 7;
+};
+
+bool registered_type_binding_test()
+{
+    Cifa c;
+    c.set_output_error(false);
+    if (!c.register_type<RegisteredTestValue>("Box") || !c.register_type<std::int64_t>("Index")) { return false; }
+    c.register_parameter("original", RegisteredTestValue{});
+    c.register_function("inspect_box", [](ObjectVector& args) { return Object(args[0].to<RegisteredTestValue>().number); });
+    auto ast = c.compile_script(R"(
+        Box copy = original;
+        auto inferred = original;
+        Box identity(Box value) { return value; }
+        fixed(int value) { value = 3.9; return value; }
+        loose(value) { value = 3.9; return value; }
+        int source = 1;
+        auto pending;
+        empty_function() {}
+        pending = empty_function();
+        pending = 4;
+        pending = 5.9;
+        dynamic = source;
+        dynamic = "changed";
+        Index index = 3.9;
+        return inspect_box(identity(copy)) == 7 && inspect_box(inferred) == 7
+            && type(inferred) == "Box" && type(index) == "int" && index == 3
+            && fixed(1) == 3 && loose(source) == 3.9 && pending == 5
+            && dynamic == "changed";
+    )");
+    if (!ast.valid()) { std::println("{}", c.get_errors_str()); return false; }
+    for (int execution = 0; execution < 2; ++execution)
+    {
+        const auto result = c.run(ast);
+        if (!result.toBool() || c.has_runtime_error())
+        {
+            std::println("registered type execution {}: {}", execution, c.get_runtime_error());
+            return false;
+        }
+    }
+    c.run_script("inferred = 1;");
+    if (!c.has_runtime_error()) { return false; }
+    Cifa named_type;
+    named_type.set_output_error(false);
+    if (!named_type.register_type<RegisteredTestValue>("dynamic")) { return false; }
+    named_type.run_script("dynamic value = 1;");
+    if (!named_type.has_runtime_error()
+        || named_type.get_runtime_error().find("cannot convert value to 'dynamic'") == std::string::npos) { return false; }
+    Cifa comma;
+    auto comma_result = comma.run_script("count = 0; unused = (count = 1, count += 2); return count;");
+    if (comma.has_runtime_error() || comma.has_error() || comma_result.toInt64() != 3) { return false; }
+    Cifa invalid;
+    invalid.set_output_error(false);
+    return !invalid.register_type<int>("bad-name") && invalid.has_runtime_error();
+}
+
+bool int64_storage_test()
+{
+    Cifa c;
+    c.register_parameter("wide", std::int64_t{9007199254740993LL});
+    c.register_function("identity64", +[](std::int64_t value) { return value; });
+    auto result = c.run_script(R"(
+        auto exact = 9007199254740993;
+        int largest = 9223372036854775807;
+        int smallest = -largest - 1;
+        return exact == wide && identity64(exact) == wide && exact - 9007199254740992 == 1
+            && max(exact, exact - 1) == exact && min(exact, exact - 1) == exact - 1
+            && largest + 1 == smallest && smallest % -1 == 0
+            && (1 << 40) == 1099511627776 && (1099511627776 >> 40) == 1
+            && sprintf("%lld", exact) == "9007199254740993"
+            && format("{}", exact) == "9007199254740993"
+            && type(1.0f) == "double";
+    )");
+    if (!result.toBool() || c.has_runtime_error() || !Object(1).isType<std::int64_t>()
+        || !Object(1.0f).isType<double>()) { return false; }
+    c.set_output_error(false);
+    c.run_script("int overflow = 9223372036854775808.0;");
+    if (!c.has_runtime_error()) { return false; }
+    c.run_script("return 1 << 64;");
+    return c.has_runtime_error();
+}
+
+bool custom_operator_dispatch_test()
+{
+    using CallbackList = std::vector<std::function<Object(const Object&, const Object&)>>;
+    const std::pair<const char*, CallbackList Cifa::*> operations[] = {
+        {"+", &Cifa::user_add}, {"-", &Cifa::user_sub}, {"*", &Cifa::user_mul}, {"/", &Cifa::user_div},
+        {"%", &Cifa::user_mod}, {"&", &Cifa::user_bit_and}, {"|", &Cifa::user_bit_or}, {"^", &Cifa::user_bit_xor},
+        {"<<", &Cifa::user_shift_left}, {">>", &Cifa::user_shift_right}, {"==", &Cifa::user_equal},
+        {"!=", &Cifa::user_not_equal}, {"<", &Cifa::user_less}, {">", &Cifa::user_more},
+        {"<=", &Cifa::user_less_equal}, {">=", &Cifa::user_more_equal}
+    };
+    for (const auto& [symbol, callbacks] : operations)
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.register_parameter("host", RegisteredTestValue{});
+        int calls = 0;
+        (c.*callbacks).push_back([](const Object&, const Object&) { return Object(); });
+        (c.*callbacks).push_back([&calls](const Object&, const Object&) { ++calls; return Object(true); });
+        for (const auto& operands : {std::pair{"host", "2"}, std::pair{"2", "host"}})
+        {
+            auto result = c.run_script(std::format("return {} {} {};", operands.first, symbol, operands.second));
+            if (!result.isType<bool>() || !result.toBool() || c.has_runtime_error()) { return false; }
+        }
+        if (calls != 2) { return false; }
+        c.run_script(std::format("empty_function() {{}} unused = empty_function() {} 1; return 7;", symbol));
+        if (!c.has_runtime_error() || c.get_runtime_error().find("has no return value") == std::string::npos) { return false; }
     }
     return true;
 }
@@ -2928,6 +3042,9 @@ int main(int argc, char** argv)
     run_test("typed_function_conversion_test", typed_function_conversion_test);
     run_test("typed_array_and_struct_test", typed_array_and_struct_test);
     run_test("typed_conversion_error_test", typed_conversion_error_test);
+    run_test("registered_type_binding_test", registered_type_binding_test);
+    run_test("int64_storage_test", int64_storage_test);
+    run_test("custom_operator_dispatch_test", custom_operator_dispatch_test);
     run_test("empty_statement_test", empty_statement_test);
     run_test("else_if_chain_test", else_if_chain_test);
     run_test("multi_dimensional_array_test", multi_dimensional_array_test);
