@@ -312,10 +312,15 @@ bool builtin_type_function_test()
     Cifa c;
     auto o = c.run_script(R"(
         int empty_value;
+        auto pending_value;
         arr = {1, 2};
         m["x"] = 1;
-        return type(empty_value) == "empty"
-            && type(1) == "number"
+        return type(empty_value) == "int"
+            && type(pending_value) == "empty"
+            && type(1) == "int"
+            && type(1.0f) == "float"
+            && type(1.0) == "double"
+            && type(true) == "bool"
             && type("abc") == "string"
             && type(arr) == "array"
             && type(m) == "map";
@@ -977,7 +982,7 @@ bool register_map_test()
 
 bool type_promotion_test()
 {
-    //不区分整数和浮点数，此测试不增加特别处理不可能通过
+    // int/int 保持整数除法，混合 double 后提升为 double。
     Cifa c;
     std::string script = R"(
         int a = 5;
@@ -988,6 +993,176 @@ bool type_promotion_test()
     )";
     auto o = c.run_script(script);
     return std::fabs(o.toDouble() - 4.5) < 1e-9;
+}
+
+bool typed_numeric_storage_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        int i = 1.9;
+        float f = 1.9;
+        double d = 1.9f;
+        bool t = 0.5;
+        bool u = 0.0;
+        return i == 1
+            && type(i) == "int"
+            && type(f) == "float"
+            && type(d) == "double"
+            && type(t) == "bool"
+            && type(abs(-3)) == "int"
+            && type(max(1, 2)) == "int"
+            && type(max(1, 2.0)) == "double"
+            && t && !u;
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool auto_type_inference_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        auto i = 1;
+        auto f = 1.5f;
+        auto d = 1.5;
+        auto b = true;
+        int first = 1, second = 2.9;
+        auto values = {1.5, 2.5};
+        auto last_type = "";
+        auto sum = 0.0;
+        auto pending;
+        pending = 2.5;
+        int source = 7;
+        untyped = source;
+        untyped = "changed";
+        for (auto value : values) {
+            last_type = type(value);
+            sum += value;
+        }
+        string s = "abc";
+        i = 3.9;
+        b = 0.0;
+        return type(i) == "int" && i == 3
+            && type(f) == "float" && type(d) == "double"
+            && type(b) == "bool" && !b
+            && first == 1 && second == 2
+            && last_type == "double" && sum == 4.0
+            && type(pending) == "double" && pending == 2.5
+            && untyped == "changed"
+            && type(s) == "string" && s + "d" == "abcd";
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool c_style_cast_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        double a = 1.34;
+        int b = (int)a;
+        int c = (int)-3.9;
+        int e = (int)1.9 + 2;
+        int g = (int)(1.9 + 2.1);
+        float f = (float)a;
+        double d = (double)3;
+        bool t = (bool)2.5;
+        bool u = (bool)0.0;
+        float precision = 0.1;
+        return b == 1 && c == -3 && e == 3 && g == 4 && t && !u
+            && precision != 0.1
+            && type(b) == "int" && type(f) == "float"
+            && type(d) == "double" && type(t) == "bool";
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool integer_arithmetic_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        return 5 / 2 == 2
+            && 5 % 2 == 1
+            && 5 / 2.0 == 2.5
+            && 1.0f / 2.0f == 0.5f
+            && type(5 / 2) == "int"
+            && type(5 / 2.0) == "double"
+            && type(1.0f / 2.0f) == "float";
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool typed_function_conversion_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        int truncate(double x) { return x; }
+        double half(int x) { return x / 2; }
+        int add_int(double a, int b) { return a + b; }
+        return truncate(3.9) == 3
+            && half(3) == 1.0
+            && add_int(1.9, 2.9) == 3
+            && type(truncate(3.9)) == "int"
+            && type(half(3)) == "double";
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool typed_array_and_struct_test()
+{
+    Cifa c;
+    auto o = c.run_script(R"(
+        int a[2];
+        a[0] = 3.9;
+        a[1] = -2.9;
+        int matrix[2][2];
+        matrix[0][0] = 3.9;
+        struct S { int i; float f; bool b; };
+        S s;
+        s.i = 1.9;
+        s.f = 1.9;
+        s.b = 2;
+        return a[0] == 3 && a[1] == -2
+            && matrix[0][0] == 3
+            && s.i == 1 && s.b
+            && type(a[0]) == "int"
+            && type(matrix[0][0]) == "int"
+            && type(s) == "S"
+            && type(s.i) == "int"
+            && type(s.f) == "float"
+            && type(s.b) == "bool";
+    )");
+    return o.hasValue() && o.toBool();
+}
+
+bool typed_conversion_error_test()
+{
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("int value = \"not a number\";");
+        if (!c.has_runtime_error() || c.get_runtime_error().find("cannot convert value to 'int'") == std::string::npos)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("double value = (double)\"not a number\";");
+        if (!c.has_runtime_error() || c.get_runtime_error().find("cannot convert value to 'double'") == std::string::npos)
+        {
+            return false;
+        }
+    }
+    {
+        Cifa c;
+        c.set_output_error(false);
+        c.run_script("return 1 / 0;");
+        if (!c.has_runtime_error() || c.get_runtime_error().find("integer division by zero") == std::string::npos)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool empty_statement_test()
@@ -2695,11 +2870,11 @@ int main(int argc, char** argv)
         if (func())
         {
             ok++;
-            std::println("\xe2\x9c\x85 {}. {} success", total, name);
+            std::println("[PASS] {}. {} success", total, name);
         }
         else
         {
-            std::println("\xe2\x9d\x8c {}. {} failed", total, name);
+            std::println("[FAIL] {}. {} failed", total, name);
         }
     };
 
@@ -2746,6 +2921,13 @@ int main(int argc, char** argv)
     run_test("register_vector_test", register_vector_test);
     run_test("register_map_test", register_map_test);
     run_test("type_promotion_test", type_promotion_test);
+    run_test("typed_numeric_storage_test", typed_numeric_storage_test);
+    run_test("auto_type_inference_test", auto_type_inference_test);
+    run_test("c_style_cast_test", c_style_cast_test);
+    run_test("integer_arithmetic_test", integer_arithmetic_test);
+    run_test("typed_function_conversion_test", typed_function_conversion_test);
+    run_test("typed_array_and_struct_test", typed_array_and_struct_test);
+    run_test("typed_conversion_error_test", typed_conversion_error_test);
     run_test("empty_statement_test", empty_statement_test);
     run_test("else_if_chain_test", else_if_chain_test);
     run_test("multi_dimensional_array_test", multi_dimensional_array_test);

@@ -1,10 +1,12 @@
 ﻿#include "Cifa.h"
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <print>
 #include <sstream>
 
@@ -45,16 +47,26 @@ static std::unordered_set<std::string> make_token_set(const std::vector<std::vec
     return tokens;
 }
 
-static bool parse_number_literal(const std::string& text, double& value)
+static bool parse_number_literal(const std::string& text, Object& value)
 {
-    const bool is_hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
-    const bool is_binary = text.size() > 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B');
-    const bool is_octal = text.size() > 1 && text[0] == '0'
-        && text.find_first_of(".eE") == std::string::npos;
+    std::string normalized = text;
+    const bool has_hex_prefix = normalized.size() > 2 && normalized[0] == '0'
+        && (normalized[1] == 'x' || normalized[1] == 'X');
+    const bool is_float_literal = (normalized.ends_with('f') || normalized.ends_with('F'))
+        && (!has_hex_prefix || normalized.find_first_of(".pP") != std::string::npos);
+    if (is_float_literal)
+    {
+        normalized.pop_back();
+    }
+
+    const bool is_hex = normalized.size() > 2 && normalized[0] == '0' && (normalized[1] == 'x' || normalized[1] == 'X');
+    const bool is_binary = normalized.size() > 2 && normalized[0] == '0' && (normalized[1] == 'b' || normalized[1] == 'B');
+    const bool is_octal = normalized.size() > 1 && normalized[0] == '0'
+        && normalized.find_first_of(".eE") == std::string::npos;
 
     if (is_hex || is_binary || is_octal)
     {
-        const char* digits = text.c_str() + (is_hex || is_binary ? 2 : 0);
+        const char* digits = normalized.c_str() + (is_hex || is_binary ? 2 : 0);
         const int base = is_hex ? 16 : (is_binary ? 2 : 8);
         char* end = nullptr;
         errno = 0;
@@ -63,14 +75,70 @@ static bool parse_number_literal(const std::string& text, double& value)
         {
             return false;
         }
-        value = static_cast<double>(integer);
+        value = Object(static_cast<std::int32_t>(integer));
+        return true;
+    }
+
+    const bool has_fraction_or_exponent = normalized.find_first_of(".eE") != std::string::npos;
+    if (!has_fraction_or_exponent)
+    {
+        char* end = nullptr;
+        errno = 0;
+        const auto integer = std::strtoll(normalized.c_str(), &end, 10);
+        if (errno == ERANGE || end == normalized.c_str() || *end != '\0')
+        {
+            return false;
+        }
+        value = Object(static_cast<std::int32_t>(integer));
         return true;
     }
 
     char* end = nullptr;
     errno = 0;
-    value = std::strtod(text.c_str(), &end);
-    return errno != ERANGE && end != text.c_str() && *end == '\0';
+    const double parsed = std::strtod(normalized.c_str(), &end);
+    if (errno == ERANGE || end == normalized.c_str() || *end != '\0')
+    {
+        return false;
+    }
+    value = is_float_literal ? Object(static_cast<float>(parsed)) : Object(parsed);
+    return true;
+}
+
+static std::string object_to_display_string(const Object& value)
+{
+    switch (value.getStoredType())
+    {
+    case ValueType::Int: return std::format("{}", value.toInt32());
+    case ValueType::Float: return std::format("{}", value.toFloat());
+    case ValueType::Double: return std::format("{}", value.toDouble());
+    case ValueType::Bool: return value.toBool() ? "true" : "false";
+    case ValueType::Char: return std::string(1, value.to<char>());
+    case ValueType::String: return value.toString();
+    default: return {};
+    }
+}
+
+static std::int32_t wrap_int32(std::int64_t value)
+{
+    return std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(value));
+}
+
+static ValueType common_numeric_type(ValueType left, ValueType right)
+{
+    if (left == ValueType::Double || right == ValueType::Double)
+    {
+        return ValueType::Double;
+    }
+    if (left == ValueType::Float || right == ValueType::Float)
+    {
+        return ValueType::Float;
+    }
+    return ValueType::Int;
+}
+
+static ValueType common_numeric_type(const Object& left, const Object& right)
+{
+    return common_numeric_type(left.getStoredType(), right.getStoredType());
 }
 
 //构造函数：注册内置函数（print, println, 数学函数等）
@@ -82,7 +150,7 @@ Cifa::Cifa()
     {
         if (d1.isNumber())
         {
-            std::print("{}", d1.toDouble());
+            std::print("{}", object_to_display_string(d1));
             return true;
         }
         if (d1.isType<std::string>())
@@ -124,7 +192,14 @@ Cifa::Cifa()
                 return Object("");
             }
             std::ostringstream stream;
-            stream << d[0].toDouble();
+            if (d[0].isNumber())
+            {
+                stream << object_to_display_string(d[0]);
+            }
+            else
+            {
+                stream << d[0].toString();
+            }
             return Object(stream.str());
         });
     register_function("to_number", [](ObjectVector& d)
@@ -137,9 +212,26 @@ Cifa::Cifa()
         });
     register_function("type", [](ObjectVector& d)
         {
-            if (d.empty() || !d[0].hasValue())
+            if (d.empty())
             {
                 return Object(std::string("empty"));
+            }
+            if (!d[0].hasValue())
+            {
+                if (d[0].isTyped() && d[0].getDeclaredType() != ValueType::Dynamic
+                    && d[0].getDeclaredType() != ValueType::Auto)
+                {
+                    if (d[0].getDeclaredType() == ValueType::Struct && !d[0].getDeclaredTypeName().empty())
+                    {
+                        return Object(d[0].getDeclaredTypeName());
+                    }
+                    return Object(value_type_name(d[0].getDeclaredType()));
+                }
+                return Object(std::string("empty"));
+            }
+            if (d[0].getDeclaredType() == ValueType::Struct && !d[0].getDeclaredTypeName().empty())
+            {
+                return Object(d[0].getDeclaredTypeName());
             }
             if (!d[0].getSpecialType().empty())
             {
@@ -147,7 +239,7 @@ Cifa::Cifa()
             }
             if (d[0].isNumber())
             {
-                return Object(std::string("number"));
+                return Object(value_type_name(d[0].getStoredType()));
             }
             if (d[0].isType<std::string>())
             {
@@ -189,10 +281,7 @@ Cifa::Cifa()
     auto ifv = [](ObjectVector& x) -> Object
     {
         if (x.size() != 3) { return cifa::Object(); }
-        int x0 = x[0];
-        double x1 = x[1];
-        double x2 = x[2];
-        return (x0) ? x1 : x2;
+        return x[0].toBool() ? x[1] : x[2];
     };
     register_function("ifv", ifv);
     register_function("ifvalue", ifv);
@@ -204,16 +293,23 @@ Cifa::Cifa()
             {
                 return x[0];
             }
-            double max_val = x[0];
-            for (int i = 1; i < x.size(); i++)
+            ValueType result_type = x[0].getStoredType();
+            double max_val = x[0].toDouble();
+            size_t best = 0;
+            for (size_t i = 1; i < x.size(); i++)
             {
-                double v = x[i];
+                if (!x[i].isNumber()) { return x[i].to<double>(); }
+                result_type = common_numeric_type(result_type, x[i].getStoredType());
+                const double v = x[i].toDouble();
                 if (max_val < v)
                 {
                     max_val = v;
+                    best = i;
                 }
             }
-            return max_val;
+            if (result_type == ValueType::Double) { return Object(x[best].toDouble()); }
+            if (result_type == ValueType::Float) { return Object(x[best].toFloat()); }
+            return Object(x[best].toInt32());
         });
 
     register_function("min", [](ObjectVector& x) -> Object
@@ -223,16 +319,23 @@ Cifa::Cifa()
             {
                 return x[0];
             }
-            double min_val = x[0];
-            for (int i = 1; i < x.size(); i++)
+            ValueType result_type = x[0].getStoredType();
+            double min_val = x[0].toDouble();
+            size_t best = 0;
+            for (size_t i = 1; i < x.size(); i++)
             {
-                double v = x[i];
+                if (!x[i].isNumber()) { return x[i].to<double>(); }
+                result_type = common_numeric_type(result_type, x[i].getStoredType());
+                const double v = x[i].toDouble();
                 if (min_val > v)
                 {
                     min_val = v;
+                    best = i;
                 }
             }
-            return min_val;
+            if (result_type == ValueType::Double) { return Object(x[best].toDouble()); }
+            if (result_type == ValueType::Float) { return Object(x[best].toFloat()); }
+            return Object(x[best].toInt32());
         });
     register_function("random", [this](ObjectVector& x) -> Object
         {
@@ -295,13 +398,13 @@ Cifa::Cifa()
         }
         else if (tc == 'd' || tc == 'i')
         {
-            snprintf(buf, sizeof(buf), (base + (tc == 'd' ? "lld" : "lli")).c_str(), (long long)arg.toDouble());
+            snprintf(buf, sizeof(buf), (base + (tc == 'd' ? "lld" : "lli")).c_str(), static_cast<long long>(arg.toInt32()));
         }
         else if (tc == 'u' || tc == 'o' || tc == 'x' || tc == 'X')
         {
-            snprintf(buf, sizeof(buf), (base + "ll" + tc).c_str(), (unsigned long long)arg.toDouble());
+            snprintf(buf, sizeof(buf), (base + "ll" + tc).c_str(), static_cast<unsigned long long>(arg.toInt32()));
         }
-        else    // %f %e %E %g %G %a（cifa 数值均为 double，忽略 L 修饰符）
+        else    // %f %e %E %g %G %a；整数类型和 float 会按 C 的默认提升传给 printf
         {
             snprintf(buf, sizeof(buf), (base + tc).c_str(), arg.toDouble());
         }
@@ -367,7 +470,7 @@ Cifa::Cifa()
         });
 
     // 将 Object 转为字符串
-    // fspec 为空：用 std::format "{}"（编译期字面量），double 自动省略多余零（如 42.0→4 2）
+    // fspec 为空：按对象真实数值类型格式化
     // fspec 非空：格式字串是运行时値，必须用 std::vformat；按末尾字符选择传入的原生类型
     auto format_sub = [](const Object& arg, const std::string& fspec = { }) -> std::string
     {
@@ -375,8 +478,19 @@ Cifa::Cifa()
         {
             if (arg.isNumber())
             {
-                double v = arg.toDouble();
-                return std::format("{}", v);
+                if (arg.getStoredType() == ValueType::Int)
+                {
+                    return std::format("{}", arg.toInt32());
+                }
+                if (arg.getStoredType() == ValueType::Float)
+                {
+                    return std::format("{}", arg.toFloat());
+                }
+                if (arg.getStoredType() == ValueType::Bool)
+                {
+                    return arg.toBool() ? "true" : "false";
+                }
+                return std::format("{}", arg.toDouble());
             }
             std::string s = arg.toString();
             return std::format("{}", s);
@@ -390,7 +504,7 @@ Cifa::Cifa()
         }
         if (std::string_view("diouxXbB").find(last) != std::string_view::npos)
         {
-            long long iv = (long long)arg.toDouble();
+            long long iv = arg.toInt32();
             return std::vformat(fmt_str, std::make_format_args(iv));
         }
         double dv = arg.toDouble();
@@ -476,9 +590,31 @@ Cifa::Cifa()
             return Object(result);
         });
 
+    register_function("abs", [](ObjectVector& x) -> Object
+        {
+            if (x.size() != 1) { return Object(); }
+            if (x[0].isInteger())
+            {
+                const auto value = x[0].toInt32();
+                if (value == std::numeric_limits<std::int32_t>::min())
+                {
+                    return Object();
+                }
+                return Object(value < 0 ? -value : value);
+            }
+            if (x[0].getStoredType() == ValueType::Float)
+            {
+                return Object(std::fabs(x[0].toFloat()));
+            }
+            if (x[0].getStoredType() == ValueType::Double)
+            {
+                return Object(std::fabs(x[0].toDouble()));
+            }
+            return x[0].to<double>();
+        });
+
 #define REGISTER_MATH1(func) register_function(#func, static_cast<double (*)(double)>(&std::func))
 #define REGISTER_MATH2(func) register_function(#func, static_cast<double (*)(double, double)>(&std::func))
-    REGISTER_MATH1(abs);
     REGISTER_MATH1(sqrt);
     REGISTER_MATH1(cbrt);
     REGISTER_MATH1(round);
@@ -609,7 +745,7 @@ FunctionOverloads* Cifa::find_script_function(const std::string& name)
     return function != functions2.end() ? &function->second : nullptr;
 }
 
-const std::vector<std::string>* Cifa::find_struct_definition(const std::string& name) const
+const std::vector<StructField>* Cifa::find_struct_definition(const std::string& name) const
 {
     if (compilation_ast.compiling)
     {
@@ -713,7 +849,16 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
         auto& arr = obj.ref<std::vector<Object>>();
         if (method_name == "push_back")
         {
-            for (auto& a : args) { arr.push_back(eval_scoped(a, scopes)); }
+            for (auto& a : args)
+            {
+                Object value = eval_scoped(a, scopes);
+                if (!obj.element_type_name.empty())
+                {
+                    value = convert_object_type(value, obj.element_type_name, &a);
+                    if (has_runtime_error()) { return Object(); }
+                }
+                arr.push_back(std::move(value));
+            }
             return Object(double(arr.size()));
         }
         if (method_name == "pop_back")
@@ -723,7 +868,11 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
         }
         if (method_name == "resize")
         {
-            if (!args.empty()) { arr.resize(size_t(eval_scoped(args[0], scopes).toInt())); }
+            if (!args.empty())
+            {
+                arr.resize(size_t(eval_scoped(args[0], scopes).toInt()));
+                if (!obj.element_type_name.empty()) { set_array_element_type(obj, obj.element_type_name); }
+            }
             return Object(double(arr.size()));
         }
         if (method_name == "insert")
@@ -739,7 +888,13 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 {
                     idx = (int)arr.size();
                 }
-                arr.insert(arr.begin() + idx, eval_scoped(args[1], scopes));
+                Object value = eval_scoped(args[1], scopes);
+                if (!obj.element_type_name.empty())
+                {
+                    value = convert_object_type(value, obj.element_type_name, &args[1]);
+                    if (has_runtime_error()) { return Object(); }
+                }
+                arr.insert(arr.begin() + idx, std::move(value));
             }
             return Object(double(arr.size()));
         }
@@ -869,22 +1024,44 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     {
         if (c.v.size() == 1)
         {
-            if (c.str == "+") { return eval_scoped(c.v[0], scopes); }
-            if (c.str == "-") { return sub(Object(0.0), eval_scoped(c.v[0], scopes)); }
-            if (c.str == "~") { return double(~int(eval_scoped(c.v[0], scopes))); }
-            if (c.str == "!") { return !eval_scoped(c.v[0], scopes); }
-            if (c.str == "++") { return get_parameter_for_assign(c.v[0], scopes) = add(get_parameter(c.v[0], scopes), Object(1)); }
-            if (c.str == "--") { return get_parameter_for_assign(c.v[0], scopes) = add(get_parameter(c.v[0], scopes), Object(-1)); }
+            if (c.str == "+")
+            {
+                auto value = eval_scoped(c.v[0], scopes);
+                if (value.getStoredType() == ValueType::Bool || value.getStoredType() == ValueType::Char)
+                {
+                    return Object(value.toInt32());
+                }
+                return value;
+            }
+            if (c.str == "-") { return sub(Object(0), eval_scoped(c.v[0], scopes)); }
+            if (c.str == "~") { return Object(~eval_scoped(c.v[0], scopes).toInt32()); }
+            if (c.str == "!") { return Object(!eval_scoped(c.v[0], scopes).toBool()); }
+            if (c.str == "++")
+            {
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                auto value = add(target, Object(1));
+                return assign_object_value(target, std::move(value), c.v[0], &c);
+            }
+            if (c.str == "--")
+            {
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                auto value = sub(target, Object(1));
+                return assign_object_value(target, std::move(value), c.v[0], &c);
+            }
             if (c.str == "()++")
             {
-                auto v = get_parameter(c.v[0], scopes);
-                get_parameter_for_assign(c.v[0], scopes) = add(get_parameter(c.v[0], scopes), Object(1));
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                auto v = target;
+                auto value = add(target, Object(1));
+                assign_object_value(target, std::move(value), c.v[0], &c);
                 return v;
             }
             if (c.str == "()--")
             {
-                auto v = get_parameter(c.v[0], scopes);
-                get_parameter_for_assign(c.v[0], scopes) = add(get_parameter(c.v[0], scopes), Object(-1));
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                auto v = target;
+                auto value = sub(target, Object(1));
+                assign_object_value(target, std::move(value), c.v[0], &c);
                 return v;
             }
         }
@@ -984,20 +1161,30 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 //空花括号 {} 在赋值右侧视为空数组字面量
                 if (c.v[1].type == CalUnitType::Union && c.v[1].str == "{}" && c.v[1].v.empty())
                 {
-                    return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = Object(std::vector<Object>{ });
+                    auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                    return assign_object_value(target, Object(std::vector<Object>{ }), c.v[0], &c);
                 }
-                return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = eval_scoped(c.v[1], scopes);
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                return assign_object_value(target, eval_scoped(c.v[1], scopes), c.v[0], &c);
             }
-            if (c.str == "+=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = add(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "-=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = sub(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "*=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = mul(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "/=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = div(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "%=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = mod(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "<<=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = shift_left(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == ">>=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = shift_right(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "&=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = bit_and(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "|=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = bit_or(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
-            if (c.str == "^=") { return get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type) = bit_xor(get_parameter(c.v[0], scopes), eval_scoped(c.v[1], scopes)); }
+            if (c.str == "+=" || c.str == "-=" || c.str == "*=" || c.str == "/=" || c.str == "%="
+                || c.str == "<<=" || c.str == ">>=" || c.str == "&=" || c.str == "|=" || c.str == "^=")
+            {
+                auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
+                const auto right = eval_scoped(c.v[1], scopes);
+                Object value;
+                if (c.str == "+=") { value = add(target, right); }
+                else if (c.str == "-=") { value = sub(target, right); }
+                else if (c.str == "*=") { value = mul(target, right); }
+                else if (c.str == "/=") { value = div(target, right); }
+                else if (c.str == "%=") { value = mod(target, right); }
+                else if (c.str == "<<=") { value = shift_left(target, right); }
+                else if (c.str == ">>=") { value = shift_right(target, right); }
+                else if (c.str == "&=") { value = bit_and(target, right); }
+                else if (c.str == "|=") { value = bit_or(target, right); }
+                else { value = bit_xor(target, right); }
+                return assign_object_value(target, std::move(value), c.v[0], &c);
+            }
             if (c.str == ",")
             {
                 Object o;
@@ -1021,13 +1208,22 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
     else if (c.type == CalUnitType::Constant)
     {
-        double value = 0;
+        Object value;
         if (!parse_number_literal(c.str, value))
         {
             set_runtime_error("invalid numeric literal '" + c.str + "'");
             return Object();
         }
-        return Object(value);
+        return value;
+    }
+    else if (c.type == CalUnitType::Cast)
+    {
+        if (c.v.size() != 1)
+        {
+            set_runtime_error("type cast '" + c.type_name + "' has invalid operand count", nullptr, &c);
+            return Object();
+        }
+        return convert_object_type(eval_scoped(c.v[0], scopes), c.type_name, &c);
     }
     else if (c.type == CalUnitType::String)
     {
@@ -1046,10 +1242,13 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 ObjectMap m;
                 for (const auto& field : *struct_definition)
                 {
-                    m[field] = Object();
+                    m[field.name] = make_declared_default(field.type_name);
                 }
                 o = Object(std::move(m));
                 o.name = c.str;
+                o.declared_type = ValueType::Struct;
+                o.declared_type_name = c.type_name;
+                o.type_fixed = true;
                 return o;
             }
         }
@@ -1094,8 +1293,8 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             if (range_clause != nullptr && range_clause->v.size() == 2
                 && range_clause->v[0].type == CalUnitType::Parameter)
             {
-                range_clause->v[0].with_type = false;
                 const auto& loop_var = range_clause->v[0].str;
+                const auto& loop_type = range_clause->v[0].type_name;
                 Object range = eval_scoped(range_clause->v[1], scopes);
                 if (!range.isType<std::vector<Object>>())
                 {
@@ -1111,7 +1310,21 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 for (const auto& value : values)
                 {
                     scopes.emplace_back();
-                    scopes.back()[loop_var] = value;
+                    Object loop_value = value;
+                    if (!loop_type.empty())
+                    {
+                        if (loop_type == "auto")
+                        {
+                            apply_declared_type(loop_value, "auto", &range_clause->v[0], true);
+                        }
+                        else
+                        {
+                            loop_value = convert_object_type(loop_value, loop_type, &range_clause->v[0]);
+                            if (has_runtime_error()) { scopes.pop_back(); return Object(); }
+                            apply_declared_type(loop_value, loop_type, &range_clause->v[0], false);
+                        }
+                    }
+                    scopes.back()[loop_var] = std::move(loop_value);
                     scopes.back()[loop_var].name = loop_var;
                     o = eval_scoped(c.v[1], scopes);
                     scopes.pop_back();
@@ -1220,7 +1433,15 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         if (c.str == "return")
         {
-            return_value() = eval_scoped(c.v[0], scopes);
+            Object value = eval_scoped(c.v[0], scopes);
+            const auto& return_states = execution_contexts.back().return_states;
+            const std::string return_type = return_states.empty() ? std::string() : return_states.back().return_type;
+            if (!return_type.empty() && return_type != "void")
+            {
+                value = convert_object_type(value, return_type, &c);
+                if (has_runtime_error()) { return Object(); }
+            }
+            return_value() = std::move(value);
             return return_value();
         }
         if (c.str == "break")
@@ -1237,11 +1458,11 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         if (c.str == "true")
         {
-            return Object(1, "__");
+            return Object(true);
         }
         if (c.str == "false")
         {
-            return Object(0, "__");
+            return Object(false);
         }
     }
     else if (c.type == CalUnitType::Union)
@@ -1534,6 +1755,10 @@ std::list<CalUnit> Cifa::split(std::string& str)
             if ((c == 'E' || c == 'e') && stat == CalUnitType::Constant)
             {
             }
+            else if ((c == 'f' || c == 'F') && stat == CalUnitType::Constant
+                && r.find_first_of(".eE") != std::string::npos)
+            {
+            }
             else if (stat == CalUnitType::Constant && r == "0" && (c == 'x' || c == 'X' || c == 'b' || c == 'B'))
             {
             }
@@ -1629,26 +1854,91 @@ std::list<CalUnit> Cifa::split(std::string& str)
         ++it;
     }
 
-    //不处理类型符号
-    for (auto it = rv.begin(); it != rv.end();)
+    // 不把类型符号留在 AST 中，但保留类型名供声明转换使用。
+    // 同时把 int a = 1, b = 2; 中的类型传播到后续声明符。
     {
-        if (it->type == CalUnitType::Type)
+        int round_depth = 0;
+        int square_depth = 0;
+        int curly_depth = 0;
+        bool pending_declaration = false;
+        bool expect_declarator_after_comma = false;
+        int pending_round_depth = 0;
+        int pending_square_depth = 0;
+        int pending_curly_depth = 0;
+        std::string pending_type;
+
+        for (auto it = rv.begin(); it != rv.end();)
         {
-            //记录下类型符号曾经存在的位置
-            auto itr = std::next(it);
-            if (itr != rv.end()
-                && (itr->type == CalUnitType::Parameter || itr->type == CalUnitType::Function))
+            const int before_round = round_depth;
+            const int before_square = square_depth;
+            const int before_curly = curly_depth;
+            if (it->str == "(") { ++round_depth; }
+            else if (it->str == ")") { --round_depth; }
+            else if (it->str == "[") { ++square_depth; }
+            else if (it->str == "]") { --square_depth; }
+            else if (it->str == "{") { ++curly_depth; }
+            else if (it->str == "}") { --curly_depth; }
+
+            if (it->type == CalUnitType::Type)
             {
-                itr->with_type = true;
-                it = rv.erase(it);
-            }
-            else
-            {
+                auto next = std::next(it);
+                if (next != rv.end()
+                    && (next->type == CalUnitType::Parameter || next->type == CalUnitType::Function)
+                    && !next->with_type)
+                {
+                    next->with_type = true;
+                    next->type_name = it->str;
+                    const bool is_function_declaration = next->type == CalUnitType::Function;
+                    it = rv.erase(it);
+                    if (is_function_declaration)
+                    {
+                        pending_declaration = false;
+                        pending_type.clear();
+                    }
+                    else
+                    {
+                        pending_declaration = true;
+                        expect_declarator_after_comma = false;
+                        pending_type = next->type_name;
+                        pending_round_depth = round_depth;
+                        pending_square_depth = square_depth;
+                        pending_curly_depth = curly_depth;
+                    }
+                    continue;
+                }
                 ++it;
+                continue;
             }
-        }
-        else
-        {
+
+            if (pending_declaration
+                && round_depth == pending_round_depth
+                && square_depth == pending_square_depth
+                && curly_depth == pending_curly_depth)
+            {
+                if (it->str == ";")
+                {
+                    pending_declaration = false;
+                    pending_type.clear();
+                    expect_declarator_after_comma = false;
+                }
+                else if (it->str == ",")
+                {
+                    expect_declarator_after_comma = true;
+                }
+                else if (expect_declarator_after_comma
+                    && (it->type == CalUnitType::Parameter || it->type == CalUnitType::Function)
+                    && !it->with_type)
+                {
+                    it->with_type = true;
+                    it->type_name = pending_type;
+                    expect_declarator_after_comma = false;
+                }
+            }
+
+            // 离开声明所在的括号层级后，内层逗号不再传播类型。
+            (void)before_round;
+            (void)before_square;
+            (void)before_curly;
             ++it;
         }
     }
@@ -1669,7 +1959,7 @@ std::list<CalUnit> Cifa::split(std::string& str)
                 auto it2 = std::next(it1);
                 if (it2 != rv.end() && it2->str == "{")
                 {
-                    compilation_ast.struct_defs.emplace(it1->str, std::vector<std::string>{ });
+                    compilation_ast.struct_defs.emplace(it1->str, std::vector<StructField>{ });
                 }
             }
         }
@@ -1909,8 +2199,20 @@ void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
         c1.line = left->line;
         c1.col = left->col;
 
+        const bool is_cast = c1.type == CalUnitType::Union && c1.v.size() == 1
+            && c1.v[0].type == CalUnitType::Type;
+
         auto right = it;
-        if (c1.v.empty())
+        if (is_cast)
+        {
+            CalUnit cast;
+            cast.type = CalUnitType::Cast;
+            cast.type_name = c1.v[0].str;
+            cast.line = left->line;
+            cast.col = left->col;
+            *right = std::move(cast);
+        }
+        else if (c1.v.empty())
         {
             right->type = CalUnitType::None;
             right->str.clear();
@@ -1957,6 +2259,47 @@ void Cifa::combine_round_bracket(std::list<CalUnit>& ppp)
 //按优先级合并运算符到语法树，处理左结合和右结合
 void Cifa::combine_ops(std::list<CalUnit>& ppp)
 {
+    // C 风格类型转换：(type)expr。转换优先级高于二元运算符。
+    for (auto it = ppp.begin(); it != ppp.end();)
+    {
+        if (it->type != CalUnitType::Cast || !it->v.empty())
+        {
+            ++it;
+            continue;
+        }
+        auto value = std::next(it);
+        if (value == ppp.end())
+        {
+            add_error(*it, "type cast '{}' has no operand", it->type_name);
+            ++it;
+            continue;
+        }
+        if (value->can_cal() || value->type == CalUnitType::Union)
+        {
+            it->v = { std::move(*value) };
+            ppp.erase(value);
+            ++it;
+            continue;
+        }
+        if (value->type == CalUnitType::Operator && value->v.empty()
+            && (value->str == "+" || value->str == "-" || value->str == "!"
+                || value->str == "~" || value->str == "++" || value->str == "--"))
+        {
+            auto operand = std::next(value);
+            if (operand != ppp.end() && (operand->can_cal() || operand->type == CalUnitType::Union))
+            {
+                value->v = { std::move(*operand) };
+                ppp.erase(operand);
+                it->v = { std::move(*value) };
+                ppp.erase(value);
+                ++it;
+                continue;
+            }
+        }
+        add_error(*it, "type cast '{}' has invalid operand", it->type_name);
+        ++it;
+    }
+
     const auto& op_groups = operator_precedence_token_groups();
     for (size_t group_index = 0; group_index < ops.size(); ++group_index)
     {
@@ -2402,9 +2745,13 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp, bool global_scope)
                     expand_comma(c, arguments);
                     for (auto& argument : arguments)
                     {
-                        f.arguments.emplace_back(std::move(argument.str));
+                        Function2::Argument parameter;
+                        parameter.name = std::move(argument.str);
+                        parameter.type_name = argument.type_name;
+                        f.arguments.emplace_back(std::move(parameter));
                     }
                 }
+                f.return_type = it->type_name;
                 const std::string name = it->str;
                 const size_t argument_count = f.arguments.size();
                 if (!global_scope)
@@ -2446,12 +2793,12 @@ void Cifa::combine_structs(std::list<CalUnit>& ppp, bool global_scope)
                 if (it2 != ppp.end() && it2->type == CalUnitType::Union && it2->str == "{}")
                 {
                     std::string struct_name = it1->str;
-                    std::vector<std::string> fields;
+                    std::vector<StructField> fields;
                     for (auto& c : it2->v)
                     {
                         if (c.type == CalUnitType::Parameter && c.with_type)
                         {
-                            fields.push_back(c.str);
+                            fields.push_back(StructField{ c.str, c.type_name });
                         }
                     }
                     if (!global_scope)
@@ -2524,6 +2871,624 @@ std::string Cifa::revise_key(const std::string& key)
         revised += '_';
     }
     return revised;
+}
+
+ValueType Cifa::value_type_from_name(const std::string& name)
+{
+    if (name == "auto") { return ValueType::Auto; }
+    if (name == "void") { return ValueType::Void; }
+    if (name == "int") { return ValueType::Int; }
+    if (name == "float") { return ValueType::Float; }
+    if (name == "double") { return ValueType::Double; }
+    if (name == "bool") { return ValueType::Bool; }
+    if (name == "char") { return ValueType::Char; }
+    if (name == "string") { return ValueType::String; }
+    if (name == "array") { return ValueType::Array; }
+    if (name == "map") { return ValueType::Map; }
+    if (name == "dynamic") { return ValueType::Dynamic; }
+    return ValueType::Dynamic;
+}
+
+std::string Cifa::value_type_name(ValueType type)
+{
+    switch (type)
+    {
+    case ValueType::Auto: return "auto";
+    case ValueType::Void: return "void";
+    case ValueType::Int: return "int";
+    case ValueType::Float: return "float";
+    case ValueType::Double: return "double";
+    case ValueType::Bool: return "bool";
+    case ValueType::Char: return "char";
+    case ValueType::String: return "string";
+    case ValueType::Array: return "array";
+    case ValueType::Map: return "map";
+    case ValueType::Struct: return "struct";
+    case ValueType::NoValue: return "empty";
+    default: return "dynamic";
+    }
+}
+
+Object Cifa::make_declared_default(const std::string& type_name) const
+{
+    Object result;
+    const auto type = value_type_from_name(type_name);
+    if (type != ValueType::Dynamic)
+    {
+        result.declared_type = type;
+        result.declared_type_name = type_name;
+        result.type_fixed = type != ValueType::Auto && type != ValueType::Void;
+    }
+    else if (find_struct_definition(type_name) != nullptr)
+    {
+        result.declared_type = ValueType::Struct;
+        result.declared_type_name = type_name;
+        result.type_fixed = true;
+    }
+    return result;
+}
+
+bool Cifa::apply_declared_type(Object& object, const std::string& type_name, const CalUnit* location, bool infer_auto)
+{
+    if (type_name.empty())
+    {
+        return true;
+    }
+
+    const auto type = value_type_from_name(type_name);
+    if (type == ValueType::Dynamic)
+    {
+        if (find_struct_definition(type_name) == nullptr)
+        {
+            set_runtime_error("unknown type '" + type_name + "'", &object, location);
+            return false;
+        }
+        object.declared_type = ValueType::Struct;
+        object.declared_type_name = type_name;
+        object.type_fixed = true;
+        return true;
+    }
+
+    if (type == ValueType::Void)
+    {
+        set_runtime_error("variable cannot have type void", &object, location);
+        return false;
+    }
+
+    object.declared_type = type;
+    object.declared_type_name = type_name;
+    if (type == ValueType::Auto)
+    {
+        object.type_fixed = false;
+        if (infer_auto && object.hasValue())
+        {
+            if (object.stored_type != ValueType::Dynamic && object.stored_type != ValueType::Empty)
+            {
+                object.declared_type = object.stored_type;
+                object.declared_type_name = value_type_name(object.stored_type);
+            }
+            else if (object.isType<std::vector<Object>>())
+            {
+                object.declared_type = ValueType::Array;
+                object.declared_type_name = "array";
+            }
+            else if (object.isType<ObjectMap>())
+            {
+                object.declared_type = ValueType::Map;
+                object.declared_type_name = "map";
+            }
+            else
+            {
+                object.declared_type = ValueType::Dynamic;
+                object.declared_type_name.clear();
+            }
+            object.type_fixed = object.declared_type != ValueType::Dynamic;
+        }
+        return true;
+    }
+
+    object.type_fixed = true;
+    return true;
+}
+
+Object Cifa::convert_object_type(const Object& source, const std::string& type_name, const CalUnit* location)
+{
+    if (type_name.empty() || type_name == "auto" || type_name == "dynamic")
+    {
+        return source;
+    }
+    if (source.type1 == "NoValue")
+    {
+        source.toDouble();
+        return Object();
+    }
+    if (!source.hasValue())
+    {
+        set_runtime_error("cannot convert an empty value to '" + type_name + "'", &source, location);
+        return Object();
+    }
+
+    const auto type = value_type_from_name(type_name);
+    if (type == ValueType::Void)
+    {
+        return Object();
+    }
+    if (type == ValueType::Dynamic || type == ValueType::Struct)
+    {
+        if (find_struct_definition(type_name) != nullptr || type == ValueType::Struct)
+        {
+            if (!source.isType<ObjectMap>())
+            {
+                set_runtime_error("cannot convert value to struct type '" + type_name + "'", &source, location);
+                return Object();
+            }
+            return source;
+        }
+        set_runtime_error("unknown conversion type '" + type_name + "'", &source, location);
+        return Object();
+    }
+
+    if (type == ValueType::String)
+    {
+        if (!source.isType<std::string>())
+        {
+            set_runtime_error("cannot convert value to string", &source, location);
+            return Object();
+        }
+        return source;
+    }
+
+    if (type == ValueType::Array)
+    {
+        if (!source.isType<std::vector<Object>>())
+        {
+            set_runtime_error("cannot convert value to array", &source, location);
+            return Object();
+        }
+        return source;
+    }
+    if (type == ValueType::Map)
+    {
+        if (!source.isType<ObjectMap>())
+        {
+            set_runtime_error("cannot convert value to map", &source, location);
+            return Object();
+        }
+        return source;
+    }
+
+    if (!source.isNumber())
+    {
+        set_runtime_error("cannot convert value to '" + type_name + "'", &source, location);
+        return Object();
+    }
+
+    if (type == ValueType::Int)
+    {
+        const double value = source.toDouble();
+        if (!std::isfinite(value) || value > std::numeric_limits<std::int32_t>::max()
+            || value < std::numeric_limits<std::int32_t>::min())
+        {
+            set_runtime_error("integer conversion out of range: " + std::format("{}", value), &source, location);
+            return Object();
+        }
+        return Object(static_cast<std::int32_t>(value));
+    }
+    if (type == ValueType::Float)
+    {
+        return Object(static_cast<float>(source.toDouble()));
+    }
+    if (type == ValueType::Double)
+    {
+        return Object(source.toDouble());
+    }
+    if (type == ValueType::Bool)
+    {
+        return Object(source.toBool());
+    }
+    if (type == ValueType::Char)
+    {
+        const double value = source.toDouble();
+        if (!std::isfinite(value) || value > std::numeric_limits<char>::max()
+            || value < std::numeric_limits<char>::min())
+        {
+            set_runtime_error("char conversion out of range: " + std::format("{}", value), &source, location);
+            return Object();
+        }
+        return Object(static_cast<char>(value));
+    }
+
+    return source;
+}
+
+Object& Cifa::assign_object_value(Object& target, Object value, const CalUnit& lhs, const CalUnit* location)
+{
+    if (lhs.with_type && lhs.type_name == "auto")
+    {
+        target.declared_type = ValueType::Auto;
+        target.declared_type_name = "auto";
+        target.type_fixed = false;
+        if (value.hasValue())
+        {
+            if (value.stored_type != ValueType::Dynamic && value.stored_type != ValueType::Empty)
+            {
+                target.declared_type = value.stored_type;
+                target.declared_type_name = value_type_name(value.stored_type);
+            }
+            else if (value.isType<std::vector<Object>>())
+            {
+                target.declared_type = ValueType::Array;
+                target.declared_type_name = "array";
+                target.element_type_name = value.element_type_name;
+            }
+            else if (value.isType<ObjectMap>())
+            {
+                target.declared_type = ValueType::Map;
+                target.declared_type_name = "map";
+            }
+            target.type_fixed = target.declared_type != ValueType::Dynamic;
+        }
+    }
+    else if (lhs.with_type && !apply_declared_type(target, lhs.type_name, location, false))
+    {
+        return target;
+    }
+
+    if (!target.type_fixed && target.declared_type == ValueType::Auto && value.hasValue())
+    {
+        if (value.stored_type != ValueType::Dynamic && value.stored_type != ValueType::Empty)
+        {
+            target.declared_type = value.stored_type;
+            target.declared_type_name = value_type_name(value.stored_type);
+            target.type_fixed = true;
+        }
+        else if (value.isType<std::vector<Object>>())
+        {
+            target.declared_type = ValueType::Array;
+            target.declared_type_name = "array";
+            target.element_type_name = value.element_type_name;
+            target.type_fixed = true;
+        }
+        else if (value.isType<ObjectMap>())
+        {
+            target.declared_type = ValueType::Map;
+            target.declared_type_name = "map";
+            target.type_fixed = true;
+        }
+    }
+
+    if (target.type_fixed)
+    {
+        const std::string target_type_name = target.declared_type_name.empty()
+            ? value_type_name(target.declared_type)
+            : target.declared_type_name;
+        value = convert_object_type(value, target_type_name, location);
+        if (has_runtime_error())
+        {
+            return target;
+        }
+    }
+
+    target.value = std::move(value.value);
+    target.stored_type = value.stored_type;
+    target.type1 = std::move(value.type1);
+    target.v = std::move(value.v);
+    return target;
+}
+
+void Cifa::set_array_element_type(Object& array, const std::string& type_name)
+{
+    if (type_name.empty() || type_name == "void")
+    {
+        return;
+    }
+    array.element_type_name = type_name;
+    if (!array.isType<std::vector<Object>>())
+    {
+        return;
+    }
+    for (auto& element : array.ref<std::vector<Object>>())
+    {
+        if (!element.isTyped())
+        {
+            element = make_declared_default(type_name);
+        }
+    }
+}
+
+Object Cifa::add(const Object& o1, const Object& o2)
+{
+    if (o1.type1 == "NoValue" || o2.type1 == "NoValue")
+    {
+        (o1.type1 == "NoValue" ? o1 : o2).toDouble();
+        return Object();
+    }
+    if (o1.isType<std::string>() && o2.isType<std::string>())
+    {
+        return Object(o1.ref<std::string>() + o2.ref<std::string>());
+    }
+    if (o1.isNumber() && o2.isNumber())
+    {
+        if (common_numeric_type(o1, o2) == ValueType::Double)
+        {
+            return Object(o1.toDouble() + o2.toDouble());
+        }
+        if (common_numeric_type(o1, o2) == ValueType::Float)
+        {
+            return Object(o1.toFloat() + o2.toFloat());
+        }
+        return Object(wrap_int32(
+            static_cast<std::int64_t>(o1.toInt32()) + static_cast<std::int64_t>(o2.toInt32())));
+    }
+    for (auto& f : user_add)
+    {
+        auto result = f(o1, o2);
+        if (!result.isNumber()) { return result; }
+    }
+    return Object();
+}
+
+Object Cifa::sub(const Object& o1, const Object& o2)
+{
+    if (o1.type1 == "NoValue" || o2.type1 == "NoValue")
+    {
+        (o1.type1 == "NoValue" ? o1 : o2).toDouble();
+        return Object();
+    }
+    if (o1.isNumber() && o2.isNumber())
+    {
+        if (common_numeric_type(o1, o2) == ValueType::Double)
+        {
+            return Object(o1.toDouble() - o2.toDouble());
+        }
+        if (common_numeric_type(o1, o2) == ValueType::Float)
+        {
+            return Object(o1.toFloat() - o2.toFloat());
+        }
+        return Object(wrap_int32(
+            static_cast<std::int64_t>(o1.toInt32()) - static_cast<std::int64_t>(o2.toInt32())));
+    }
+    for (auto& f : user_sub)
+    {
+        auto result = f(o1, o2);
+        if (!result.isNumber()) { return result; }
+    }
+    return Object();
+}
+
+Object Cifa::mul(const Object& o1, const Object& o2)
+{
+    if (o1.type1 == "NoValue" || o2.type1 == "NoValue")
+    {
+        (o1.type1 == "NoValue" ? o1 : o2).toDouble();
+        return Object();
+    }
+    if (o1.isNumber() && o2.isNumber())
+    {
+        if (common_numeric_type(o1, o2) == ValueType::Double)
+        {
+            return Object(o1.toDouble() * o2.toDouble());
+        }
+        if (common_numeric_type(o1, o2) == ValueType::Float)
+        {
+            return Object(o1.toFloat() * o2.toFloat());
+        }
+        return Object(wrap_int32(
+            static_cast<std::int64_t>(o1.toInt32()) * static_cast<std::int64_t>(o2.toInt32())));
+    }
+    for (auto& f : user_mul)
+    {
+        auto result = f(o1, o2);
+        if (!result.isNumber()) { return result; }
+    }
+    return Object();
+}
+
+Object Cifa::div(const Object& o1, const Object& o2)
+{
+    if (o1.type1 == "NoValue" || o2.type1 == "NoValue")
+    {
+        (o1.type1 == "NoValue" ? o1 : o2).toDouble();
+        return Object();
+    }
+    if (o1.isNumber() && o2.isNumber())
+    {
+        const auto type = common_numeric_type(o1, o2);
+        if (type == ValueType::Int && o2.toInt32() == 0)
+        {
+            set_runtime_error("integer division by zero", &o2);
+            return Object();
+        }
+        if (type == ValueType::Double)
+        {
+            return Object(o1.toDouble() / o2.toDouble());
+        }
+        if (type == ValueType::Float)
+        {
+            return Object(o1.toFloat() / o2.toFloat());
+        }
+        const auto left = o1.toInt32();
+        const auto right = o2.toInt32();
+        if (left == std::numeric_limits<std::int32_t>::min() && right == -1)
+        {
+            set_runtime_error("integer division overflow", &o1);
+            return Object();
+        }
+        return Object(left / right);
+    }
+    for (auto& f : user_div)
+    {
+        auto result = f(o1, o2);
+        if (!result.isNumber()) { return result; }
+    }
+    return Object();
+}
+
+Object Cifa::mod(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger())
+    {
+        if (o2.toInt32() == 0)
+        {
+            set_runtime_error("integer modulo by zero", &o2);
+            return Object();
+        }
+        const auto left = o1.toInt32();
+        const auto right = o2.toInt32();
+        if (left == std::numeric_limits<std::int32_t>::min() && right == -1)
+        {
+            return Object(0);
+        }
+        return Object(left % right);
+    }
+    if (o1.isNumber() || o2.isNumber())
+    {
+        set_runtime_error("operator % requires integer operands", nullptr);
+        return Object();
+    }
+    for (auto& f : user_mod)
+    {
+        auto result = f(o1, o2);
+        if (!result.isNumber()) { return result; }
+    }
+    return Object();
+}
+
+template <typename Compare>
+static Object compare_objects(const Object& o1, const Object& o2, Compare compare)
+{
+    if (o1.isType<std::string>() && o2.isType<std::string>())
+    {
+        return Object(compare(o1.ref<std::string>(), o2.ref<std::string>()));
+    }
+    if (o1.isNumber() && o2.isNumber())
+    {
+        const auto type = common_numeric_type(o1, o2);
+        if (type == ValueType::Double) { return Object(compare(o1.toDouble(), o2.toDouble())); }
+        if (type == ValueType::Float) { return Object(compare(o1.toFloat(), o2.toFloat())); }
+        return Object(compare(o1.toInt32(), o2.toInt32()));
+    }
+    return Object();
+}
+
+Object Cifa::less(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a < b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_less) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::more(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a > b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_more) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::less_equal(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a <= b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_less_equal) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::more_equal(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a >= b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_more_equal) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::equal(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a == b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_equal) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::not_equal(const Object& o1, const Object& o2)
+{
+    auto result = compare_objects(o1, o2, [](const auto& a, const auto& b) { return a != b; });
+    if (result.hasValue()) { return result; }
+    for (auto& f : user_not_equal) { auto custom = f(o1, o2); if (!custom.isNumber()) { return custom; } }
+    return Object();
+}
+
+Object Cifa::bit_and(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger()) { return Object(o1.toInt32() & o2.toInt32()); }
+    if (o1.isNumber() || o2.isNumber()) { set_runtime_error("operator & requires integer operands", nullptr); return Object(); }
+    for (auto& f : user_bit_and) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::bit_or(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger()) { return Object(o1.toInt32() | o2.toInt32()); }
+    if (o1.isNumber() || o2.isNumber()) { set_runtime_error("operator | requires integer operands", nullptr); return Object(); }
+    for (auto& f : user_bit_or) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::bit_xor(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger()) { return Object(o1.toInt32() ^ o2.toInt32()); }
+    if (o1.isNumber() || o2.isNumber()) { set_runtime_error("operator ^ requires integer operands", nullptr); return Object(); }
+    for (auto& f : user_bit_xor) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::logic_and(const Object& o1, const Object& o2)
+{
+    if (o1.isNumber() && o2.isNumber()) { return Object(o1.toBool() && o2.toBool()); }
+    for (auto& f : user_logic_and) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::logic_or(const Object& o1, const Object& o2)
+{
+    if (o1.isNumber() && o2.isNumber()) { return Object(o1.toBool() || o2.toBool()); }
+    for (auto& f : user_logic_or) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::shift_left(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger())
+    {
+        const auto count = o2.toInt32();
+        if (count < 0 || count >= 32)
+        {
+            set_runtime_error("left shift count is out of range", &o2);
+            return Object();
+        }
+        return Object(wrap_int32(static_cast<std::uint32_t>(o1.toInt32()) << count));
+    }
+    if (o1.isNumber() || o2.isNumber()) { set_runtime_error("operator << requires integer operands", nullptr); return Object(); }
+    for (auto& f : user_shift_left) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
+}
+
+Object Cifa::shift_right(const Object& o1, const Object& o2)
+{
+    if (o1.isInteger() && o2.isInteger())
+    {
+        const auto count = o2.toInt32();
+        if (count < 0 || count >= 32)
+        {
+            set_runtime_error("right shift count is out of range", &o2);
+            return Object();
+        }
+        return Object(o1.toInt32() >> count);
+    }
+    if (o1.isNumber() || o2.isNumber()) { set_runtime_error("operator >> requires integer operands", nullptr); return Object(); }
+    for (auto& f : user_shift_right) { auto result = f(o1, o2); if (!result.isNumber()) { return result; } }
+    return Object();
 }
 
 bool Cifa::validate_registration_name(const std::string& name)
@@ -2648,10 +3613,21 @@ Object Cifa::run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, Sc
         fn_scopes.emplace_back();
         for (size_t i = 0; i < function.arguments.size(); i++)
         {
-            fn_scopes.back()[function.arguments[i]] = eval_scoped(vc[i], scopes);
+            const auto& parameter = function.arguments[i];
+            Object argument = eval_scoped(vc[i], scopes);
+            if (!parameter.type_name.empty())
+            {
+                if (!apply_declared_type(argument, parameter.type_name, &vc[i], parameter.type_name == "auto"))
+                {
+                    return make_error_result();
+                }
+                argument = convert_object_type(argument, parameter.type_name, &vc[i]);
+            }
+            fn_scopes.back()[parameter.name] = std::move(argument);
             if (has_runtime_error()) { return make_error_result(); }
         }
         context.return_states.emplace_back();
+        context.return_states.back().return_type = function.return_type;
         auto result = eval_scoped(function.body, fn_scopes);
         const auto& state = context.return_states.back();
         if (!has_runtime_error() && !is_exit_requested() && (!state.has_value || !state.value.hasValue()))
@@ -2700,6 +3676,10 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     const bool existed = existing != nullptr;
     auto& object = existed ? *existing : get_or_create_parameter(c.str, scopes, true);
     object.name = c.str;
+    if (c.with_type && !object.isTyped())
+    {
+        apply_declared_type(object, c.type_name, &c, false);
+    }
     if (!only_check && existed && !c.with_type && !object.hasValue())
     {
         set_runtime_error("variable '" + object.name + "' has not been initialized");
@@ -2734,6 +3714,10 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     }
 
     auto& object = get_or_create_parameter(c.str, scopes, declare_current);
+    if (c.with_type && !object.isTyped())
+    {
+        apply_declared_type(object, c.type_name, &c, false);
+    }
     // struct 类型声明：直接创建并初始化 ObjectMap
     const auto* struct_definition = find_struct_definition(c.type_name);
     if (declare_current && struct_definition != nullptr)
@@ -2741,10 +3725,13 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
         ObjectMap m;
         for (const auto& field : *struct_definition)
         {
-            m[field] = Object();
+            m[field.name] = make_declared_default(field.type_name);
         }
         object = Object(std::move(m));
         object.name = c.str;
+        object.declared_type = ValueType::Struct;
+        object.declared_type_name = c.type_name;
+        object.type_fixed = true;
     }
     return object;
 }
@@ -2791,10 +3778,12 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
         if (!base.isType<std::vector<Object>>())
         {
             base = Object(std::vector<Object>(size_t(first_index)));
+            set_array_element_type(base, c.type_name);
         }
         else if (!only_check)
         {
             base.ref<std::vector<Object>>().resize(size_t(first_index));
+            set_array_element_type(base, c.type_name);
         }
         base.name = c.str;
         return base;
@@ -2817,6 +3806,7 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
         {
             *element = Object(std::vector<Object>(size_t(index + 1)));
             element->name = element_name;
+            element->element_type_name = base.element_type_name;
         }
         auto& array = element->ref<std::vector<Object>>();
         if (index >= int(array.size()))
@@ -2826,6 +3816,11 @@ Object& Cifa::resolve_indexed_parameter(CalUnit& c, ScopeStack& scopes, bool onl
         element = &array[size_t(index)];
         element_name += "[" + std::to_string(index) + "]";
         element->name = element_name;
+        if (dimension + 1 == c.v.size() && !element->isTyped() && !base.element_type_name.empty())
+        {
+            *element = make_declared_default(base.element_type_name);
+            element->name = element_name;
+        }
     }
     return *element;
 }
@@ -2978,6 +3973,22 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             add_error(c, "unknown operator {} with {} operands", c.str, c.v.size());
         }
     }
+    else if (c.type == CalUnitType::Cast)
+    {
+        if (c.v.size() != 1)
+        {
+            add_error(c, "type cast '{}' has wrong operands", c.type_name);
+        }
+        const auto type = value_type_from_name(c.type_name);
+        if (type == ValueType::Dynamic && find_struct_definition(c.type_name) == nullptr)
+        {
+            add_error(c, "unknown type '{}' in cast", c.type_name);
+        }
+        else if (type == ValueType::Auto || type == ValueType::Void)
+        {
+            add_error(c, "cannot cast to type '{}'", c.type_name);
+        }
+    }
     else if (c.type == CalUnitType::Constant || c.type == CalUnitType::String)
     {
         if (c.v.size() > 0)
@@ -3000,9 +4011,12 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 ObjectMap m;
                 for (const auto& field : *struct_definition)
                 {
-                    m[field] = Object();
+                    m[field.name] = make_declared_default(field.type_name);
                 }
                 p[c.str] = Object(std::move(m));
+                p[c.str].declared_type = ValueType::Struct;
+                p[c.str].declared_type_name = c.type_name;
+                p[c.str].type_fixed = true;
             }
             p[c.str].name = c.str;
         }
@@ -3491,7 +4505,7 @@ void Cifa::compile_pipeline(std::string str, Ast& program)
                 auto function_parameters = p1;
                 for (auto& argument : func2.arguments)
                 {
-                    function_parameters[argument] = Object();
+                    function_parameters[argument.name] = make_declared_default(argument.type_name);
                 }
                 check_goto_targets(func2.body);
                 check_cal_unit(func2.body, nullptr, function_parameters);

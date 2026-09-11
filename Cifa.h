@@ -1,10 +1,12 @@
 ﻿#pragma once
 #include <any>
 #include <array>
+#include <cstdint>
 #include <cmath>
 #include <deque>
 #include <format>
 #include <functional>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -23,6 +25,24 @@ namespace cifa
 struct CalUnit;
 class Cifa;
 
+enum class ValueType
+{
+    Empty,
+    Auto,
+    Void,
+    Int,
+    Float,
+    Double,
+    Bool,
+    Char,
+    String,
+    Array,
+    Map,
+    Struct,
+    NoValue,
+    Dynamic,
+};
+
 struct Object
 {
     friend CalUnit;
@@ -33,32 +53,60 @@ struct Object
     Object(double v)
     {
         value = v;
+        stored_type = ValueType::Double;
     }
 
     Object(double v, const std::string& t)
     {
         value = v;
+        stored_type = ValueType::Double;
+        type1 = t;
+    }
+
+    Object(float v)
+    {
+        value = v;
+        stored_type = ValueType::Float;
+    }
+
+    Object(float v, const std::string& t)
+    {
+        value = v;
+        stored_type = ValueType::Float;
         type1 = t;
     }
 
     Object(const std::string& str)
     {
         value = str;
+        stored_type = ValueType::String;
     }
 
     Object(const std::string& str, const std::string& t)
     {
         value = str;
+        stored_type = ValueType::String;
         type1 = t;
     }
 
     template <typename T, typename std::enable_if<std::is_arithmetic_v<std::decay_t<T>>
         && !std::is_same_v<std::decay_t<T>, double>
+        && !std::is_same_v<std::decay_t<T>, float>
         && !std::is_same_v<std::decay_t<T>, int>
-        && !std::is_same_v<std::decay_t<T>, bool>, int>::type = 0>
+        && !std::is_same_v<std::decay_t<T>, bool>
+        && !std::is_same_v<std::decay_t<T>, char>, int>::type = 0>
     Object(T v)
     {
-        value = double(v);
+        if constexpr (std::is_integral_v<std::decay_t<T>>)
+        {
+            value = static_cast<std::int32_t>(v);
+            stored_type = ValueType::Int;
+        }
+        else
+        {
+            value = static_cast<double>(v);
+            stored_type = ValueType::Double;
+        }
     }
 
     template <typename T, typename std::enable_if<!std::is_same_v<std::decay_t<T>, Object>
@@ -70,31 +118,128 @@ struct Object
 
     Object(int v)
     {
-        value = double(v);
+        value = static_cast<std::int32_t>(v);
+        stored_type = ValueType::Int;
     }
 
     Object(bool v)
     {
-        value = double(v);
+        value = v;
+        stored_type = ValueType::Bool;
+    }
+
+    Object(char v)
+    {
+        value = v;
+        stored_type = ValueType::Char;
     }
 
     operator bool() const { return toDouble() != 0; }
 
-    operator int() const { return int(toDouble()); }
+    operator int() const { return toInt(); }
 
     operator double() const { return toDouble(); }
 
     operator std::string() const { return toString(); }
 
-    bool toBool() const { return toDouble() != 0; }
+    bool toBool() const
+    {
+        if (stored_type == ValueType::Bool)
+        {
+            return std::any_cast<bool>(value);
+        }
+        if (stored_type == ValueType::Int)
+        {
+            return std::any_cast<std::int32_t>(value) != 0;
+        }
+        if (stored_type == ValueType::Char)
+        {
+            return std::any_cast<char>(value) != 0;
+        }
+        if (stored_type == ValueType::Float)
+        {
+            return std::any_cast<float>(value) != 0.0f;
+        }
+        if (stored_type == ValueType::Double)
+        {
+            return std::any_cast<double>(value) != 0.0;
+        }
+        report_conversion_error("bool");
+        return false;
+    }
 
-    int toInt() const { return int(toDouble()); }
+    int toInt() const { return static_cast<int>(toInt32()); }
+
+    std::int32_t toInt32() const
+    {
+        if (stored_type == ValueType::Int)
+        {
+            return std::any_cast<std::int32_t>(value);
+        }
+        if (stored_type == ValueType::Bool)
+        {
+            return std::any_cast<bool>(value) ? 1 : 0;
+        }
+        if (stored_type == ValueType::Char)
+        {
+            return static_cast<std::int32_t>(std::any_cast<char>(value));
+        }
+        if (stored_type == ValueType::Float)
+        {
+            const float number = std::any_cast<float>(value);
+            if (!std::isfinite(number) || number > std::numeric_limits<std::int32_t>::max()
+                || number < std::numeric_limits<std::int32_t>::min())
+            {
+                report_conversion_error("int");
+                return 0;
+            }
+            return static_cast<std::int32_t>(number);
+        }
+        if (stored_type == ValueType::Double)
+        {
+            const double number = std::any_cast<double>(value);
+            if (!std::isfinite(number) || number > std::numeric_limits<std::int32_t>::max()
+                || number < std::numeric_limits<std::int32_t>::min())
+            {
+                report_conversion_error("int");
+                return 0;
+            }
+            return static_cast<std::int32_t>(number);
+        }
+        report_conversion_error("int");
+        return 0;
+    }
+
+    float toFloat() const
+    {
+        if (stored_type == ValueType::Float)
+        {
+            return std::any_cast<float>(value);
+        }
+        return static_cast<float>(toDouble());
+    }
 
     double toDouble() const
     {
-        if (value.type() == typeid(double))
+        if (stored_type == ValueType::Double)
         {
             return std::any_cast<double>(value);
+        }
+        if (stored_type == ValueType::Float)
+        {
+            return static_cast<double>(std::any_cast<float>(value));
+        }
+        if (stored_type == ValueType::Int)
+        {
+            return static_cast<double>(std::any_cast<std::int32_t>(value));
+        }
+        if (stored_type == ValueType::Bool)
+        {
+            return std::any_cast<bool>(value) ? 1.0 : 0.0;
+        }
+        if (stored_type == ValueType::Char)
+        {
+            return static_cast<double>(std::any_cast<char>(value));
         }
         report_conversion_error("double");
         return NAN;
@@ -149,7 +294,18 @@ struct Object
     template <typename T>
     bool isType() const { return value.type() == typeid(T); }
 
-    bool isNumber() const { return value.type() == typeid(double); }
+    bool isNumber() const
+    {
+        return stored_type == ValueType::Int || stored_type == ValueType::Float
+            || stored_type == ValueType::Double || stored_type == ValueType::Bool
+            || stored_type == ValueType::Char;
+    }
+
+    bool isInteger() const
+    {
+        return stored_type == ValueType::Int || stored_type == ValueType::Bool
+            || stored_type == ValueType::Char;
+    }
 
     bool isEffectNumber() const { return isNumber() && !std::isnan(toDouble()) && !std::isinf(toDouble()); }
 
@@ -158,6 +314,14 @@ struct Object
     const std::vector<Object>& subV() const { return v; }
 
     const std::string& getSpecialType() const { return type1; }
+
+    ValueType getStoredType() const { return stored_type; }
+
+    ValueType getDeclaredType() const { return declared_type; }
+
+    const std::string& getDeclaredTypeName() const { return declared_type_name; }
+
+    bool isTyped() const { return type_fixed; }
 
     std::type_info const& getType() const { return value.type(); }
 
@@ -172,6 +336,7 @@ private:
     {
         Object result;
         result.value = NoValue{ function_name, std::move(call_frame) };
+        result.stored_type = ValueType::NoValue;
         result.type1 = "NoValue";
         return result;
     }
@@ -228,6 +393,11 @@ private:
     inline static thread_local std::vector<std::function<void(const std::string&, const Object*)>> runtime_error_reporters;
 
     std::any value;
+    ValueType stored_type = ValueType::Empty;
+    ValueType declared_type = ValueType::Dynamic;
+    std::string declared_type_name;
+    std::string element_type_name;
+    bool type_fixed = false;
     std::string type1;        //特别的类型，用于Error、break、continue
     std::vector<Object> v;    //仅用于处理逗号表达式
     std::string name;
@@ -236,6 +406,12 @@ private:
 
 using ObjectVector = std::vector<Object>;
 using ObjectMap = std::map<std::string, Object>;
+
+struct StructField
+{
+    std::string name;
+    std::string type_name;
+};
 
 enum class CalUnitType
 {
@@ -249,6 +425,7 @@ enum class CalUnitType
     Key,
     Type,
     Union,
+    Cast,
     Label,
     Goto,
     //UnionRound,    //()合并模式，仅for语句使用
@@ -262,7 +439,7 @@ struct CalUnit
     size_t line = 0, col = 0;
     bool suffix = false;        //有后缀，可视为一个语句
     bool with_type = false;     //有前置的类型
-    std::string type_name;      //仅在 with_type=true 且为用户定义 struct 类型时非空
+    std::string type_name;      //前置类型名；内置类型或用户定义 struct 类型
     bool un_combine = false;    //是否合并到语法树，目前仅case和default后面的冒号使用
 
     CalUnit(CalUnitType s, std::string s1)
@@ -275,7 +452,9 @@ struct CalUnit
 
     bool can_cal()
     {
-        return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter || type == CalUnitType::Function || type == CalUnitType::Operator && v.size() > 0;
+        return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter
+            || type == CalUnitType::Function || type == CalUnitType::Cast
+            || type == CalUnitType::Operator && v.size() > 0;
     }
 
     bool is_statement()
@@ -286,8 +465,15 @@ struct CalUnit
 
 struct Function2
 {
-    std::vector<std::string> arguments;
+    struct Argument
+    {
+        std::string name;
+        std::string type_name;
+    };
+
+    std::vector<Argument> arguments;
     CalUnit body;
+    std::string return_type;
 };
 
 using FunctionOverloads = std::unordered_map<size_t, Function2>;
@@ -306,7 +492,7 @@ class Ast
     CalUnit root;
     std::unordered_map<std::string, size_t> labels;
     std::unordered_map<std::string, FunctionOverloads> functions;
-    std::unordered_map<std::string, std::vector<std::string>> struct_defs;
+    std::unordered_map<std::string, std::vector<StructField>> struct_defs;
     std::vector<SourceLineInfo> source_line_infos;
     bool compiling = false;
     bool compiled = false;
@@ -397,8 +583,8 @@ private:
         { "break", "continue", "else", "return", "default", "goto" },
         { "if", "for", "while", "do", "switch", "case" },
     } };
-    //类型列表，注意auto虽然不是真正的类型，但在语法分析阶段当作类型处理，实际运行时会被忽略
-    inline static const std::unordered_set<std::string> types = { "auto", "void", "int", "float", "double", "string", "char" };
+    //类型列表；auto 在初始化或首次赋值时推导，string 为 Cifa 独有类型
+    inline static const std::unordered_set<std::string> types = { "auto", "void", "int", "float", "double", "bool", "string", "char" };
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
     inline static const std::map<std::string, std::string> op_representations = { { "and", "&&" }, { "and_eq", "&=" }, { "bitand", "&" }, { "bitor", "|" }, { "compl", "~" }, { "not", "!" }, { "not_eq", "!=" }, { "or", "||" }, { "or_eq", "|=" }, { "xor", "^" }, { "xor_eq", "^=" }, { "<%", "{" }, { "%>", "}" }, { "<:", "[" }, { ":>", "]" }, { "%:", "#" }, { "%:%:", "##" } };
     //内置的数组/map方法列表
@@ -406,7 +592,7 @@ private:
 
     std::unordered_map<std::string, func_type> functions;     //在宿主程序中注册的函数
     std::unordered_map<std::string, FunctionOverloads> functions2;    //执行脚本后注册的全局脚本函数
-    std::unordered_map<std::string, std::vector<std::string>> struct_defs;    //执行脚本后注册的全局 struct
+    std::unordered_map<std::string, std::vector<StructField>> struct_defs;    //执行脚本后注册的全局 struct
 
     std::unordered_map<std::string, void*> user_data;
     std::unordered_map<std::string, Object> global_variables;    //C++ 注册变量与脚本顶层变量共用的实例全局表
@@ -450,6 +636,7 @@ private:
     {
         bool has_value = false;
         Object value;
+        std::string return_type;
     };
 
     struct ExecutionContext
@@ -487,6 +674,8 @@ public:
 
     static bool is_valid_key(const std::string& key);
     static std::string revise_key(const std::string& key);
+    static ValueType value_type_from_name(const std::string& name);
+    static std::string value_type_name(ValueType type);
 
     bool register_function(const std::string& name, func_type func);
 
@@ -591,12 +780,17 @@ private:
     Object run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, ScopeStack& scopes);
     void run_compilation(const std::function<void(Ast&)>& action);
     Object eval_builtin_method(const CalUnit& method, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
+    bool apply_declared_type(Object& object, const std::string& type_name, const CalUnit* location, bool infer_auto);
+    Object convert_object_type(const Object& source, const std::string& type_name, const CalUnit* location);
+    Object& assign_object_value(Object& target, Object value, const CalUnit& lhs, const CalUnit* location);
+    void set_array_element_type(Object& array, const std::string& type_name);
+    Object make_declared_default(const std::string& type_name) const;
     ErrorSet& active_errors();
     const ErrorSet& active_errors() const;
     const std::vector<SourceLineInfo>& active_source_line_infos() const;
     void record_error(ErrorMessage error);
     FunctionOverloads* find_script_function(const std::string& name);
-    const std::vector<std::string>* find_struct_definition(const std::string& name) const;
+    const std::vector<StructField>* find_struct_definition(const std::string& name) const;
 
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
     CalUnitType guess_char(char c);
@@ -677,64 +871,25 @@ private:
         add_error(c.line, c.col, format, std::forward<Args>(args)...);
     }
 
-    //四则运算准许用户增加自定义功能
-
-#define OPERATOR(o1, o2, op, userop_v, trans_type) \
-    if (o1.type1 == "NoValue" || o2.type1 == "NoValue") \
-    { \
-        (o1.type1 == "NoValue" ? o1 : o2).toDouble(); \
-        return Object(); \
-    } \
-    if (o1.isNumber() && o2.isNumber()) \
-    { \
-        return double(trans_type(o1) op trans_type(o2)); \
-    } \
-    for (auto& f : userop_v) \
-    { \
-        auto o = f(o1, o2); \
-        if (!o.isNumber()) \
-        { \
-            return o; \
-        } \
-    } \
-    return Object();
-
-    //定义运算符函数，只支持数值操作
-#define OPERATOR_DEF(opname, op, trans_type) \
-    Object opname(const Object& o1, const Object& o2) { OPERATOR(o1, o2, op, user_##opname, trans_type); }
-
-    //定义运算符函数，支持字符串操作
-#define OPERATOR_DEF_CONTENT(opname, op, trans_type) \
-    Object opname(const Object& o1, const Object& o2) \
-    { \
-        if (o1.isType<std::string>() && o2.isType<std::string>()) \
-        { \
-            return Object(std::any_cast<std::string>(o1.value) op std::any_cast<std::string>(o2.value)); \
-        } \
-        OPERATOR(o1, o2, op, user_##opname, trans_type); \
-    }
-
-    OPERATOR_DEF_CONTENT(add, +, double)
-    OPERATOR_DEF(sub, -, double)
-    OPERATOR_DEF(mul, *, double)
-    OPERATOR_DEF(div, /, double)
-    OPERATOR_DEF(mod, %, int)
-    OPERATOR_DEF_CONTENT(less, <, double)
-    OPERATOR_DEF_CONTENT(more, >, double)
-    OPERATOR_DEF_CONTENT(less_equal, <=, double)
-    OPERATOR_DEF_CONTENT(more_equal, >=, double)
-    OPERATOR_DEF_CONTENT(equal, ==, double)
-    OPERATOR_DEF_CONTENT(not_equal, !=, double)
-    OPERATOR_DEF(bit_and, &, int)
-    OPERATOR_DEF(bit_or, |, int)
-    OPERATOR_DEF(bit_xor, ^, int)
-    OPERATOR_DEF(logic_and, &&, int)
-    OPERATOR_DEF(logic_or, ||, int)
-    OPERATOR_DEF(shift_left, <<, int)
-    OPERATOR_DEF(shift_right, >>, int)
+    //四则运算准许用户增加自定义功能。数值运算优先使用内建类型规则。
+    Object add(const Object& o1, const Object& o2);
+    Object sub(const Object& o1, const Object& o2);
+    Object mul(const Object& o1, const Object& o2);
+    Object div(const Object& o1, const Object& o2);
+    Object mod(const Object& o1, const Object& o2);
+    Object less(const Object& o1, const Object& o2);
+    Object more(const Object& o1, const Object& o2);
+    Object less_equal(const Object& o1, const Object& o2);
+    Object more_equal(const Object& o1, const Object& o2);
+    Object equal(const Object& o1, const Object& o2);
+    Object not_equal(const Object& o1, const Object& o2);
+    Object bit_and(const Object& o1, const Object& o2);
+    Object bit_or(const Object& o1, const Object& o2);
+    Object bit_xor(const Object& o1, const Object& o2);
+    Object logic_and(const Object& o1, const Object& o2);
+    Object logic_or(const Object& o1, const Object& o2);
+    Object shift_left(const Object& o1, const Object& o2);
+    Object shift_right(const Object& o1, const Object& o2);
 };
-
-//#define OPERATOR_DEF_DOUBLE(op) \
-//    Object op(const Object& o1, const Object& o2) { return Object(double(o1.value) op double(o2.value)); }
 
 }    // namespace cifa
