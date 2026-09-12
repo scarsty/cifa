@@ -47,7 +47,7 @@ static std::unordered_set<std::string> make_token_set(const std::vector<std::vec
     return tokens;
 }
 
-static bool parse_number_literal(const std::string& text, Object& value)
+bool Cifa::parse_number_literal(const std::string& text, Object& value)
 {
     std::string normalized = text;
     const bool has_hex_prefix = normalized.size() > 2 && normalized[0] == '0'

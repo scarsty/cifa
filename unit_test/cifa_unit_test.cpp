@@ -5,9 +5,7 @@
 #include <print>
 #include <numeric>
 #include <format>
-#ifdef CIFA_TEST_BYTECODE
 #include "../CifaBytecode.h"
-#endif
 
 using namespace cifa;
 using DirectCifa = Cifa;
@@ -2609,11 +2607,8 @@ bool include_test()
 };
 
 using DirectTests = BackendTests<DirectCifa>;
-#ifdef CIFA_TEST_BYTECODE
 using BytecodeTests = BackendTests<CifaBytecode>;
-#endif
 
-#ifdef CIFA_TEST_BYTECODE
 double generated_perf_function_value(int function_index, int a, int b)
 {
     double sum = 0;
@@ -2771,7 +2766,6 @@ bool nested_bytecode_context_test()
     c.run_script("replacement: record(100); exit();");
     return !c.has_runtime_error() && total == 313;
 }
-#endif
 
 bool direct_source_map_test()
 {
@@ -2929,12 +2923,10 @@ bool diagnostic_position_test()
 
 int main(int argc, char** argv)
 {
-#ifdef CIFA_TEST_BYTECODE
     if (argc > 1 && (std::string(argv[1]) == "--perf" || std::string(argv[1]) == "--perf-large"))
     {
         return large_script_performance_test() ? 0 : 1;
     }
-#endif
     if (argc > 1 && std::string(argv[1]) == "--error-checks")
     {
         DirectTests direct;
@@ -2944,9 +2936,7 @@ int main(int argc, char** argv)
 
     int total = 0, ok = 0;
     DirectTests direct;
-#ifdef CIFA_TEST_BYTECODE
     BytecodeTests bytecode;
-#endif
     auto run_direct_test = [&total, &ok](std::string name, bool (*test)())
     {
         total++;
@@ -2961,7 +2951,6 @@ int main(int argc, char** argv)
         }
     };
 
-#ifdef CIFA_TEST_BYTECODE
     auto run_common_test = [&total, &ok, &direct, &bytecode](std::string name, auto direct_test, auto bytecode_test)
     {
         total++;
@@ -2979,9 +2968,6 @@ int main(int argc, char** argv)
         }
     };
     #define RUN_COMMON(name) run_common_test(#name, &DirectTests::name, &BytecodeTests::name)
-#else
-    #define RUN_COMMON(name) run_direct_test(#name, +[]() { DirectTests direct; return direct.name(); })
-#endif
 
     run_direct_test("diagnostic_position_test", diagnostic_position_test);
     run_direct_test("direct_source_map_test", direct_source_map_test);
@@ -3059,11 +3045,9 @@ int main(int argc, char** argv)
 
         run_direct_test("custom_operator_dispatch_test", +[]() { DirectTests direct; return direct.custom_operator_dispatch_test(); });
 
-#ifdef CIFA_TEST_BYTECODE
         run_direct_test("bytecode_execution_test", bytecode_execution_test);
         run_direct_test("nested_bytecode_context_test", nested_bytecode_context_test);
-#endif
 
     std::println("Passed {} out of {} tests.", ok, total);
-    return 0;
+        return ok == total ? 0 : 1;
 }

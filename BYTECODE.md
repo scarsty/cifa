@@ -182,7 +182,7 @@ Return
 
 - `build\bytecode_test.exe --verifier-only`：字节码验证器通过。
 - `build\bytecode_test.exe`：公开 API 的递归、重复执行、标签、嵌套脚本、函数持久化/重定义和原样 500 位 PI 均通过。
-- `unit_test\cifa_unit_test.cpp`：Cifa 直接求值 Debug 模式为 `Passed 72 out of 72 tests.`；定义 `CIFA_TEST_BYTECODE` 的 Debug 模式为 `Passed 75 out of 75 tests.`。
+- `unit_test\cifa_unit_test.cpp`：每个共通测试项都会在 `Cifa` 与 `CifaBytecode` 上执行，两个后端都通过才算通过。
 
 `common_backend_conformance_test` 用一份模板化场景分别执行 `Cifa` 与 `CifaBytecode`。控制流和递归、数组/map、跨脚本函数和 struct、宿主回调、嵌套脚本与 include 必须在两个后端都通过，该测试才通过。新增共通行为时应优先加入这组共享场景，而不是复制一份 Cifa 测试和一份字节码测试。
 

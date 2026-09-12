@@ -1,7 +1,5 @@
 #include "CifaBytecode.h"
 #include <algorithm>
-#include <cerrno>
-#include <cstdlib>
 
 namespace cifa
 {
@@ -21,43 +19,6 @@ std::string CifaBytecode::Machine::format_frame(const SourceLocation& location)
 CifaBytecode::SourceLocation::SourceLocation(const CalUnit& node)
     : str(node.str), line(node.line), col(node.col)
 {
-}
-
-static bool parse_bytecode_number_literal(const std::string& text, Object& value)
-{
-    std::string normalized = text;
-    const bool hexadecimal = normalized.size() > 2 && normalized[0] == '0'
-        && (normalized[1] == 'x' || normalized[1] == 'X');
-    const bool floating_suffix = (normalized.ends_with('f') || normalized.ends_with('F'))
-        && (!hexadecimal || normalized.find_first_of(".pP") != std::string::npos);
-    if (floating_suffix) normalized.pop_back();
-    const bool binary = normalized.size() > 2 && normalized[0] == '0' && (normalized[1] == 'b' || normalized[1] == 'B');
-    const bool octal = normalized.size() > 1 && normalized[0] == '0' && normalized.find_first_of(".eE") == std::string::npos;
-    if (hexadecimal || binary || octal)
-    {
-        const char* digits = normalized.c_str() + (hexadecimal || binary ? 2 : 0);
-        char* end = nullptr;
-        errno = 0;
-        const auto parsed = std::strtoull(digits, &end, hexadecimal ? 16 : binary ? 2 : 8);
-        if (errno == ERANGE || end == digits || *end != '\0' || parsed > static_cast<unsigned long long>(std::numeric_limits<std::int64_t>::max())) return false;
-        value = Object(static_cast<std::int64_t>(parsed));
-        return true;
-    }
-    if (normalized.find_first_of(".eE") == std::string::npos)
-    {
-        char* end = nullptr;
-        errno = 0;
-        const auto parsed = std::strtoll(normalized.c_str(), &end, 10);
-        if (errno == ERANGE || end == normalized.c_str() || *end != '\0') return false;
-        value = floating_suffix ? Object(static_cast<double>(parsed)) : Object(static_cast<std::int64_t>(parsed));
-        return true;
-    }
-    char* end = nullptr;
-    errno = 0;
-    const double parsed = std::strtod(normalized.c_str(), &end);
-    if (errno == ERANGE || end == normalized.c_str() || *end != '\0') return false;
-    value = Object(parsed);
-    return true;
 }
 
 CifaBytecode::WriteOperation CifaBytecode::write_operation(const std::string& symbol)
@@ -866,7 +827,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<Instruction>& instructions)
         if (node.type == CalUnitType::Constant)
         {
             Object value;
-            if (parse_bytecode_number_literal(node.str, value))
+            if (Cifa::parse_number_literal(node.str, value))
             {
                 instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
                 constants.push_back(std::move(value));
@@ -1430,6 +1391,8 @@ void CifaBytecode::translate(Cifa& compiler)
         const size_t mark = root_instructions.code.size();
         root_instructions.code.push_back({Opcode::LoopMark, source_ref(&compiler.compilation_root)});
         compile_blocks.push_back({mark, {}, {}});
+        for (const auto& child : compiler.compilation_root.v)
+            if (child.type == CalUnitType::Label) compile_blocks.back().targets[child.str] = 0;
         for (auto& child : compiler.compilation_root.v)
         {
             root_entries.push_back(root_instructions.code.size());
@@ -2716,54 +2679,35 @@ Object CifaBytecode::Machine::call_host(const std::string& name, ObjectVector& a
         set_error("function '" + name + "' is not defined");
         return {};
     }
-    try
-    {
-        auto earlier_errors = host.errors;
-        Object::set_runtime_error_reporter([this, &locations](const std::string& message, const Object* source)
-            {
-                const auto* location = locations.empty() ? nullptr : &locations.front();
-                if (source != nullptr && source->getSpecialType() == "NoValue") set_no_value_error(*source, location);
-                else set_error(message, location);
-                host.set_runtime_error(message, source);
-            });
-        Object result = function->second(arguments);
-        Object::clear_runtime_error_reporter();
-        earlier_errors.insert(host.errors.begin(), host.errors.end());
-        host.errors = std::move(earlier_errors);
-        const auto host_runtime_error = host.get_runtime_error();
-        if (host.has_runtime_error() && error.empty())
+    auto earlier_errors = host.errors;
+    Object::set_runtime_error_reporter([this, &locations](const std::string& message, const Object* source)
         {
-            const std::string prefix = "Runtime Error: ";
-            const auto message = host_runtime_error.starts_with(prefix)
-                ? host_runtime_error.substr(prefix.size(), host_runtime_error.find('\n') - prefix.size())
-                : host_runtime_error;
-            set_error(message, locations.empty() ? nullptr : &locations.front());
-        }
-        host.clear_runtime_error();
-        host.last_exit_requested = false;
-        if (result.getSpecialType() == "Error")
-        {
-            if (name == "run_string" || name == "run_file" || result.toString() == "RuntimeError")
-            {
-                set_error(result.toString());
-                return {};
-            }
-        }
-        return result;
-    }
-    catch (const std::exception& exception)
+            const auto* location = locations.empty() ? nullptr : &locations.front();
+            if (source != nullptr && source->getSpecialType() == "NoValue") set_no_value_error(*source, location);
+            else set_error(message, location);
+            host.set_runtime_error(message, source);
+        });
+    Object result = function->second(arguments);
+    Object::clear_runtime_error_reporter();
+    earlier_errors.insert(host.errors.begin(), host.errors.end());
+    host.errors = std::move(earlier_errors);
+    const auto host_runtime_error = host.get_runtime_error();
+    if (host.has_runtime_error() && error.empty())
     {
-        Object::clear_runtime_error_reporter();
-        host.clear_runtime_error();
-        set_error("host function '" + name + "' failed: " + exception.what(), locations.empty() ? nullptr : &locations.front());
+        const std::string prefix = "Runtime Error: ";
+        const auto message = host_runtime_error.starts_with(prefix)
+            ? host_runtime_error.substr(prefix.size(), host_runtime_error.find('\n') - prefix.size())
+            : host_runtime_error;
+        set_error(message, locations.empty() ? nullptr : &locations.front());
     }
-    catch (...)
+    host.clear_runtime_error();
+    host.last_exit_requested = false;
+    if (result.getSpecialType() == "Error" && result.toString() == "RuntimeError")
     {
-        Object::clear_runtime_error_reporter();
-        host.clear_runtime_error();
-        set_error("host function '" + name + "' failed", locations.empty() ? nullptr : &locations.front());
+        set_error(result.toString());
+        return {};
     }
-    return {};
+    return result;
 }
 
 Object CifaBytecode::Machine::call_method(const std::string& name, const SourceLocation& location, Object& object,
@@ -3030,6 +2974,7 @@ Object CifaBytecode::run_script(std::string script)
     nested->translate(*this);
     if (!nested->valid()) return Object("", "Error");
     const auto result = session->run(*nested);
+    if (nested->has_runtime_error()) runtime_error = nested->get_runtime_error();
     nested_modules.push_back(std::move(nested));
     return result;
 }
@@ -3051,6 +2996,7 @@ Object CifaBytecode::run_file(const std::string& filename)
     nested->translate(*this);
     if (!nested->valid()) return Object("", "Error");
     const auto result = session->run(*nested);
+    if (nested->has_runtime_error()) runtime_error = nested->get_runtime_error();
     nested_modules.push_back(std::move(nested));
     return result;
 }

@@ -756,6 +756,7 @@ private:
 private:
     bool compile_script_internal(std::string script);
     bool compile_file_internal(const std::string& filename);
+    static bool parse_number_literal(const std::string& text, Object& value);
     Object run_compilation_result();
     FunctionOverloads* find_script_function(const std::string& name);
     const std::vector<StructField>* find_struct_definition(const std::string& name) const;
