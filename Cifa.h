@@ -26,11 +26,13 @@ namespace cifa
 {
 struct CalUnit;
 class Cifa;
+class CifaBytecode;
 
 struct Object
 {
     friend CalUnit;
     friend Cifa;
+    friend class CifaBytecode;
 
     Object() {}
 
@@ -423,32 +425,9 @@ struct SourceLineInfo
     std::string text;
 };
 
-class Ast
-{
-    friend class Cifa;
-
-    CalUnit root;
-    std::unordered_map<std::string, size_t> labels;
-    std::unordered_map<std::string, FunctionOverloads> functions;
-    std::unordered_map<std::string, std::vector<StructField>> struct_defs;
-    std::vector<SourceLineInfo> source_line_infos;
-    bool compiling = false;
-    bool compiled = false;
-    bool compile_failed = false;
-
-public:
-    Ast() = default;
-    Ast(const Ast&) = delete;
-    Ast& operator=(const Ast&) = delete;
-    Ast(Ast&&) noexcept = default;
-    Ast& operator=(Ast&&) noexcept = default;
-
-    bool valid() const { return compiled && !compile_failed; }
-    explicit operator bool() const { return valid(); }
-};
-
 class Cifa
 {
+    friend class CifaBytecode;
 public:
     using func_type = std::function<Object(ObjectVector&)>;
     using ScopeStack = std::vector<std::unordered_map<std::string, Object>>;
@@ -589,13 +568,20 @@ private:
         std::string return_type;
     };
 
+    struct RuntimeFrame
+    {
+        const CalUnit* node = nullptr;
+        const std::vector<SourceLineInfo>* source_lines = nullptr;
+        std::string function_name;
+    };
+
     struct ExecutionContext
     {
-        explicit ExecutionContext(Ast& current_program) : program(current_program) { }
-
-        Ast& program;
-        size_t start_index = 0;
-        std::vector<std::string> runtime_call_stack;
+        CalUnit root;
+        std::unordered_map<std::string, FunctionOverloads> functions;
+        std::unordered_map<std::string, std::vector<StructField>> struct_defs;
+        std::vector<SourceLineInfo> source_line_infos;
+        std::vector<RuntimeFrame> runtime_call_stack;
         std::vector<std::string> runtime_error_call_stack;
         const std::vector<CalUnit>* active_function_arguments = nullptr;
         const ObjectVector* active_function_values = nullptr;
@@ -606,7 +592,15 @@ private:
     };
 
     std::deque<ExecutionContext> execution_contexts;
-    Ast compilation_ast;
+    CalUnit compilation_root;
+    std::unordered_map<std::string, FunctionOverloads> compilation_functions;
+    std::unordered_map<std::string, std::vector<StructField>> compilation_struct_defs;
+    std::vector<SourceLineInfo> compilation_source_line_infos;
+    const std::unordered_map<std::string, FunctionOverloads>* compile_visible_functions = nullptr;
+    const std::unordered_map<std::string, std::vector<StructField>>* compile_visible_struct_defs = nullptr;
+    bool compiling = false;
+    bool compiled = false;
+    bool compile_failed = false;
     ErrorSet errors;
     std::vector<std::string> runtime_error_call_stack;
     std::string runtime_error_message;
@@ -688,13 +682,8 @@ public:
 
     void set_include_dirs(const std::vector<std::string>& dirs);    //设置#include搜索目录
 
-    Object run_script(std::string script);    //运行脚本，使用实例全局变量表；按当前目录和include搜索目录处理#include
-
-    Object run_file(const std::string& filename);    //从文件运行脚本，支持#include指令，并将文件所在目录作为搜索路径
-
-    Ast compile_script(std::string script);    //解析并返回独立 AST，不执行
-    Ast compile_file(const std::string& filename);    //从文件解析并返回独立 AST，不执行
-    Object run(Ast& program, const std::string& entry_label = "");    //执行传入 AST；空标签从第一个顶层节点开始
+    Object run_script(std::string script);
+    Object run_file(const std::string& filename);
 
     bool has_error() const;
 
@@ -752,7 +741,7 @@ private:
     Object eval_scoped(CalUnit& c, ScopeStack& scopes);
     bool eval_condition(CalUnit& c, ScopeStack& scopes);
     Object run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, ScopeStack& scopes);
-    void run_compilation(const std::function<void(Ast&)>& action);
+    void run_compilation(const std::function<void()>& action);
     Object eval_builtin_method(const CalUnit& method, Object& obj, std::vector<CalUnit>& args, ScopeStack& scopes);
     bool apply_declared_type(Object& object, const std::string& type_name, const CalUnit* location, bool infer_auto);
     Object convert_object_type(const Object& source, const std::string& type_name, const CalUnit* location);
@@ -763,9 +752,13 @@ private:
     const ErrorSet& active_errors() const;
     const std::vector<SourceLineInfo>& active_source_line_infos() const;
     void record_error(ErrorMessage error);
+
+private:
+    bool compile_script_internal(std::string script);
+    bool compile_file_internal(const std::string& filename);
+    Object run_compilation_result();
     FunctionOverloads* find_script_function(const std::string& name);
     const std::vector<StructField>* find_struct_definition(const std::string& name) const;
-
     void expand_comma(CalUnit& c1, std::vector<CalUnit>& v);
     CalUnitType guess_char(char c);
     std::list<CalUnit> split(std::string& str);
@@ -793,6 +786,8 @@ private:
     bool has_return_value() const;
     Object& return_value();
     std::string format_runtime_frame(const CalUnit& c) const;
+    static std::string format_runtime_frame(const CalUnit& c, const std::vector<SourceLineInfo>& source_line_infos);
+    static std::string format_runtime_frame(const RuntimeFrame& frame);
     void set_runtime_error(const std::string& message, const Object* source = nullptr, const CalUnit* location = nullptr);
     void clear_runtime_error();
     bool should_stop_execution() const { return has_runtime_error() || is_exit_requested(); }
@@ -800,7 +795,7 @@ private:
     std::string format_runtime_error() const;
     void print_runtime_error() const;
     Object make_error_result() const;
-    void compile_pipeline(std::string str, Ast& program);
+    void compile_pipeline(std::string str);
 
     void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
