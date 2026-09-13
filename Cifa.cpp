@@ -622,6 +622,7 @@ Cifa::Cifa()
     REGISTER_MATH2(fmin);
 #undef REGISTER_MATH2
 #undef REGISTER_MATH1
+    builtin_function_generations = function_generations;
 }
 
 const std::unordered_set<std::string>& Cifa::keyword_tokens()
@@ -801,9 +802,20 @@ bool Cifa::has_return_value() const
     return !return_states.empty() && return_states.back().has_value;
 }
 
-bool Cifa::is_control_signal(const Object& value, const std::string& signal) const
+void Cifa::set_control_flow(ControlFlow flow, std::string label)
 {
-    return value.type1 == "__" && value.isType<std::string>() && value.ref<std::string>() == signal;
+    auto& context = execution_contexts.back();
+    context.control_flow = flow;
+    context.goto_label = std::move(label);
+}
+
+bool Cifa::consume_control_flow(ControlFlow flow)
+{
+    auto& context = execution_contexts.back();
+    if (context.control_flow != flow) return false;
+    context.control_flow = ControlFlow::None;
+    context.goto_label.clear();
+    return true;
 }
 
 //获取当前执行或函数调用的返回值引用
@@ -1232,10 +1244,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
     }
     else if (c.type == CalUnitType::Goto)
     {
-        return Object(c.str, "__goto");
+        set_control_flow(ControlFlow::Goto, c.str);
+        return Object();
     }
     else if (c.type == CalUnitType::Key)
     {
+        auto& context = execution_contexts.back();
         if (c.str == "if")    //if(条件1){语句1}else{语句2}
         {
             if (eval_condition(c.v[0], scopes))    //判断 [条件1]
@@ -1298,9 +1312,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     o = eval_scoped(c.v[1], scopes);
                     scopes.pop_back();
                     if (should_stop_execution()) { return o; }
-                    if (o.type1 == "__goto") { return o; }
-                    if (is_control_signal(o, "break")) { break; }
-                    if (is_control_signal(o, "continue")) { continue; }
+                    if (context.control_flow == ControlFlow::Goto) { return o; }
+                    if (consume_control_flow(ControlFlow::Break)) { break; }
+                    if (consume_control_flow(ControlFlow::Continue)) { continue; }
                     if (has_return_value()) { return return_value(); }
                 }
                 return Object(0);
@@ -1315,9 +1329,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             {
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句3] 并 取执行结果
                 if (should_stop_execution()) { return o; }
-                if (o.type1 == "__goto") { return o; }
-                if (is_control_signal(o, "break")) { break; }
-                if (is_control_signal(o, "continue")) { continue; }
+                if (context.control_flow == ControlFlow::Goto) { return o; }
+                if (consume_control_flow(ControlFlow::Break)) { break; }
+                if (consume_control_flow(ControlFlow::Continue)) { continue; }
                 if (has_return_value()) { return return_value(); }
             }
             return Object(0);
@@ -1329,9 +1343,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             {
                 o = eval_scoped(c.v[1], scopes);    //执行 [语句1] 并 取执行结果
                 if (should_stop_execution()) { return o; }
-                if (o.type1 == "__goto") { return o; }
-                if (is_control_signal(o, "break")) { break; }
-                if (is_control_signal(o, "continue")) { continue; }
+                if (context.control_flow == ControlFlow::Goto) { return o; }
+                if (consume_control_flow(ControlFlow::Break)) { break; }
+                if (consume_control_flow(ControlFlow::Continue)) { continue; }
                 if (has_return_value()) { return return_value(); }
             }
             return Object(0);
@@ -1343,9 +1357,9 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
             {
                 o = eval_scoped(c.v[0], scopes);    //执行 [语句1] 并 取执行结果
                 if (should_stop_execution()) { return o; }
-                if (o.type1 == "__goto") { return o; }
-                if (is_control_signal(o, "break")) { break; }
-                if (is_control_signal(o, "continue")) { continue; }
+                if (context.control_flow == ControlFlow::Goto) { return o; }
+                if (consume_control_flow(ControlFlow::Break)) { break; }
+                consume_control_flow(ControlFlow::Continue);
                 if (has_return_value()) { return return_value(); }
             } while (!is_exit_requested() && eval_condition(c.v[1].v[0], scopes));    //判断 [条件1]
             return Object(0);
@@ -1383,12 +1397,17 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                         scopes.pop_back();
                         return o;
                     }
-                    if (o.type1 == "__goto")
+                    if (context.control_flow == ControlFlow::Goto)
                     {
                         scopes.pop_back();
                         return o;
                     }
-                    if (is_control_signal(o, "break")) { break; }
+                    if (context.control_flow == ControlFlow::Continue)
+                    {
+                        scopes.pop_back();
+                        return o;
+                    }
+                    if (consume_control_flow(ControlFlow::Break)) { break; }
                     if (has_return_value())
                     {
                         auto ret = return_value();
@@ -1415,15 +1434,18 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
         }
         if (c.str == "break")
         {
-            return Object("break", "__");
+            set_control_flow(ControlFlow::Break);
+            return Object();
         }
         if (c.str == "continue")
         {
-            return Object("continue", "__");
+            set_control_flow(ControlFlow::Continue);
+            return Object();
         }
         if (c.str == "goto" && c.v.size() == 1 && c.v[0].type == CalUnitType::Parameter)
         {
-            return Object(c.v[0].str, "__goto");
+            set_control_flow(ControlFlow::Goto, c.v[0].str);
+            return Object();
         }
         if (c.str == "true")
         {
@@ -1474,11 +1496,12 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 return o;
             }
-            if (o.type1 == "__goto")
+            if (context.control_flow == ControlFlow::Goto)
             {
-                auto target = local_labels.find(o.toString());
+                auto target = local_labels.find(context.goto_label);
                 if (target != local_labels.end())
                 {
+                    consume_control_flow(ControlFlow::Goto);
                     index = target->second;
                     continue;
                 }
@@ -1488,8 +1511,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 }
                 return o;
             }
-            if (is_control_signal(o, "break")) { break; }
-            if (is_control_signal(o, "continue")) { break; }
+            if (context.control_flow == ControlFlow::Break || context.control_flow == ControlFlow::Continue) { break; }
             if (has_return_value())
             {
                 auto ret = return_value();
@@ -2298,11 +2320,19 @@ void Cifa::combine_ops(std::list<CalUnit>& ppp)
                                     is_single = true;
                                 }
                             }
-                            if (!is_single && it != ppp.begin() && (it->str == "++" || it->str == "--") && std::prev(it)->type == CalUnitType::Parameter)
+                            if (!is_single && it != ppp.begin() && (it->str == "++" || it->str == "--"))
                             {
-                                it->v = { std::move(*std::prev(it)) };
-                                it->str = "()" + it->str;
-                                it = ppp.erase(std::prev(it));
+                                auto previous = std::prev(it);
+                                const bool assignable = previous->type == CalUnitType::Parameter
+                                    || (previous->type == CalUnitType::Operator && previous->str == "."
+                                        && previous->v.size() == 2 && previous->v[1].type == CalUnitType::Parameter)
+                                    || (!previous->v.empty() && previous->v[0].str == "[]");
+                                if (assignable)
+                                {
+                                    it->v = { std::move(*previous) };
+                                    it->str = "()" + it->str;
+                                    it = ppp.erase(previous);
+                                }
                             }
                         }
                         else
@@ -3129,6 +3159,8 @@ bool Cifa::register_function(const std::string& name, func_type func)
 {
     if (!validate_registration_name(name)) { return false; }
     functions[name] = std::move(func);
+    ++function_version;
+    ++function_generations[name];
     return true;
 }
 
@@ -3524,9 +3556,8 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                     {
                         check_cal_unit(sub, &c.v[0], p);
                     }
-                    if (c.v[0].type == CalUnitType::Parameter && p[c.v[0].str].type1 == "__"
-                        || c.v[0].type != CalUnitType::Parameter
-                            && !(c.v[0].type == CalUnitType::Operator && c.v[0].str == "."))
+                    if (c.v[0].type != CalUnitType::Parameter
+                        && !(c.v[0].type == CalUnitType::Operator && c.v[0].str == "."))
                     {
                         add_error(c.v[0], "'{}' cannot be assigned", c.v[0].str);
                     }
@@ -4471,7 +4502,8 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source, c
     error_message = message.empty() ? "runtime error" : message;
     if (source != nullptr && source->getSpecialType() == "NoValue")
     {
-        const auto* no_value = std::any_cast<Object::NoValue>(&source->value);
+        const auto* object = std::get_if<std::any>(&source->value);
+        const auto* no_value = object == nullptr ? nullptr : std::any_cast<Object::NoValue>(object);
         if (no_value != nullptr && !no_value->call_frame.empty())
         {
             error_message += "\nNo return value originated at:\n" + no_value->call_frame;

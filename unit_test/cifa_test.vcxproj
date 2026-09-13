@@ -129,6 +129,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\Cifa.cpp" />
+    <ClCompile Include="..\CifaBytecode.cpp" />
     <ClCompile Include="cifa_unit_test.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
