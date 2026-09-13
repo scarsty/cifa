@@ -867,7 +867,8 @@ private:
     Object make_error_result() const;
     void compile_pipeline(std::string str);
 
-    void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p);
+    void check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p,
+        size_t loop_depth = 0, size_t switch_depth = 0);
     void check_non_block_body(CalUnit& c, const std::unordered_map<std::string, Object>& p);
 
     static std::string get_directory(const std::string& filepath);

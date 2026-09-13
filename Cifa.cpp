@@ -3527,7 +3527,8 @@ void Cifa::check_non_block_body(CalUnit& body, const std::unordered_map<std::str
 }
 
 //语法检查：递归检查语法树节点的合法性（运算符、变量、函数、关键字等）
-void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p)
+void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::string, Object>& p,
+    size_t loop_depth, size_t switch_depth)
 {
     //若提前return，表示不再检查其下的结构
     if (c.type == CalUnitType::Operator && c.un_combine == false)
@@ -3549,12 +3550,12 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
                 }
                 else
                 {
-                    check_cal_unit(c.v[1], &c, p);    //here make sure no undefined parameters at right of "="
+                    check_cal_unit(c.v[1], &c, p, loop_depth, switch_depth);    //here make sure no undefined parameters at right of "="
                     p[c.v[0].str].name = c.v[0].str;
                     //赋值左侧的下标表达式也需要递归检查
                     for (auto& sub : c.v[0].v)
                     {
-                        check_cal_unit(sub, &c.v[0], p);
+                        check_cal_unit(sub, &c.v[0], p, loop_depth, switch_depth);
                     }
                     if (c.v[0].type != CalUnitType::Parameter
                         && !(c.v[0].type == CalUnitType::Operator && c.v[0].str == "."))
@@ -3906,6 +3907,14 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             {
                 add_error(c, "{} missing ;", c.str);
             }
+            if (c.str == "break" && loop_depth == 0 && switch_depth == 0)
+            {
+                add_error(c, "break statement is not within a loop or switch");
+            }
+            if (c.str == "continue" && loop_depth == 0)
+            {
+                add_error(c, "continue statement is not within a loop");
+            }
         }
     }
     else if (c.type == CalUnitType::Union)
@@ -3970,6 +3979,9 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         //不应存在类型符号
         add_error(c, "type {} has operands", c.str);
     }
+    const bool enters_loop = c.type == CalUnitType::Key
+        && (c.str == "for" || c.str == "while" || c.str == "do");
+    const bool enters_switch = c.type == CalUnitType::Key && c.str == "switch";
     for (auto& c1 : c.v)
     {
         //=的子节点已在上方显式处理过，跳过避免重复检查
@@ -3977,7 +3989,7 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         {
             continue;
         }
-        check_cal_unit(c1, &c, p);
+        check_cal_unit(c1, &c, p, loop_depth + enters_loop, switch_depth + enters_switch);
     }
 }
 

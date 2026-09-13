@@ -18,41 +18,51 @@ struct RegisterBackendTest
     {
         using Slots = CifaBytecode::RegisterSlots;
         static_assert(sizeof(std::int64_t) == 8 && sizeof(double) == 8 && sizeof(std::uint8_t) == 1);
-        Slots partitioned(4);
-        partitioned.write_payload(0, std::int64_t(8));
-        partitioned.write_payload(1, 2.5);
-        partitioned.write_payload(2, true);
-        partitioned.write_payload(3, std::any(std::string("resource")));
-        if (partitioned.owner.integers.size() != 1 || partitioned.owner.doubles.size() != 1
-            || partitioned.owner.booleans.size() != 1 || partitioned.owner.resources.size() != 1) return false;
-        if (partitioned.owner.integers[0] != 8 || partitioned.owner.doubles[0] != 2.5
-            || partitioned.owner.booleans[0] != 1) return false;
-        auto* resource_address = &partitioned.resource_payload(3);
-        partitioned.enter(64);
+        static_assert(sizeof(CifaBytecode::CompactValue) == 16);
+        CifaBytecode::CompactValue compact_integer(std::int64_t(-17));
+        CifaBytecode::CompactValue compact_floating(2.75);
+        CifaBytecode::CompactValue compact_boolean(true);
+        if (compact_integer.tag != CifaBytecode::CompactValue::Tag::Integer || compact_integer.integer() != -17
+            || compact_floating.tag != CifaBytecode::CompactValue::Tag::Floating || compact_floating.floating() != 2.75
+            || compact_boolean.tag != CifaBytecode::CompactValue::Tag::Boolean || !compact_boolean.boolean()) return false;
+        CifaBytecode::CompactValue compact_array(std::any(ObjectVector{Object(1), Object(2)}));
+        CifaBytecode::CompactValue compact_array_copy = compact_array;
+        compact_array_copy.resource<CifaBytecode::VmArray>()->values.front() = CifaBytecode::CompactValue(std::int64_t(9));
+        if (CifaBytecode::value_get<std::int64_t>(compact_array.resource<CifaBytecode::VmArray>()->values.front()) != 1) return false;
+        CifaBytecode::CompactValue compact_moved = std::move(compact_array_copy);
+        if (!compact_array_copy.empty() || CifaBytecode::value_get<std::int64_t>(
+            compact_moved.resource<CifaBytecode::VmArray>()->values.front()) != 9) return false;
+        Slots unified(4);
+        unified.write_payload(0, std::int64_t(8));
+        unified.write_payload(1, 2.5);
+        unified.write_payload(2, true);
+        unified.write_payload(3, std::any(std::string("resource")));
+        if (CifaBytecode::value_get<std::int64_t>(unified.values[0].value) != 8
+            || CifaBytecode::value_get<double>(unified.values[1].value) != 2.5
+            || !CifaBytecode::value_get<bool>(unified.values[2].value)
+            || std::any_cast<std::string>(CifaBytecode::value_get<std::any>(unified.values[3].value)) != "resource") return false;
+        unified.enter(64);
         for (size_t index = 0; index < 64; ++index)
-            partitioned.write_payload(index, std::any(std::string("nested")));
-        partitioned.restore(0, 4, 4);
-        if (&partitioned.resource_payload(3) != resource_address
-            || std::any_cast<std::string>(std::get<std::any>(*resource_address)) != "resource") return false;
+            unified.write_payload(index, std::any(std::string("nested")));
+        unified.restore(0, 4, 4);
+        if (std::any_cast<std::string>(CifaBytecode::value_get<std::any>(unified.resource_payload(3))) != "resource") return false;
         for (size_t index = 0; index < 32; ++index)
         {
-            partitioned.write_payload(0, 7.5);
-            partitioned.write_payload(0, std::int64_t(9));
+            unified.write_payload(0, 7.5);
+            unified.write_payload(0, std::int64_t(9));
         }
-        if (partitioned.owner.integers.size() != 1 || partitioned.owner.doubles.size() != 2
-            || std::get<std::int64_t>(partitioned.payload(0)) != 9) return false;
-        const size_t resource_offset = partitioned.values[3].offset;
-        partitioned.move(0, partitioned, 3);
-        if (partitioned.values[0].offset != resource_offset
-            || &partitioned.resource_payload(0) != resource_address
-            || !std::holds_alternative<std::monostate>(partitioned.payload(3))) return false;
+        if (!CifaBytecode::value_holds<std::int64_t>(unified.values[0].value)
+            || CifaBytecode::value_get<std::int64_t>(unified.payload(0)) != 9) return false;
+        unified.move(0, unified, 3);
+        if (std::any_cast<std::string>(CifaBytecode::value_get<std::any>(unified.resource_payload(0))) != "resource"
+            || !CifaBytecode::value_holds<std::monostate>(unified.payload(3))) return false;
         CifaBytecode::Scope dynamic_scope;
         const auto initial_binding = dynamic_scope.create("first");
         initial_binding.file->write_payload(initial_binding.slot, std::int64_t(17));
         for (size_t index = 0; index < 64; ++index) dynamic_scope.create("slot_" + std::to_string(index));
         const auto* preserved = dynamic_scope.find("first");
         if (!preserved || preserved->file != initial_binding.file || preserved->slot != initial_binding.slot
-            || std::get<std::int64_t>(preserved->file->payload(preserved->slot)) != 17) return false;
+            || CifaBytecode::value_get<std::int64_t>(preserved->file->payload(preserved->slot)) != 17) return false;
         const auto repeated = dynamic_scope.create("first");
         if (repeated.slot != initial_binding.slot || dynamic_scope.dynamic_registers->size() != 65) return false;
         Slots values(8);
@@ -61,22 +71,22 @@ struct RegisterBackendTest
         if (shared_window.storage || &shared_window.values != &shared_owner.values
             || &shared_window.bindings != &shared_owner.bindings || &shared_window.origins != &shared_owner.origins) return false;
         shared_window.write_payload(0, std::int64_t(41));
-        if (std::get<std::int64_t>(shared_owner.payload(2)) != 41) return false;
+        if (CifaBytecode::value_get<std::int64_t>(shared_owner.payload(2)) != 41) return false;
         shared_owner.enter(64);
         shared_window.write_payload(1, std::int64_t(42));
         shared_owner.restore(0, 8, 8);
-        if (std::get<std::int64_t>(shared_owner.payload(3)) != 42) return false;
+        if (CifaBytecode::value_get<std::int64_t>(shared_owner.payload(3)) != 42) return false;
         shared_window.move(0, shared_owner, 2);
         shared_window.copy(1, shared_owner, 3);
-        if (std::get<std::int64_t>(shared_owner.payload(2)) != 41
-            || std::get<std::int64_t>(shared_owner.payload(3)) != 42) return false;
+        if (CifaBytecode::value_get<std::int64_t>(shared_owner.payload(2)) != 41
+            || CifaBytecode::value_get<std::int64_t>(shared_owner.payload(3)) != 42) return false;
         values.import_object(0, Object(std::int64_t(7)));
         values.import_object(1, Object(2.5));
         values.import_object(2, Object(true));
-        if (values.values.size() != 8 || std::get<std::int64_t>(values.payload(0)) != 7 || std::get<double>(values.payload(1)) != 2.5
-            || !std::holds_alternative<bool>(values.payload(2))) return false;
+        if (values.values.size() != 8 || CifaBytecode::value_get<std::int64_t>(values.payload(0)) != 7 || CifaBytecode::value_get<double>(values.payload(1)) != 2.5
+            || !CifaBytecode::value_holds<bool>(values.payload(2))) return false;
         values.write_payload(0, std::int64_t(9));
-        if (std::get<std::int64_t>(values.payload(0)) != 9) return false;
+        if (CifaBytecode::value_get<std::int64_t>(values.payload(0)) != 9) return false;
         values.enter(3);
         if (values.base() != 8 || values.top() != 11 || values.size() != 3) return false;
         values.restore(0, 8, 8);
@@ -84,19 +94,21 @@ struct RegisterBackendTest
         values.import_object(0, Object(4));
         values.enter(2);
         values.import_object(0, Object(5));
-        if (values.values.size() != 12 || std::get<std::int64_t>(values.payload(0)) != 5) return false;
+        if (values.values.size() != 12 || CifaBytecode::value_get<std::int64_t>(values.payload(0)) != 5) return false;
         values.restore(8, 2, 10);
-        if (std::get<std::int64_t>(values.payload(0)) != 4 || values.top() != 10) return false;
+        if (CifaBytecode::value_get<std::int64_t>(values.payload(0)) != 4 || values.top() != 10) return false;
         values.restore(0, 8, 8);
         values.import_object(3, Object(ObjectVector{Object(1), Object(2)}));
         values.copy(4, values, 3);
-        std::any_cast<ObjectVector&>(std::get<std::any>(values.resource_payload(4)))[0] = Object(8);
-        if (std::any_cast<ObjectVector&>(std::get<std::any>(values.resource_payload(3)))[0].toInt64() != 1) return false;
+        std::any_cast<CifaBytecode::VmArray&>(CifaBytecode::value_get<std::any>(values.resource_payload(4))).values[0]
+            = CifaBytecode::CompactValue(std::int64_t(8));
+        if (CifaBytecode::value_get<std::int64_t>(std::any_cast<CifaBytecode::VmArray&>(
+            CifaBytecode::value_get<std::any>(values.resource_payload(3))).values[0]) != 1) return false;
         CifaBytecode numeric_host;
         CifaBytecode::Machine numeric_machine(numeric_host);
         Slots no_values(2);
         no_values.import_object(0, numeric_machine.make_no_value("missing_result", {}));
-        if (no_values.values[0].region != CifaBytecode::BytecodeValue::Region::Any) return false;
+        if (!CifaBytecode::value_holds<std::any>(no_values.values[0].value)) return false;
         no_values.copy(1, no_values, 0);
         Object boundary_no_value;
         no_values.export_argument(1, boundary_no_value);
@@ -139,25 +151,32 @@ struct RegisterBackendTest
         containers.write_payload(0, std::any(ObjectVector{}));
         method_arguments.write_payload(0, std::int64_t(23));
         const std::vector<CifaBytecode::SourceLocation> method_locations(1);
-        numeric_machine.call_method(method_result, 0, "push_back", {}, containers.resource_payload(0), "", method_locations, method_arguments);
-        if (numeric_machine.should_stop() || std::get<double>(method_result.payload(0)) != 1) return false;
-        const auto& stored_elements = std::any_cast<const ObjectVector&>(std::get<std::any>(containers.resource_payload(0)));
-        if (stored_elements.size() != 1 || stored_elements.front().toInt64() != 23) return false;
+        CifaBytecode::Machine::NamedValueRef array_receiver{&containers, 0, nullptr, {}, true};
+        numeric_machine.call_method(method_result, 0, "push_back", {}, array_receiver, method_locations, method_arguments);
+        if (numeric_machine.should_stop() || CifaBytecode::value_get<double>(method_result.payload(0)) != 1) return false;
+        const auto stored_values = [&]() -> const std::vector<CifaBytecode::CompactValue>& {
+            return std::any_cast<const CifaBytecode::VmArray&>(
+                CifaBytecode::value_get<std::any>(containers.resource_payload(0))).values;
+        };
+        if (stored_values().size() != 1 || CifaBytecode::value_get<std::int64_t>(stored_values().front()) != 23) return false;
         method_arguments.write_payload(0, std::int64_t(23));
-        numeric_machine.call_method(method_result, 0, "contains", {}, containers.resource_payload(0), "", method_locations, method_arguments);
-        if (numeric_machine.should_stop() || std::get<double>(method_result.payload(0)) != 1) return false;
+        numeric_machine.call_method(method_result, 0, "contains", {}, array_receiver, method_locations, method_arguments);
+        if (numeric_machine.should_stop() || CifaBytecode::value_get<double>(method_result.payload(0)) != 1) return false;
         method_arguments.write_payload(0, 4.75);
-        numeric_machine.call_method(method_result, 0, "push_back", {}, containers.resource_payload(0), "int", method_locations, method_arguments);
-        if (numeric_machine.should_stop() || stored_elements.size() != 2 || stored_elements.back().toInt64() != 4) return false;
+        array_receiver.element_type = "int";
+        numeric_machine.call_method(method_result, 0, "push_back", {}, array_receiver, method_locations, method_arguments);
+        if (numeric_machine.should_stop() || stored_values().size() != 2
+            || CifaBytecode::value_get<std::int64_t>(stored_values().back()) != 4) return false;
         Slots map_receiver(1);
         map_receiver.write_payload(0, std::any(ObjectMap{{"present", Object(1)}}));
+        CifaBytecode::Machine::NamedValueRef map_value{&map_receiver, 0, nullptr, {}, true};
         method_arguments.write_payload(0, std::any(std::string("present")));
-        numeric_machine.call_method(method_result, 0, "contains", {}, map_receiver.resource_payload(0), "", method_locations, method_arguments);
-        if (numeric_machine.should_stop() || !std::get<bool>(method_result.payload(0))) return false;
-        numeric_machine.call_method(method_result, 0, "erase", {}, map_receiver.resource_payload(0), "", method_locations, method_arguments);
-        if (numeric_machine.should_stop() || std::get<double>(method_result.payload(0)) != 0) return false;
-        numeric_machine.call_method(method_result, 0, "clear", {}, containers.resource_payload(0), "", {}, method_arguments);
-        if (numeric_machine.should_stop() || std::get<double>(method_result.payload(0)) != 0 || !stored_elements.empty()) return false;
+        numeric_machine.call_method(method_result, 0, "contains", {}, map_value, method_locations, method_arguments);
+        if (numeric_machine.should_stop() || !CifaBytecode::value_get<bool>(method_result.payload(0))) return false;
+        numeric_machine.call_method(method_result, 0, "erase", {}, map_value, method_locations, method_arguments);
+        if (numeric_machine.should_stop() || CifaBytecode::value_get<double>(method_result.payload(0)) != 0) return false;
+        numeric_machine.call_method(method_result, 0, "clear", {}, array_receiver, {}, method_arguments);
+        if (numeric_machine.should_stop() || CifaBytecode::value_get<double>(method_result.payload(0)) != 0 || !stored_values().empty()) return false;
         Object typed_value;
         Object typed_text;
         if (!numeric_machine.assign(typed_text, Object(std::string("first")), true, "string", {})) return false;
@@ -167,10 +186,10 @@ struct RegisterBackendTest
         string_operations.write_payload(1, std::any(std::string("right")));
         string_operations.binary_fallback(CifaBytecode::Opcode::Add, 0, 0, 1, numeric_machine, {}, true);
         if (!string_operations.empty(1)
-            || std::any_cast<std::string>(std::get<std::any>(string_operations.payload(0))) != "leftright") return false;
+            || std::any_cast<std::string>(CifaBytecode::value_get<std::any>(string_operations.payload(0))) != "leftright") return false;
         string_operations.write_payload(1, std::any(std::string("leftright")));
         string_operations.binary_fallback(CifaBytecode::Opcode::Equal, 1, 0, 1, numeric_machine, {}, false);
-        if (!string_operations.empty(0) || !std::get<bool>(string_operations.payload(1))) return false;
+        if (!string_operations.empty(0) || !CifaBytecode::value_get<bool>(string_operations.payload(1))) return false;
         Slots other_text_slots(2);
         CifaBytecode callback_host;
         CifaBytecode::Machine callback_machine(callback_host);
@@ -189,7 +208,7 @@ struct RegisterBackendTest
         callback_host.user_sub.push_back([&](const Object&, const Object&) { ++callback_count; return Object(99); });
         callback_slots.write_payload(0, std::any(std::string("operand")));
         callback_slots.binary_fallback(CifaBytecode::Opcode::Subtract, 0, 0, 0, callback_machine, {}, true);
-        if (callback_count != 2 || !same_argument || std::get<std::int64_t>(callback_slots.payload(0)) != 17) return false;
+        if (callback_count != 2 || !same_argument || CifaBytecode::value_get<std::int64_t>(callback_slots.payload(0)) != 17) return false;
         callback_host.user_mod.push_back([&](const Object&, const Object&) { ++callback_count; return Object(99); });
         callback_slots.write_payload(0, 1.5);
         callback_slots.write_payload(1, std::int64_t(2));
@@ -225,15 +244,16 @@ struct RegisterBackendTest
         Slots index_arguments(1);
         index_arguments.write_payload(0, std::int64_t(3));
         const size_t index_slots[] = {0};
-        auto& expanded_element = numeric_machine.indexed("constrained", "", 1, false, false, false, index_arguments, index_slots);
-        if (!numeric_machine.assign(expanded_element, Object(7.75), false, "", {}) || expanded_element.toInt64() != 7) return false;
+        auto expanded_element = numeric_machine.indexed("constrained", "", 1, false, false, false, index_arguments, index_slots);
+        if (!numeric_machine.assign_indexed(expanded_element, Object(7.75), false, "", {})) return false;
+        numeric_machine.read_indexed(other_text_slots, 0, expanded_element, false);
+        if (CifaBytecode::value_get<std::int64_t>(other_text_slots.payload(0)) != 7) return false;
         numeric_machine.scopes.back().bind("keyed", &map_receiver, 0);
         index_arguments.write_payload(0, std::any(std::string("new_key")));
-        numeric_machine.indexed("keyed", "", 1, false, false, false, index_arguments, index_slots) = Object(19);
+        auto keyed_element = numeric_machine.indexed("keyed", "", 1, false, false, false, index_arguments, index_slots);
+        numeric_machine.assign_indexed(keyed_element, Object(19), false, "", {});
         if (numeric_machine.should_stop()) return false;
-        std::string constrained_element;
-        numeric_machine.named_payload("constrained", constrained_element);
-        if (constrained_element != "int") return false;
+        if (numeric_machine.named_value("constrained").element_type != "int") return false;
         numeric_machine.read_named(other_text_slots, 0, "constrained", "", false, false, false, {});
         if (numeric_machine.should_stop() || other_text_slots.type_pool[other_text_slots.slot_types[0]].element != "int") return false;
         numeric_machine.scopes.pop_back();
@@ -257,7 +277,7 @@ struct RegisterBackendTest
         for (size_t slot = 0; slot < 2; ++slot)
             if (decoded_targets.type_pool[decoded_targets.slot_types[slot]].declared != "string"
                 || decoded_targets.name_pool[decoded_targets.slot_names[slot]] != "retained_source"
-                || std::any_cast<std::string>(std::get<std::any>(decoded_targets.payload(slot))) != "first") return false;
+                || std::any_cast<std::string>(CifaBytecode::value_get<std::any>(decoded_targets.payload(slot))) != "first") return false;
         text_slots.copy(1, text_slots, 0);
         if (text_slots.slot_types[1] != text_slots.slot_types[0]) return false;
         other_text_slots.copy(0, text_slots, 1);
@@ -286,7 +306,7 @@ struct RegisterBackendTest
         assignment_source.write_payload(0, 6.75);
         if (!numeric_machine.assign(assigned_slots, 0, assignment_source, 0, 1, {})
             || assigned_slots.bindings[0] != Slots::NumericBinding::Int
-            || std::get<std::int64_t>(assigned_slots.payload(0)) != 6 || !assignment_source.empty(1)) return false;
+            || CifaBytecode::value_get<std::int64_t>(assigned_slots.payload(0)) != 6 || !assignment_source.empty(1)) return false;
         assigned_slots.set_type(1, {typeid(void), "auto", "", ""});
         assignment_source.write_payload(0, std::any(std::string("inferred")));
         if (!numeric_machine.assign(assigned_slots, 1, assignment_source, 0, 1, {})
@@ -294,7 +314,7 @@ struct RegisterBackendTest
         CifaBytecode::Machine rejected_assignment(numeric_host);
         if (rejected_assignment.assign(assigned_slots, 0, assignment_source, 0, 1, {})
             || !rejected_assignment.should_stop()
-            || std::get<std::int64_t>(assigned_slots.payload(0)) != 6) return false;
+            || CifaBytecode::value_get<std::int64_t>(assigned_slots.payload(0)) != 6) return false;
         Slots typed(3);
         typed.import_object(0, typed_value);
         if (typed.bindings[0] != Slots::NumericBinding::Int) return false;
@@ -318,38 +338,38 @@ struct RegisterBackendTest
         typed.clear(2);
         typed.set_name(0, "");
         typed.import_object(1, Object(4.75));
-        if (!typed.assign_numeric(0, typed, 1) || std::get<std::int64_t>(typed.payload(0)) != 4) return false;
+        if (!typed.assign_numeric(0, typed, 1) || CifaBytecode::value_get<std::int64_t>(typed.payload(0)) != 4) return false;
         typed.copy(2, typed, 0);
         if (typed.bindings[2] != Slots::NumericBinding::Int) return false;
         typed.move(1, typed, 2);
         if (typed.bindings[1] != Slots::NumericBinding::Int
-            || !std::holds_alternative<std::monostate>(typed.payload(2)) || typed.bindings[2] != Slots::NumericBinding::None) return false;
+            || !CifaBytecode::value_holds<std::monostate>(typed.payload(2)) || typed.bindings[2] != Slots::NumericBinding::None) return false;
         typed.move(2, typed, 1);
         typed.move(2, typed, 2);
         Object extracted;
         typed.export_argument(2, extracted);
-        if (typed.bindings[2] != Slots::NumericBinding::None || !std::holds_alternative<std::monostate>(typed.payload(2))) return false;
+        if (typed.bindings[2] != Slots::NumericBinding::None || !CifaBytecode::value_holds<std::monostate>(typed.payload(2))) return false;
         if (!numeric_machine.assign(extracted, Object(8.75), false, "", {}) || extracted.toInt64() != 8) return false;
         typed.write_payload(1, 6.75);
-        if (!numeric_machine.assign(typed, 0, typed, 1, 2, {}) || std::get<std::int64_t>(typed.payload(0)) != 6) return false;
+        if (!numeric_machine.assign(typed, 0, typed, 1, 2, {}) || CifaBytecode::value_get<std::int64_t>(typed.payload(0)) != 6) return false;
         typed.clear(0);
-        if (!std::holds_alternative<std::monostate>(typed.payload(0))) return false;
+        if (!CifaBytecode::value_holds<std::monostate>(typed.payload(0))) return false;
         Slots compact(3);
         compact.write_payload(0, -3.75);
         if (!compact.cast_numeric(0, compact, 0, "int")
-            || std::get<std::int64_t>(compact.payload(0)) != -3) return false;
+            || CifaBytecode::value_get<std::int64_t>(compact.payload(0)) != -3) return false;
         compact.write_payload(1, std::numeric_limits<double>::infinity());
         if (compact.cast_numeric(0, compact, 1, "int")
-            || std::get<std::int64_t>(compact.payload(0)) != -3) return false;
-        if (!compact.cast_numeric(1, compact, 1, "bool") || !std::get<bool>(compact.payload(1))) return false;
-        if (!compact.cast_numeric(1, compact, 1, "double") || std::get<double>(compact.payload(1)) != 1) return false;
+            || CifaBytecode::value_get<std::int64_t>(compact.payload(0)) != -3) return false;
+        if (!compact.cast_numeric(1, compact, 1, "bool") || !CifaBytecode::value_get<bool>(compact.payload(1))) return false;
+        if (!compact.cast_numeric(1, compact, 1, "double") || CifaBytecode::value_get<double>(compact.payload(1)) != 1) return false;
         compact.import_object(0, Object(7));
         compact.import_object(1, Object(2));
         if (!compact.binary(CifaBytecode::Opcode::Add, 0, 0, 1, numeric_machine, {})
-            || std::get<std::int64_t>(compact.payload(0)) != 9) return false;
+            || CifaBytecode::value_get<std::int64_t>(compact.payload(0)) != 9) return false;
         compact.copy(2, compact, 0);
         compact.export_argument(2, extracted);
-        if (extracted.toInt64() != 9 || !std::holds_alternative<std::monostate>(compact.payload(2))) return false;
+        if (extracted.toInt64() != 9 || !CifaBytecode::value_holds<std::monostate>(compact.payload(2))) return false;
         auto resource = std::make_shared<int>(12);
         std::weak_ptr<int> lifetime = resource;
         compact.import_object(2, Object(std::move(resource)));
@@ -360,22 +380,21 @@ struct RegisterBackendTest
         compact.clear(1);
         if (!lifetime.expired()) return false;
         compact.import_object(2, Object(std::make_shared<int>(13)));
-        lifetime = std::any_cast<std::shared_ptr<int>>(std::get<std::any>(compact.resource_payload(2)));
-        auto* stable = &compact.resource_payload(2);
+        lifetime = std::any_cast<std::shared_ptr<int>>(CifaBytecode::value_get<std::any>(compact.resource_payload(2)));
         compact.enter(32);
         compact.restore(0, 3, 3);
-        if (&compact.resource_payload(2) != stable) return false;
+        if (*std::any_cast<std::shared_ptr<int>>(CifaBytecode::value_get<std::any>(compact.resource_payload(2))) != 13) return false;
         compact.clear(2);
-        if (!lifetime.expired() || !std::holds_alternative<std::monostate>(*stable)) return false;
+        if (!lifetime.expired() || !compact.empty(2)) return false;
         compact.enter(4);
         compact.write_payload(0, std::any(std::make_shared<int>(21)));
-        std::weak_ptr<int> window_resource = std::any_cast<std::shared_ptr<int>>(std::get<std::any>(compact.payload(0)));
+        std::weak_ptr<int> window_resource = std::any_cast<std::shared_ptr<int>>(CifaBytecode::value_get<std::any>(compact.payload(0)));
         compact.import_object(1, Object(std::make_shared<int>(22)));
-        std::weak_ptr<int> materialized_resource = std::any_cast<std::shared_ptr<int>>(std::get<std::any>(compact.resource_payload(1)));
+        std::weak_ptr<int> materialized_resource = std::any_cast<std::shared_ptr<int>>(CifaBytecode::value_get<std::any>(compact.resource_payload(1)));
         const size_t retained_capacity = compact.values.capacity();
         compact.enter(2);
         compact.write_payload(0, std::any(std::make_shared<int>(23)));
-        std::weak_ptr<int> nested_resource = std::any_cast<std::shared_ptr<int>>(std::get<std::any>(compact.payload(0)));
+        std::weak_ptr<int> nested_resource = std::any_cast<std::shared_ptr<int>>(CifaBytecode::value_get<std::any>(compact.payload(0)));
         compact.restore(3, 4, 7);
         if (!nested_resource.expired() || window_resource.expired() || materialized_resource.expired()) return false;
         compact.restore(0, 3, 3);
@@ -383,7 +402,7 @@ struct RegisterBackendTest
             || compact.values.capacity() != retained_capacity || !compact.empty(2)) return false;
         compact.enter(4);
         for (size_t index = 0; index < compact.size(); ++index)
-            if (!std::holds_alternative<std::monostate>(compact.payload(index))) return false;
+            if (!CifaBytecode::value_holds<std::monostate>(compact.payload(index))) return false;
         compact.restore(0, 3, 3);
         std::print("Register layout: Object={}, BytecodeValue={}, origin pointer={}\n",
             sizeof(Object), sizeof(CifaBytecode::BytecodeValue), sizeof(const Object*));
@@ -392,30 +411,34 @@ struct RegisterBackendTest
         {
             values.import_object(6, Object(number));
             if (!values.assign_numeric(5, values, 6)
-                || std::get<std::int64_t>(values.payload(5)) != static_cast<std::int64_t>(number)) return false;
+                || CifaBytecode::value_get<std::int64_t>(values.payload(5)) != static_cast<std::int64_t>(number)) return false;
         }
         for (double number : {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
             std::numeric_limits<double>::quiet_NaN(), 9223372036854775808.0, -18446744073709551616.0})
         {
-            const auto previous = std::get<std::int64_t>(values.payload(5));
+            const auto previous = CifaBytecode::value_get<std::int64_t>(values.payload(5));
             values.import_object(6, Object(number));
-            if (values.assign_numeric(5, values, 6) || std::get<std::int64_t>(values.payload(5)) != previous) return false;
+            if (values.assign_numeric(5, values, 6) || CifaBytecode::value_get<std::int64_t>(values.payload(5)) != previous) return false;
         }
         CifaBytecode interpreter;
         interpreter.set_output_error(false);
+        interpreter.set_optimization_enabled(false);
         if (!interpreter.compile_script("int sum(int left, int right) { int total = 0; total = left + right; return total; } return sum(2, 3);")) return false;
         const auto& function = *interpreter.module_data->function_code.at("sum").at(2);
         size_t arithmetic = 0;
+        size_t reserved_scope_bindings = 0;
         for (const auto& instruction : function.instructions.code)
         {
             if (instruction.opcode == CifaBytecode::Opcode::RegisterBinary) ++arithmetic;
+            if (instruction.opcode == CifaBytecode::Opcode::ScopeEnter) reserved_scope_bindings += instruction.operand;
             if (instruction.opcode == CifaBytecode::Opcode::Add) return false;
             if (instruction.input_offset + instruction.input_count > function.instructions.register_inputs.size()) return false;
             for (size_t input = 0; input < instruction.input_count; ++input)
                 if (function.instructions.register_inputs[instruction.input_offset + input] >= function.instructions.register_capacity)
                     return false;
         }
-        if (arithmetic != 1 || interpreter.run().toInt64() != 5 || interpreter.has_runtime_error()) return false;
+        if (arithmetic != 1 || reserved_scope_bindings == 0
+            || interpreter.run().toInt64() != 5 || interpreter.has_runtime_error()) return false;
 
         for (bool optimized : {false, true})
         {
@@ -514,11 +537,12 @@ struct RegisterBackendTest
                 if (iteration == 0) capacity = slots.values.capacity();
                 else if (capacity != slots.values.capacity()) return false;
                 for (size_t index = 0; index < slots.values.size(); ++index)
-                    if (!std::holds_alternative<std::monostate>(slots.payload(index))) return false;
+                    if (!CifaBytecode::value_holds<std::monostate>(slots.payload(index))) return false;
             }
         }
 
         CifaBytecode reentrant_host;
+        reentrant_host.set_optimization_enabled(false);
         for (bool optimized : {false, true})
         {
             CifaBytecode globals;
@@ -556,6 +580,7 @@ struct RegisterBackendTest
             }
         }
         CifaBytecode reentrant_inner;
+        reentrant_inner.set_optimization_enabled(false);
         reentrant_host.set_output_error(false);
         reentrant_inner.set_output_error(false);
         if (!reentrant_inner.compile_script("int inner(int value) { return value + 1; } return inner(inner(5));")) return false;
@@ -604,6 +629,7 @@ struct RegisterBackendTest
 
         CifaBytecode replaced_call;
         replaced_call.set_output_error(false);
+        replaced_call.set_optimization_enabled(false);
         replaced_call.register_function("replace_target", [&](ObjectVector&)
         {
             replaced_call.register_function("target", [](ObjectVector& arguments)
@@ -1143,6 +1169,7 @@ bool loop_control_test()
 bool control_state_test()
 {
     Cifa c;
+    c.set_output_error(false);
     auto result = c.run_script(R"(
         int sum = 0;
         for (int i = 0; i < 5; i++) {
@@ -1160,7 +1187,29 @@ bool control_state_test()
     done:
         return sum;
     )");
-    return !c.has_error() && !c.has_runtime_error() && result.toInt() == 46;
+    if (c.has_error() || c.has_runtime_error() || result.toInt() != 46) return false;
+
+    const auto rejects = [](const std::string& script, const std::string& message)
+        {
+            Cifa invalid;
+            invalid.set_output_error(false);
+            invalid.run_script(script);
+            const auto error = invalid.get_errors_str();
+            return invalid.has_error() && error.find(message) != std::string::npos
+                && error.find(script) != std::string::npos && error.find('^') != std::string::npos;
+        };
+    if (!rejects("break;", "break statement is not within a loop or switch")
+        || !rejects("continue;", "continue statement is not within a loop")
+        || !rejects("switch (1) { case 1: continue; }", "continue statement is not within a loop"))
+    {
+        return false;
+    }
+
+    Cifa switch_break;
+    switch_break.set_output_error(false);
+    const auto switch_result = switch_break.run_script("int value = 1; switch (value) { case 1: value = 7; break; default: value = 9; } return value;");
+    return !switch_break.has_error() && !switch_break.has_runtime_error()
+        && switch_result.isNumber() && switch_result.toInt() == 7;
 }
 
 bool ternary_operator_test()
@@ -3854,6 +3903,7 @@ bool nested_bytecode_context_test()
 {
     CifaBytecode c;
     c.set_output_error(false);
+    c.set_optimization_enabled(false);
     int total = 0;
     c.register_function("record", [&total](ObjectVector& arguments) -> Object
         {
