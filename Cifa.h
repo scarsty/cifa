@@ -664,6 +664,7 @@ private:
     std::vector<SourceLineInfo> compilation_source_line_infos;
     const std::unordered_map<std::string, FunctionOverloads>* compile_visible_functions = nullptr;
     const std::unordered_map<std::string, std::vector<StructField>>* compile_visible_struct_defs = nullptr;
+    const std::unordered_set<std::string>* compile_visible_host_functions = nullptr;
     bool compiling = false;
     bool compiled = false;
     bool compile_failed = false;

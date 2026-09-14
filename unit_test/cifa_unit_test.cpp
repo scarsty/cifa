@@ -18,13 +18,13 @@ struct RegisterBackendTest
     {
         using Slots = CifaBytecode::RegisterSlots;
         static_assert(sizeof(std::int64_t) == 8 && sizeof(double) == 8 && sizeof(std::uint8_t) == 1);
-        static_assert(sizeof(CifaBytecode::CompactValue) == 16);
+        static_assert(sizeof(CifaBytecode::CompactValue) == sizeof(Object::Storage));
         CifaBytecode::CompactValue compact_integer(std::int64_t(-17));
         CifaBytecode::CompactValue compact_floating(2.75);
         CifaBytecode::CompactValue compact_boolean(true);
-        if (compact_integer.tag != CifaBytecode::CompactValue::Tag::Integer || compact_integer.integer() != -17
-            || compact_floating.tag != CifaBytecode::CompactValue::Tag::Floating || compact_floating.floating() != 2.75
-            || compact_boolean.tag != CifaBytecode::CompactValue::Tag::Boolean || !compact_boolean.boolean()) return false;
+        if (CifaBytecode::value_get<std::int64_t>(compact_integer) != -17
+            || CifaBytecode::value_get<double>(compact_floating) != 2.75
+            || !CifaBytecode::value_get<bool>(compact_boolean)) return false;
         CifaBytecode::CompactValue compact_array(std::any(ObjectVector{Object(1), Object(2)}));
         CifaBytecode::CompactValue compact_array_copy = compact_array;
         compact_array_copy.resource<CifaBytecode::VmArray>()->values.front() = CifaBytecode::CompactValue(std::int64_t(9));
@@ -148,10 +148,10 @@ struct RegisterBackendTest
         Slots containers(1);
         Slots method_arguments(1);
         Slots method_result(1);
-        containers.write_payload(0, std::any(ObjectVector{}));
+        containers.write_payload(0, std::any(CifaBytecode::VmArray{}));
         method_arguments.write_payload(0, std::int64_t(23));
         const std::vector<CifaBytecode::SourceLocation> method_locations(1);
-        CifaBytecode::Machine::NamedValueRef array_receiver{&containers, 0, nullptr, {}, true};
+        CifaBytecode::Machine::NamedValueRef array_receiver{&containers, 0, {}, true};
         numeric_machine.call_method(method_result, 0, "push_back", {}, array_receiver, method_locations, method_arguments);
         if (numeric_machine.should_stop() || CifaBytecode::value_get<double>(method_result.payload(0)) != 1) return false;
         const auto stored_values = [&]() -> const std::vector<CifaBytecode::CompactValue>& {
@@ -169,7 +169,7 @@ struct RegisterBackendTest
             || CifaBytecode::value_get<std::int64_t>(stored_values().back()) != 4) return false;
         Slots map_receiver(1);
         map_receiver.write_payload(0, std::any(ObjectMap{{"present", Object(1)}}));
-        CifaBytecode::Machine::NamedValueRef map_value{&map_receiver, 0, nullptr, {}, true};
+        CifaBytecode::Machine::NamedValueRef map_value{&map_receiver, 0, {}, true};
         method_arguments.write_payload(0, std::any(std::string("present")));
         numeric_machine.call_method(method_result, 0, "contains", {}, map_value, method_locations, method_arguments);
         if (numeric_machine.should_stop() || !CifaBytecode::value_get<bool>(method_result.payload(0))) return false;
@@ -237,8 +237,8 @@ struct RegisterBackendTest
                 ) return false;
         }
         Slots constrained_array(1);
-        constrained_array.write_payload(0, std::any(ObjectVector{}));
-        constrained_array.set_type(0, {typeid(ObjectVector), "array", "int", ""});
+        constrained_array.write_payload(0, std::any(CifaBytecode::VmArray{}));
+        constrained_array.set_type(0, {typeid(CifaBytecode::VmArray), "array", "int", ""});
         numeric_machine.scopes.emplace_back();
         numeric_machine.scopes.back().bind("constrained", &constrained_array, 0);
         Slots index_arguments(1);
@@ -262,8 +262,10 @@ struct RegisterBackendTest
         numeric_machine.read_named(other_text_slots, 0, "record", "SlotRecord", true, false, true, {});
         auto* record_binding = numeric_machine.find_slot("record");
         if (!record_binding) return false;
-        auto& record_field = numeric_machine.resolve_member("record", "field");
-        if (!numeric_machine.assign(record_field, Object(8.75), false, "", {}) || record_field.toInt64() != 8) return false;
+        auto record_field = numeric_machine.resolve_member("record", "field");
+        if (!numeric_machine.assign_indexed(record_field, Object(8.75), false, "", {})) return false;
+        numeric_machine.read_indexed(other_text_slots, 0, record_field, false);
+        if (CifaBytecode::value_get<std::int64_t>(other_text_slots.payload(0)) != 8) return false;
         numeric_machine.scopes.pop_back();
         text_slots.import_object(0, typed_text);
         if (text_slots.slot_types[0] == 0) return false;
@@ -496,7 +498,8 @@ struct RegisterBackendTest
             switch_error.set_output_error(false);
             switch_error.set_optimization_enabled(optimized);
             size_t effects = 0;
-            switch_error.register_function("effect", [&](ObjectVector&) { ++effects; return Object(1); });
+            switch_error.register_native_function("effect", [&](CifaBytecode::NativeCallContext& context)
+                { ++effects; context.set_result(std::int64_t{1}); });
             if (!switch_error.compile_script(
                 "void missing_switch() {} switch (missing_switch()) { case 1: effect(); break; default: effect(); }")) return false;
             switch_error.run();
@@ -552,11 +555,12 @@ struct RegisterBackendTest
                 return globals.register_parameter("shared_value", Object(value));
             };
             size_t registered_count = 0;
-            globals.register_function("replace_global", [&](ObjectVector&) {
+            globals.register_native_function("replace_global", [&](CifaBytecode::NativeCallContext& context) {
                 for (size_t index = 0; index < 1024; ++index)
-                    if (!globals.register_parameter("expanded_global_" + std::to_string(registered_count++), Object(7))) return Object();
+                    if (!globals.register_parameter("expanded_global_" + std::to_string(registered_count++), Object(7)))
+                    { context.report_error("failed to register expanded global"); return; }
                 replace_global(11);
-                return Object(0);
+                context.set_result(std::int64_t{0});
             });
             globals.user_sub.push_back([&](const Object& left, const Object& right) {
                 if (!left.isType<std::string>() || !right.isType<std::string>()) return Object();
@@ -576,7 +580,7 @@ struct RegisterBackendTest
             for (size_t repeat = 0; repeat < 3; ++repeat)
             {
                 const auto actual = global_session.run(globals);
-                if (globals.has_runtime_error() || !actual.isNumber() || actual.toInt64() != 18833) return false;
+                if (globals.has_runtime_error() || !actual.isNumber() || actual.toInt64() != 17833) return false;
             }
         }
         CifaBytecode reentrant_inner;
@@ -585,8 +589,12 @@ struct RegisterBackendTest
         reentrant_inner.set_output_error(false);
         if (!reentrant_inner.compile_script("int inner(int value) { return value + 1; } return inner(inner(5));")) return false;
         CifaBytecode::Session reentrant_session(reentrant_host);
-        reentrant_host.register_function("host_nested", [&](ObjectVector&)
-            { return reentrant_session.run(reentrant_inner); });
+        reentrant_host.register_native_function("host_nested", [&](CifaBytecode::NativeCallContext& context)
+            {
+                const auto value = reentrant_session.run(reentrant_inner);
+                if (value.isNumber()) context.set_result(value.toInt64());
+                else context.report_error("nested native call did not return a number");
+            });
         if (!reentrant_host.compile_script(
             "int combine(int left, int right) { return left * 10 + right; } "
             "int outer(int value) { int saved = value; return combine(saved, host_nested()) + saved; } return outer(9);")) return false;
@@ -603,8 +611,8 @@ struct RegisterBackendTest
             argument_error.set_output_error(false);
             argument_error.set_optimization_enabled(optimized);
             size_t later_arguments = 0;
-            argument_error.register_function("later_argument", [&](ObjectVector&)
-                { ++later_arguments; return Object(3); });
+            argument_error.register_native_function("later_argument", [&](CifaBytecode::NativeCallContext& context)
+                { ++later_arguments; context.set_result(std::int64_t{3}); });
             const std::string failing_line = "return accept(1, \"bad\", later_argument());";
             if (!argument_error.compile_script("int accept(int first, int second, int third) { return first; }\n" + failing_line)) return false;
             argument_error.run();
@@ -630,11 +638,11 @@ struct RegisterBackendTest
         CifaBytecode replaced_call;
         replaced_call.set_output_error(false);
         replaced_call.set_optimization_enabled(false);
-        replaced_call.register_function("replace_target", [&](ObjectVector&)
+        replaced_call.register_native_function("replace_target", [&](CifaBytecode::NativeCallContext& context)
         {
-            replaced_call.register_function("target", [](ObjectVector& arguments)
-                { return Object(arguments[0].toInt64() * 10 + arguments[1].toInt64()); });
-            return Object(7);
+            replaced_call.register_native_function("target", [](CifaBytecode::NativeCallContext& target)
+                { target.set_result(target.to_integer(0) * 10 + target.to_integer(1)); });
+            context.set_result(std::int64_t{7});
         });
         if (!replaced_call.compile_script(
             "int target(int left, int right) { return left + right; } "
@@ -790,7 +798,8 @@ struct RegisterBackendTest
         CifaBytecode override_math;
         override_math.set_output_error(false);
         override_math.set_optimization_enabled(true);
-        override_math.register_function("floor", [](ObjectVector&) { return Object(42); });
+        override_math.register_native_function("floor", [](CifaBytecode::NativeCallContext& context)
+            { context.set_result(std::int64_t{42}); });
         return override_math.compile_script("return floor(1.9);")
             && override_math.run().toInt64() == 42 && !override_math.has_runtime_error();
     }
@@ -829,10 +838,11 @@ struct BackendTests
 bool register_function_test()
 {
     Cifa c1;
-    c1.register_function("sin", [](ObjectVector& d)
-        {
-            return sin(d[0]);
-        });
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+        c1.register_native_function("sin", [](CifaBytecode::NativeCallContext& context)
+            { context.set_result(std::sin(context.to_number(0))); });
+    else
+        c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
 
     std::string script_code = R"(
     double PI = 3.141592653589793238462643383279;
@@ -857,10 +867,24 @@ bool register_function_test()
 bool register_function_template_test()
 {
     Cifa c;
-    c.register_function("square", template_square);
-    c.register_function("add", template_add);
-    c.register_function("trunc", template_trunc);
-    c.register_function("set_flag", template_set_flag);
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+    {
+        c.register_native_function("square", [](CifaBytecode::NativeCallContext& context)
+            { const double value = context.to_number(0); context.set_result(value * value); });
+        c.register_native_function("add", [](CifaBytecode::NativeCallContext& context)
+            { context.set_result(context.to_number(0) + context.to_number(1)); });
+        c.register_native_function("trunc", [](CifaBytecode::NativeCallContext& context)
+            { context.set_result(static_cast<std::int64_t>(context.to_number(0))); });
+        c.register_native_function("set_flag", [](CifaBytecode::NativeCallContext& context)
+            { (void)context.argument_count(); context.set_empty_result(); });
+    }
+    else
+    {
+        c.register_function("square", template_square);
+        c.register_function("add", template_add);
+        c.register_function("trunc", template_trunc);
+        c.register_function("set_flag", template_set_flag);
+    }
 
     auto o = c.run_script(R"(
         set_flag(1);
@@ -874,8 +898,14 @@ bool registration_name_validation_test()
     Cifa c;
     c.set_output_error(false);
     int context = 0;
-    if (!c.register_function("valid_function", template_square)
-        || !c.register_parameter("valid_parameter", 1)
+    const bool valid_function = [&]()
+    {
+        if constexpr (std::same_as<Cifa, CifaBytecode>)
+            return c.register_native_function("valid_function", [](CifaBytecode::NativeCallContext& context)
+                { context.set_result(context.to_number(0)); });
+        else return c.register_function("valid_function", template_square);
+    }();
+    if (!valid_function || !c.register_parameter("valid_parameter", 1)
         || !c.register_vector("valid_vector", std::vector<int>{ 1, 2 })
         || !c.register_user_data("valid_context", &context))
     {
@@ -884,7 +914,12 @@ bool registration_name_validation_test()
 
     Cifa invalid;
     invalid.set_output_error(false);
-    const bool template_registration_failed = !invalid.register_function("1bad", template_square)
+    const bool template_registration_failed = [&]()
+    {
+        if constexpr (std::same_as<Cifa, CifaBytecode>)
+            return !invalid.register_native_function("1bad", [](CifaBytecode::NativeCallContext&) {});
+        else return !invalid.register_function("1bad", template_square);
+    }()
         && invalid.has_runtime_error()
         && invalid.get_runtime_error().find("invalid registration name '1bad'") != std::string::npos;
 
@@ -958,19 +993,38 @@ bool runtime_error_abort_test()
         Cifa interpreter;
         interpreter.set_output_error(false);
         int calls = 0;
-        interpreter.register_function("touch", [&calls](ObjectVector&) -> Object
-            {
-                ++calls;
-                return 0;
-            });
-        interpreter.register_function("missing_value", [](ObjectVector&) -> Object { return Object(); });
-        interpreter.register_function("convert", [&calls, &interpreter](ObjectVector& arguments) -> Object
-            {
-                auto value = arguments[0].toDouble();
-            if (interpreter.has_runtime_error()) { return Object(); }
-                ++calls;
-                return value;
-            });
+        if constexpr (std::same_as<Cifa, CifaBytecode>)
+        {
+            interpreter.register_native_function("touch", [&calls](CifaBytecode::NativeCallContext& context)
+                {
+                    ++calls;
+                    context.set_result(std::int64_t{0});
+                });
+            interpreter.register_native_function("missing_value", [](CifaBytecode::NativeCallContext& context) { context.set_empty_result(); });
+            interpreter.register_native_function("convert", [&calls](CifaBytecode::NativeCallContext& context)
+                {
+                    const auto value = context.to_number(0);
+                    if (!context.is_number(0)) return;
+                    ++calls;
+                    context.set_result(value);
+                });
+        }
+        else
+        {
+            interpreter.register_function("touch", [&calls](ObjectVector&) -> Object
+                {
+                    ++calls;
+                    return 0;
+                });
+            interpreter.register_function("missing_value", [](ObjectVector&) -> Object { return Object(); });
+            interpreter.register_function("convert", [&calls, &interpreter](ObjectVector& arguments) -> Object
+                {
+                    auto value = arguments[0].toDouble();
+                    if (interpreter.has_runtime_error()) { return Object(); }
+                    ++calls;
+                    return value;
+                });
+        }
         auto result = interpreter.run_script("sum = 7; " + script + " touch();");
         if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || calls != 0)
         {
@@ -1035,7 +1089,10 @@ bool typed_function_argument_error_test()
 {
     Cifa c;
     c.set_output_error(false);
-    c.register_function("menu", template_menu);
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+        c.register_native_function("menu", [](CifaBytecode::NativeCallContext& context) { context.set_result(context.to_number(3)); });
+    else
+        c.register_function("menu", template_menu);
     auto o = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
     return o.getSpecialType() == "Error"
         && c.get_runtime_error().find("variable 'strs'") != std::string::npos
@@ -1044,6 +1101,25 @@ bool typed_function_argument_error_test()
 
 bool object_vector_argument_error_test()
 {
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+    {
+        const auto expect_conversion_error = [](bool string_conversion)
+            {
+                Cifa c;
+                c.set_output_error(false);
+                c.register_native_function("menu", [string_conversion](CifaBytecode::NativeCallContext& context)
+                    {
+                        if (string_conversion) context.to_string(3);
+                        else context.to_number(3);
+                    });
+                const auto result = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
+                return result.getSpecialType() == "Error"
+                    && c.get_runtime_error().find("variable 'strs'") != std::string::npos;
+            };
+        return expect_conversion_error(false) && expect_conversion_error(true);
+    }
+    else
+    {
     const auto expect_conversion_error = [](const typename Backend::func_type& menu, const std::string& target_type)
         {
             Cifa c;
@@ -1072,6 +1148,7 @@ bool object_vector_argument_error_test()
         {
             return Object(args[3].ref<ObjectMap>().size());
         }, typeid(ObjectMap).name());
+    }
 }
 
 bool builtin_math_function_test()
@@ -1554,11 +1631,18 @@ bool script_function_global_scope_test()
     Cifa c;
     c.set_output_error(false);
     int captured_value = 0;
-    c.register_function("capture", [&captured_value](ObjectVector& args) -> Object
-        {
-            captured_value = args.empty() ? 0 : args[0].toInt();
-            return Object();
-        });
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+        c.register_native_function("capture", [&captured_value](CifaBytecode::NativeCallContext& context)
+            {
+                captured_value = context.argument_count() == 0 ? 0 : static_cast<int>(context.to_integer(0));
+                context.set_empty_result();
+            });
+    else
+        c.register_function("capture", [&captured_value](ObjectVector& args) -> Object
+            {
+                captured_value = args.empty() ? 0 : args[0].toInt();
+                return Object();
+            });
     auto global_result = c.run_script(R"(
         b = 304;
         update_b() {
@@ -1991,7 +2075,15 @@ bool registered_type_binding_test()
     c.set_output_error(false);
     if (!c.register_type<RegisteredTestValue>("Box") || !c.register_type<std::int64_t>("Index")) { return false; }
     c.register_parameter("original", RegisteredTestValue{});
-    c.register_function("inspect_box", [](ObjectVector& args) { return Object(args[0].to<RegisteredTestValue>().number); });
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+        c.register_native_function("inspect_box", [](CifaBytecode::NativeCallContext& context)
+            {
+                const auto* value = context.resource<RegisteredTestValue>(0);
+                if (!value) { context.report_error("inspect_box requires Box"); return; }
+                context.set_result(static_cast<std::int64_t>(value->number));
+            });
+    else
+        c.register_function("inspect_box", [](ObjectVector& args) { return Object(args[0].to<RegisteredTestValue>().number); });
     const auto result = c.run_script(R"(
         Box copy = original;
         auto inferred = original;
@@ -2037,7 +2129,10 @@ bool int64_storage_test()
 {
     Cifa c;
     c.register_parameter("wide", std::int64_t{9007199254740993LL});
-    c.register_function("identity64", +[](std::int64_t value) { return value; });
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+        c.register_native_function("identity64", [](CifaBytecode::NativeCallContext& context) { context.set_result(context.to_integer(0)); });
+    else
+        c.register_function("identity64", +[](std::int64_t value) { return value; });
     auto result = c.run_script(R"(
         auto exact = 9007199254740993;
         int largest = 9223372036854775807;
@@ -2153,47 +2248,65 @@ bool c_string_library_test()
 {
     Cifa c1;
 
-    // 1. 注册 strlen: 返回字符串长度
-    c1.register_function("strlen", [](ObjectVector& d) -> Object
-        {
-            if (d.empty() || !d[0].isType<std::string>())
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+    {
+        c1.register_native_function("strlen", [](CifaBytecode::NativeCallContext& context)
             {
-                return 0;
-            }
-            return (double)d[0].toString().length();
-        });
-
-    // 2. 注册 strcmp: 比较字符串
-    c1.register_function("strcmp", [](ObjectVector& d) -> Object
-        {
-            if (d.size() < 2)
+                context.set_result(context.argument_count() == 0 || !context.is_string(0)
+                    ? std::int64_t{0} : static_cast<std::int64_t>(context.to_string(0).size()));
+            });
+        c1.register_native_function("strcmp", [](CifaBytecode::NativeCallContext& context)
             {
-                return 0;
-            }
-            int res = d[0].toString().compare(d[1].toString());
-            // 标准化为 C 风格的 -1, 0, 1
-            return (double)((res > 0) - (res < 0));
-        });
-
-    // 3. 注册 strcat: 拼接字符串
-    c1.register_function("strcat", [](ObjectVector& d) -> Object
-        {
-            if (d.size() < 2)
+                if (context.argument_count() < 2) { context.set_result(std::int64_t{0}); return; }
+                const int comparison = context.to_string(0).compare(context.to_string(1));
+                context.set_result(static_cast<std::int64_t>((comparison > 0) - (comparison < 0)));
+            });
+        c1.register_native_function("strcat", [](CifaBytecode::NativeCallContext& context)
             {
-                return "";
-            }
-            return d[0].toString() + d[1].toString();
-        });
-
-    // 4. 注册 strcpy: 模拟赋值
-    c1.register_function("strcpy", [](ObjectVector& d) -> Object
-        {
-            if (d.size() < 2)
+                context.set_result(context.argument_count() < 2
+                    ? std::string{} : context.to_string(0) + context.to_string(1));
+            });
+        c1.register_native_function("strcpy", [](CifaBytecode::NativeCallContext& context)
             {
-                return "";
-            }
-            return d[1];    // 将第二个参数赋值给第一个
-        });
+                context.set_result(context.argument_count() < 2 ? std::string{} : context.to_string(1));
+            });
+    }
+    else
+    {
+        c1.register_function("strlen", [](ObjectVector& d) -> Object
+            {
+                if (d.empty() || !d[0].isType<std::string>())
+                {
+                    return 0;
+                }
+                return (double)d[0].toString().length();
+            });
+        c1.register_function("strcmp", [](ObjectVector& d) -> Object
+            {
+                if (d.size() < 2)
+                {
+                    return 0;
+                }
+                int res = d[0].toString().compare(d[1].toString());
+                return (double)((res > 0) - (res < 0));
+            });
+        c1.register_function("strcat", [](ObjectVector& d) -> Object
+            {
+                if (d.size() < 2)
+                {
+                    return "";
+                }
+                return d[0].toString() + d[1].toString();
+            });
+        c1.register_function("strcpy", [](ObjectVector& d) -> Object
+            {
+                if (d.size() < 2)
+                {
+                    return "";
+                }
+                return d[1];
+            });
+    }
 
     std::string script_code = R"(
         string s1 = "Cifa";
@@ -2278,14 +2391,30 @@ bool nested_error_preservation_test()
 {
     Cifa c;
     c.set_output_error(false);
-    c.register_function("run_first", [&c](ObjectVector&) -> Object
-        {
-            return c.run_script("first_missing_function();");
-        });
-    c.register_function("run_second", [&c](ObjectVector&) -> Object
-        {
-            return c.run_script("second_missing_function();");
-        });
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+    {
+        c.register_native_function("run_first", [&c](CifaBytecode::NativeCallContext& context)
+            {
+                c.run_script("first_missing_function();");
+                context.set_empty_result();
+            });
+        c.register_native_function("run_second", [&c](CifaBytecode::NativeCallContext& context)
+            {
+                c.run_script("second_missing_function();");
+                context.set_empty_result();
+            });
+    }
+    else
+    {
+        c.register_function("run_first", [&c](ObjectVector&) -> Object
+            {
+                return c.run_script("first_missing_function();");
+            });
+        c.register_function("run_second", [&c](ObjectVector&) -> Object
+            {
+                return c.run_script("second_missing_function();");
+            });
+    }
     c.run_script("run_first(); run_second();");
     const std::string errors = c.get_errors_str();
     return c.get_errors().size() == 2
@@ -3529,14 +3658,15 @@ bool bytecode_execution_test()
     CifaBytecode c;
     c.set_output_error(false);
     int total = 0;
-    c.register_function("record", [&total](ObjectVector& arguments) -> Object
+    c.register_native_function("record", [&total](CifaBytecode::NativeCallContext& context)
         {
-            if (arguments.size() != 1 || !arguments[0].isNumber())
+            if (context.argument_count() != 1 || !context.is_number(0))
             {
-                return Object();
+                context.report_error("record requires one number");
+                return;
             }
-            total += arguments[0].toInt();
-            return Object();
+            total += static_cast<int>(context.to_integer(0));
+            context.set_empty_result();
         });
 
     if (!c.compile_script("entry_first: record(1); exit();\nentry_second: record(2); exit();\n")) return false;
@@ -3570,10 +3700,39 @@ bool bytecode_execution_test()
     return file_result.isNumber() && file_result.toInt() == 15;
 }
 
+bool bytecode_statistics_test()
+{
+    CifaBytecode code;
+    code.set_output_error(false);
+    code.set_optimization_enabled(false);
+    if (!code.compile_script("int twice(value) { return value * 2; } return twice(4);")) return false;
+    const auto statistics = code.bytecode_statistics();
+    return statistics.instruction_size > 0
+        && statistics.root_instruction_count > 0
+        && statistics.total_instruction_count > statistics.root_instruction_count
+        && statistics.total_operand_count >= statistics.root_operand_count
+        && statistics.constant_count > 0
+        && statistics.call_site_count > 0
+        && statistics.functions.size() == 1
+        && statistics.functions.front().name == "twice"
+        && statistics.functions.front().arity == 1
+        && statistics.functions.front().instruction_count > 0;
+}
+
 bool bytecode_optimization_test()
 {
     for (const bool enabled : {false, true})
     {
+        CifaBytecode nested_builtins;
+        nested_builtins.set_optimization_enabled(enabled);
+        if (!nested_builtins.compile_script(R"(
+            string text = to_string(abs(-12));
+            double value = pow(abs(-2), sqrt(4));
+            return text == "12" && value == 4;
+        )")) return false;
+        const auto nested_result = nested_builtins.run();
+        if (nested_builtins.has_runtime_error() || !nested_result.isType<bool>() || !nested_result.toBool()) return false;
+
         CifaBytecode order;
         order.set_output_error(false);
         order.set_optimization_enabled(enabled);
@@ -3716,7 +3875,7 @@ bool bytecode_optimization_test()
         CifaBytecode value_transfer;
         value_transfer.set_output_error(false);
         value_transfer.set_optimization_enabled(optimized);
-        if (!value_transfer.compile_script("auto changed(values) { values[0] = 9; return values; } auto forwarded(values) { return changed(values); } original = {1, 2}; result = forwarded(original); result[1] = 7; return original[0] == 1 && original[1] == 2 && result[0] == 9 && result[1] == 7;")) return false;
+        if (!value_transfer.compile_script("auto changed(values) { values[0] = 9; return values; } auto forwarded(values) { return changed(values); } auto changed_map(values) { values[\"key\"] = 9; return values; } original = {1, 2}; result = forwarded(original); result[1] = 7; original_map[\"key\"] = 1; map_result = changed_map(original_map); map_result[\"other\"] = 3; return original[0] == 1 && original[1] == 2 && result[0] == 9 && result[1] == 7 && original_map[\"key\"] == 1 && size(original_map) == 1 && map_result[\"key\"] == 9 && map_result[\"other\"] == 3;")) return false;
         for (int iteration = 0; iteration < 2; ++iteration)
         {
             const auto transfer_result = value_transfer.run();
@@ -3847,10 +4006,10 @@ bool bytecode_optimization_test()
     changed_host.set_output_error(false);
     changed_host.set_optimization_enabled(true);
     if (!changed_host.compile_script("return abs(-2);")) return false;
-    if (!changed_host.register_function("unused_after_compile", [](ObjectVector&) { return Object(0); })) return false;
+    if (!changed_host.register_native_function("unused_after_compile", [](CifaBytecode::NativeCallContext& context) { context.set_result(std::int64_t{0}); })) return false;
     changed_host.run();
     if (!changed_host.has_runtime_error()
-        || changed_host.get_runtime_error().find("host functions changed after optimized bytecode compilation") == std::string::npos)
+        || changed_host.get_runtime_error().find("native functions changed after optimized bytecode compilation") == std::string::npos)
     {
         return false;
     }
@@ -3858,7 +4017,7 @@ bool bytecode_optimization_test()
     CifaBytecode overridden_builtin;
     overridden_builtin.set_output_error(false);
     overridden_builtin.set_optimization_enabled(true);
-    if (!overridden_builtin.register_function("sin", [](ObjectVector&) { return Object(9); })) return false;
+    if (!overridden_builtin.register_native_function("sin", [](CifaBytecode::NativeCallContext& context) { context.set_result(std::int64_t{9}); })) return false;
     if (!overridden_builtin.compile_script("return sin(0);")) return false;
     const auto overridden_result = overridden_builtin.run();
     if (overridden_builtin.has_runtime_error() || !overridden_result.isNumber() || overridden_result.toInt64() != 9) return false;
@@ -3867,20 +4026,20 @@ bool bytecode_optimization_test()
     changed_during_run.set_output_error(false);
     changed_during_run.set_optimization_enabled(true);
     int after_change_calls = 0;
-    if (!changed_during_run.register_function("change_host", [&changed_during_run](ObjectVector&)
+    if (!changed_during_run.register_native_function("change_host", [&changed_during_run](CifaBytecode::NativeCallContext& context)
         {
-            changed_during_run.register_function("registered_during_run", [](ObjectVector&) { return Object(); });
-            return Object();
+            changed_during_run.register_native_function("registered_during_run", [](CifaBytecode::NativeCallContext& nested) { nested.set_empty_result(); });
+            context.set_empty_result();
         })) return false;
-    if (!changed_during_run.register_function("after_change", [&after_change_calls](ObjectVector&)
+    if (!changed_during_run.register_native_function("after_change", [&after_change_calls](CifaBytecode::NativeCallContext& context)
         {
             ++after_change_calls;
-            return Object();
+            context.set_empty_result();
         })) return false;
     if (!changed_during_run.compile_script("change_host(); after_change();")) return false;
     changed_during_run.run();
     if (!changed_during_run.has_runtime_error()
-        || changed_during_run.get_runtime_error().find("host functions changed during optimized bytecode execution") == std::string::npos
+        || changed_during_run.get_runtime_error().find("native functions changed during optimized bytecode execution") == std::string::npos
         || after_change_calls != 0)
     {
         return false;
@@ -3905,14 +4064,14 @@ bool nested_bytecode_context_test()
     c.set_output_error(false);
     c.set_optimization_enabled(false);
     int total = 0;
-    c.register_function("record", [&total](ObjectVector& arguments) -> Object
+    c.register_native_function("record", [&total](CifaBytecode::NativeCallContext& context)
         {
-            total += arguments[0].toInt();
-            return Object();
+            total += static_cast<int>(context.to_integer(0));
+            context.set_empty_result();
         });
-    c.register_function("compile_replacement", [&c](ObjectVector&) -> Object
+    c.register_native_function("compile_replacement", [&c](CifaBytecode::NativeCallContext& context)
         {
-            return Object(c.run_script("replacement: record(100); exit();").getSpecialType() != "Error");
+            context.set_result(c.run_script("replacement: record(100); exit();").getSpecialType() != "Error");
         });
     if (!c.compile_script("record(1); compile_replacement(); record(2); exit();")) return false;
     c.run();
@@ -4132,22 +4291,22 @@ int main(int argc, char** argv)
             std::println("[FAIL] {}. {} failed", total, name);
         }
     };
+    auto run_backend_test = [&total, &ok](std::string name, auto& backend, auto test)
+    {
+        total++;
+        if ((backend.*test)())
+        {
+            ok++;
+            std::println("[PASS] {}. {} success", total, name);
+        }
+        else std::println("[FAIL] {}. {} failed", total, name);
+    };
     #define RUN_COMMON(name) run_common_test(#name, &DirectTests::name, &BytecodeTests::name)
+    #define RUN_CIFA(name) run_backend_test("cifa_" #name, direct, &DirectTests::name)
+    #define RUN_BYTECODE(name) run_backend_test("cifabytecode_" #name, bytecode, &BytecodeTests::name)
 
-    run_direct_test("diagnostic_position_test", diagnostic_position_test);
-    run_direct_test("direct_source_map_test", direct_source_map_test);
-    run_direct_test("nested_ast_function_lookup_test", nested_ast_function_lookup_test);
-    run_direct_test("global_definition_scope_test", global_definition_scope_test);
-    run_direct_test("nested_script_global_scope_test", nested_script_global_scope_test);
-    run_direct_test("nested_runtime_reporter_test", nested_runtime_reporter_test);
-
-    RUN_COMMON(register_function_test);
-    RUN_COMMON(register_function_template_test);
-    RUN_COMMON(registration_name_validation_test);
+    std::println("[Common tests]");
     RUN_COMMON(exit_function_test);
-    RUN_COMMON(typed_function_argument_error_test);
-    RUN_COMMON(object_vector_argument_error_test);
-    RUN_COMMON(object_conversion_fallback_test);
     RUN_COMMON(builtin_math_function_test);
     RUN_COMMON(builtin_type_function_test);
     RUN_COMMON(range_for_test);
@@ -4163,7 +4322,6 @@ int main(int argc, char** argv)
     RUN_COMMON(script_void_function_test);
     RUN_COMMON(script_function_return_check_test);
     RUN_COMMON(script_function_argument_count_test);
-    RUN_COMMON(script_function_global_scope_test);
     RUN_COMMON(string_operation_test);
     RUN_COMMON(string_compare_test);
     RUN_COMMON(bitwise_operator_test);
@@ -4184,18 +4342,13 @@ int main(int argc, char** argv)
     RUN_COMMON(typed_function_conversion_test);
     RUN_COMMON(typed_array_and_struct_test);
     RUN_COMMON(typed_conversion_error_test);
-    RUN_COMMON(registered_type_binding_test);
-    RUN_COMMON(int64_storage_test);
     RUN_COMMON(empty_statement_test);
     RUN_COMMON(else_if_chain_test);
     RUN_COMMON(multi_dimensional_array_test);
     RUN_COMMON(compound_assignment_test);
-    RUN_COMMON(c_string_library_test);
     RUN_COMMON(runtime_error_stack_test);
-    RUN_COMMON(runtime_error_abort_test);
     RUN_COMMON(uninitialized_variable_runtime_test);
     RUN_COMMON(nested_execution_state_test);
-    RUN_COMMON(nested_error_preservation_test);
     RUN_COMMON(nested_static_error_source_test);
     RUN_COMMON(mixed_array_literal_test);
     RUN_COMMON(string_key_map_test);
@@ -4209,13 +4362,47 @@ int main(int argc, char** argv)
     RUN_COMMON(include_test);
     #undef RUN_COMMON
 
-        run_direct_test("custom_operator_dispatch_test", +[]() { DirectTests direct; return direct.custom_operator_dispatch_test(); });
+    std::println("[Cifa tests]");
+    run_direct_test("diagnostic_position_test", diagnostic_position_test);
+    run_direct_test("direct_source_map_test", direct_source_map_test);
+    run_direct_test("nested_ast_function_lookup_test", nested_ast_function_lookup_test);
+    run_direct_test("global_definition_scope_test", global_definition_scope_test);
+    run_direct_test("nested_script_global_scope_test", nested_script_global_scope_test);
+    run_direct_test("nested_runtime_reporter_test", nested_runtime_reporter_test);
+    run_direct_test("object_conversion_fallback_test", +[]() { DirectTests direct; return direct.object_conversion_fallback_test(); });
+    run_direct_test("custom_operator_dispatch_test", +[]() { DirectTests direct; return direct.custom_operator_dispatch_test(); });
+    RUN_CIFA(register_function_test);
+    RUN_CIFA(register_function_template_test);
+    RUN_CIFA(registration_name_validation_test);
+    RUN_CIFA(typed_function_argument_error_test);
+    RUN_CIFA(object_vector_argument_error_test);
+    RUN_CIFA(script_function_global_scope_test);
+    RUN_CIFA(registered_type_binding_test);
+    RUN_CIFA(int64_storage_test);
+    RUN_CIFA(c_string_library_test);
+    RUN_CIFA(runtime_error_abort_test);
+    RUN_CIFA(nested_error_preservation_test);
 
-        run_direct_test("bytecode_execution_test", bytecode_execution_test);
-        run_direct_test("bytecode_optimization_test", bytecode_optimization_test);
-        run_direct_test("register_backend_structure_test", RegisterBackendTest::run);
-        run_direct_test("nested_bytecode_context_test", nested_bytecode_context_test);
+    std::println("[CifaBytecode tests]");
+    RUN_BYTECODE(register_function_test);
+    RUN_BYTECODE(register_function_template_test);
+    RUN_BYTECODE(registration_name_validation_test);
+    RUN_BYTECODE(typed_function_argument_error_test);
+    RUN_BYTECODE(object_vector_argument_error_test);
+    RUN_BYTECODE(script_function_global_scope_test);
+    RUN_BYTECODE(registered_type_binding_test);
+    RUN_BYTECODE(int64_storage_test);
+    RUN_BYTECODE(c_string_library_test);
+    RUN_BYTECODE(runtime_error_abort_test);
+    RUN_BYTECODE(nested_error_preservation_test);
+    run_direct_test("bytecode_execution_test", bytecode_execution_test);
+    run_direct_test("bytecode_statistics_test", bytecode_statistics_test);
+    run_direct_test("bytecode_optimization_test", bytecode_optimization_test);
+    run_direct_test("register_backend_structure_test", RegisterBackendTest::run);
+    run_direct_test("nested_bytecode_context_test", nested_bytecode_context_test);
+    #undef RUN_CIFA
+    #undef RUN_BYTECODE
 
     std::println("Passed {} out of {} tests.", ok, total);
-        return ok == total ? 0 : 1;
+    return ok == total ? 0 : 1;
 }

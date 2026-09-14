@@ -2748,7 +2748,8 @@ void Cifa::combine_functions2(std::list<CalUnit>& ppp, bool global_scope)
                 {
                     add_error(*it, "script function '{}' is only allowed in global scope", name);
                 }
-                else if (functions.contains(name))
+                else if (functions.contains(name)
+                    || (compile_visible_host_functions != nullptr && compile_visible_host_functions->contains(name)))
                 {
                     add_error(*it, "script function '{}' conflicts with a host function", name);
                 }
@@ -3719,7 +3720,9 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
             add_error(c, "function '{}' has no operands", c.str);
         }
         //内置方法名不视为未定义函数
-        if (!functions.contains(c.str) && !builtin_methods.contains(c.str)
+        if (!functions.contains(c.str)
+            && (compile_visible_host_functions == nullptr || !compile_visible_host_functions->contains(c.str))
+            && !builtin_methods.contains(c.str)
             && (script_overloads == nullptr || script_overloads->empty()))
         {
             add_error(c, "function '{}' is not defined", c.str);

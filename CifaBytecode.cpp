@@ -14,7 +14,17 @@ struct ValueProfile
 {
     std::uint64_t object_imports = 0, object_exports = 0, metadata_allocations = 0;
     std::uint64_t copies = 0, object_copies = 0, clears = 0, object_clears = 0;
+    std::uint64_t copy_empty = 0, copy_integer = 0, copy_double = 0, copy_bool = 0, copy_resource = 0;
+    std::uint64_t copy_same_storage = 0;
+    std::array<std::uint64_t, 80> copies_by_opcode{};
+    std::array<std::uint64_t, 80> resource_copies_by_opcode{};
+    std::array<std::uint64_t, 80> array_copies_by_opcode{};
+    std::array<std::uint64_t, 80> array_copy_elements_by_opcode{};
+    std::uint64_t copies_unattributed = 0;
+    size_t maximum_copy_opcode = 0;
     std::uint64_t resource_allocations = 0, resource_copies = 0;
+    std::uint64_t string_copies = 0, string_copy_bytes = 0;
+    std::uint64_t map_copies = 0, map_copy_elements = 0, other_resource_copies = 0;
     std::uint64_t array_imports = 0, array_import_elements = 0;
     std::uint64_t array_exports = 0, array_export_elements = 0;
     std::uint64_t array_copies = 0, array_copy_elements = 0;
@@ -25,135 +35,198 @@ struct ValueProfile
         std::cout << std::dec << "ValueProfile object_imports=" << object_imports << " object_exports=" << object_exports
             << " metadata_allocations=" << metadata_allocations << " copies=" << copies
             << " object_copies=" << object_copies << " clears=" << clears << " object_clears=" << object_clears
+            << " copy_empty=" << copy_empty << " copy_integer=" << copy_integer
+            << " copy_double=" << copy_double << " copy_bool=" << copy_bool
+            << " copy_resource=" << copy_resource << " copy_same_storage=" << copy_same_storage
+            << " copies_unattributed=" << copies_unattributed << " maximum_copy_opcode=" << maximum_copy_opcode
             << " resource_allocations=" << resource_allocations << " resource_copies=" << resource_copies
+            << " string_copies=" << string_copies << " string_copy_bytes=" << string_copy_bytes
+            << " map_copies=" << map_copies << " map_copy_elements=" << map_copy_elements
+            << " other_resource_copies=" << other_resource_copies
             << " array_imports=" << array_imports << " array_import_elements=" << array_import_elements
             << " array_exports=" << array_exports << " array_export_elements=" << array_export_elements
             << " array_copies=" << array_copies << " array_copy_elements=" << array_copy_elements
             << " array_import_const=" << array_import_const << " array_import_move=" << array_import_move
             << " array_export_copy=" << array_export_copy << " array_export_take=" << array_export_take
             << " sizeof_Object=" << sizeof(Object) << '\n';
+        std::cout << "ValueProfile copies_by_opcode=";
+        for (size_t opcode = 0; opcode < copies_by_opcode.size(); ++opcode)
+            if (copies_by_opcode[opcode] != 0) std::cout << ' ' << opcode << ':' << copies_by_opcode[opcode];
+        std::cout << '\n';
+        std::cout << "ValueProfile resource_copies_by_opcode=";
+        for (size_t opcode = 0; opcode < resource_copies_by_opcode.size(); ++opcode)
+            if (resource_copies_by_opcode[opcode] != 0)
+                std::cout << ' ' << opcode << ':' << resource_copies_by_opcode[opcode];
+        std::cout << '\n';
+        std::cout << "ValueProfile array_copies_by_opcode=";
+        for (size_t opcode = 0; opcode < array_copies_by_opcode.size(); ++opcode)
+            if (array_copies_by_opcode[opcode] != 0)
+                std::cout << ' ' << opcode << ':' << array_copies_by_opcode[opcode]
+                    << '/' << array_copy_elements_by_opcode[opcode];
+        std::cout << '\n';
     }
 };
 static thread_local ValueProfile value_profile;
+static thread_local size_t value_profile_opcode = 0;
+
+template<class Array, class Map>
+static void profile_resource_copy(const std::any& resource, Array*, Map*)
+{
+    ++value_profile.resource_allocations;
+    ++value_profile.resource_copies;
+    if (value_profile_opcode < value_profile.resource_copies_by_opcode.size())
+        ++value_profile.resource_copies_by_opcode[value_profile_opcode];
+    if (const auto* array = std::any_cast<Array>(&resource))
+    {
+        (void)array;
+    }
+    else if (const auto* text = std::any_cast<std::string>(&resource))
+    {
+        ++value_profile.string_copies;
+        value_profile.string_copy_bytes += text->size();
+    }
+    else if (const auto* map = std::any_cast<Map>(&resource))
+    {
+        (void)map;
+    }
+    else ++value_profile.other_resource_copies;
+}
 #endif
-CifaBytecode::CompactValue::CompactValue(std::int64_t value)
+CifaBytecode::VmArray::Values::Values() : storage(std::make_shared<Container>()) {}
+
+CifaBytecode::VmArray::Values::Values(size_t size) : storage(std::make_shared<Container>(size)) {}
+
+CifaBytecode::VmArray::Values::Values(Container elements)
+    : storage(std::make_shared<Container>(std::move(elements))) {}
+
+CifaBytecode::VmArray::Values::Container& CifaBytecode::VmArray::Values::writable()
 {
-    payload.integer = value;
-    tag = Tag::Integer;
+    if (storage.use_count() != 1)
+    {
+#ifdef CIFA_VALUE_PROFILE
+        ++value_profile.array_copies;
+        value_profile.array_copy_elements += storage->size();
+        if (value_profile_opcode < value_profile.array_copies_by_opcode.size())
+        {
+            ++value_profile.array_copies_by_opcode[value_profile_opcode];
+            value_profile.array_copy_elements_by_opcode[value_profile_opcode] += storage->size();
+        }
+#endif
+        storage = std::make_shared<Container>(*storage);
+    }
+    return *storage;
 }
 
-CifaBytecode::CompactValue::CompactValue(double value)
+CifaBytecode::VmMap::Values::Values() : storage(std::make_shared<Container>()) {}
+
+CifaBytecode::VmMap::Values::Values(Container elements)
+    : storage(std::make_shared<Container>(std::move(elements))) {}
+
+CifaBytecode::VmMap::Values::Container& CifaBytecode::VmMap::Values::writable()
 {
-    payload.floating = value;
-    tag = Tag::Floating;
+    if (storage.use_count() != 1)
+    {
+#ifdef CIFA_VALUE_PROFILE
+        ++value_profile.map_copies;
+        value_profile.map_copy_elements += storage->size();
+#endif
+        storage = std::make_shared<Container>(*storage);
+    }
+    return *storage;
 }
 
-CifaBytecode::CompactValue::CompactValue(bool value)
+CifaBytecode::VmArray::Values::Container::iterator CifaBytecode::VmArray::Values::insert(
+    const_iterator position, CompactValue value)
 {
-    payload.boolean = value;
-    tag = Tag::Boolean;
+    const auto offset = position - storage->begin();
+    auto& values = writable();
+    return values.insert(values.begin() + offset, std::move(value));
+}
+
+CifaBytecode::VmArray::Values::Container::iterator CifaBytecode::VmArray::Values::erase(const_iterator position)
+{
+    const auto offset = position - storage->begin();
+    auto& values = writable();
+    return values.erase(values.begin() + offset);
 }
 
 CifaBytecode::CompactValue::CompactValue(std::any value)
+    : Object::Storage(import_resource(std::move(value)))
 {
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.resource_allocations;
 #endif
-    payload.resource = new Resource(import_resource(std::move(value)));
-    tag = Tag::Resource;
 }
 
 CifaBytecode::CompactValue::CompactValue(const Object::Storage& value)
 {
-    if (const auto* integer = value_get_if<std::int64_t>(&value)) { payload.integer = *integer; tag = Tag::Integer; }
-    else if (const auto* floating = value_get_if<double>(&value)) { payload.floating = *floating; tag = Tag::Floating; }
-    else if (const auto* boolean = value_get_if<bool>(&value)) { payload.boolean = *boolean; tag = Tag::Boolean; }
+    if (const auto* integer = value_get_if<std::int64_t>(&value)) emplace<std::int64_t>(*integer);
+    else if (const auto* floating = value_get_if<double>(&value)) emplace<double>(*floating);
+    else if (const auto* boolean = value_get_if<bool>(&value)) emplace<bool>(*boolean);
     else if (const auto* resource = value_get_if<std::any>(&value))
     {
 #ifdef CIFA_VALUE_PROFILE
         ++value_profile.resource_allocations;
         if (std::any_cast<ObjectVector>(resource)) ++value_profile.array_import_const;
 #endif
-        payload.resource = new Resource(import_resource(*resource));
-        tag = Tag::Resource;
+        emplace<std::any>(import_resource(*resource));
     }
 }
 
 CifaBytecode::CompactValue::CompactValue(Object::Storage&& value)
 {
-    if (auto* integer = value_get_if<std::int64_t>(&value)) { payload.integer = *integer; tag = Tag::Integer; }
-    else if (auto* floating = value_get_if<double>(&value)) { payload.floating = *floating; tag = Tag::Floating; }
-    else if (auto* boolean = value_get_if<bool>(&value)) { payload.boolean = *boolean; tag = Tag::Boolean; }
+    if (auto* integer = value_get_if<std::int64_t>(&value)) emplace<std::int64_t>(*integer);
+    else if (auto* floating = value_get_if<double>(&value)) emplace<double>(*floating);
+    else if (auto* boolean = value_get_if<bool>(&value)) emplace<bool>(*boolean);
     else if (auto* resource = value_get_if<std::any>(&value))
     {
 #ifdef CIFA_VALUE_PROFILE
         ++value_profile.resource_allocations;
         if (std::any_cast<ObjectVector>(resource)) ++value_profile.array_import_move;
 #endif
-        payload.resource = new Resource(import_resource(std::move(*resource)));
-        tag = Tag::Resource;
+        emplace<std::any>(import_resource(std::move(*resource)));
     }
 }
 
-CifaBytecode::CompactValue::CompactValue(const CompactValue& other) : tag(other.tag)
+CifaBytecode::CompactValue::CompactValue(const CompactValue& other)
+    : Object::Storage(static_cast<const Object::Storage&>(other))
 {
-    if (tag == Tag::Resource)
-    {
 #ifdef CIFA_VALUE_PROFILE
-        ++value_profile.resource_allocations;
-        ++value_profile.resource_copies;
-        if (const auto* array = std::any_cast<VmArray>(&other.payload.resource->value))
-        {
-            ++value_profile.array_copies;
-            value_profile.array_copy_elements += array->values.size();
-        }
+    if (const auto* resource = std::get_if<std::any>(&other))
+        profile_resource_copy(*resource, static_cast<VmArray*>(nullptr), static_cast<VmMap*>(nullptr));
 #endif
-        payload.resource = new Resource(other.payload.resource->value);
-    }
-    else payload.bits = other.payload.bits;
 }
 
-CifaBytecode::CompactValue::CompactValue(CompactValue&& other) noexcept : payload(other.payload), tag(other.tag)
-{
-    other.payload.bits = 0;
-    other.tag = Tag::Empty;
-}
+CifaBytecode::CompactValue::CompactValue(CompactValue&& other) noexcept
+    : Object::Storage(std::move(static_cast<Object::Storage&>(other))) { other.clear(); }
 
 CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(const CompactValue& other)
 {
     if (this == &other) return *this;
-    CompactValue copy(other);
-    *this = std::move(copy);
+#ifdef CIFA_VALUE_PROFILE
+    if (const auto* resource = std::get_if<std::any>(&other))
+        profile_resource_copy(*resource, static_cast<VmArray*>(nullptr), static_cast<VmMap*>(nullptr));
+#endif
+    Object::Storage::operator=(static_cast<const Object::Storage&>(other));
     return *this;
 }
 
 CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(CompactValue&& other) noexcept
 {
     if (this == &other) return *this;
-    clear();
-    payload = other.payload;
-    tag = other.tag;
-    other.payload.bits = 0;
-    other.tag = Tag::Empty;
+    Object::Storage::operator=(std::move(static_cast<Object::Storage&>(other)));
+    other.clear();
     return *this;
-}
-
-CifaBytecode::CompactValue::~CompactValue()
-{
-    clear();
-}
-
-void CifaBytecode::CompactValue::clear()
-{
-    if (tag == Tag::Resource) delete payload.resource;
-    payload.bits = 0;
-    tag = Tag::Empty;
 }
 
 std::any CifaBytecode::CompactValue::import_resource(const std::any& value)
 {
     const auto* objects = std::any_cast<ObjectVector>(&value);
-    if (!objects) return value;
+    if (!objects)
+    {
+        if (const auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(*map);
+        return value;
+    }
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.array_imports;
     value_profile.array_import_elements += objects->size();
@@ -167,7 +240,11 @@ std::any CifaBytecode::CompactValue::import_resource(const std::any& value)
 std::any CifaBytecode::CompactValue::import_resource(std::any&& value)
 {
     auto* objects = std::any_cast<ObjectVector>(&value);
-    if (!objects) return std::move(value);
+    if (!objects)
+    {
+        if (auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(std::move(*map));
+        return std::move(value);
+    }
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.array_imports;
     value_profile.array_import_elements += objects->size();
@@ -181,7 +258,11 @@ std::any CifaBytecode::CompactValue::import_resource(std::any&& value)
 std::any CifaBytecode::CompactValue::export_resource(const std::any& value)
 {
     const auto* array = std::any_cast<VmArray>(&value);
-    if (!array) return value;
+    if (!array)
+    {
+        if (const auto* map = std::any_cast<VmMap>(&value)) return map->values.readable();
+        return value;
+    }
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.array_exports;
     value_profile.array_export_elements += array->values.size();
@@ -194,40 +275,33 @@ std::any CifaBytecode::CompactValue::export_resource(const std::any& value)
 
 Object::Storage CifaBytecode::CompactValue::export_storage() const
 {
-    switch (tag)
+    if (const auto* resource = std::get_if<std::any>(this))
     {
-    case Tag::Integer: return payload.integer;
-    case Tag::Floating: return payload.floating;
-    case Tag::Boolean: return payload.boolean;
-    case Tag::Resource:
 #ifdef CIFA_VALUE_PROFILE
-        if (std::any_cast<VmArray>(&payload.resource->value)) ++value_profile.array_export_copy;
+        if (std::any_cast<VmArray>(resource)) ++value_profile.array_export_copy;
 #endif
-        return export_resource(payload.resource->value);
-    default: return std::monostate{};
+        return export_resource(*resource);
     }
+    return static_cast<const Object::Storage&>(*this);
 }
 
 Object::Storage CifaBytecode::CompactValue::take_storage()
 {
-    Object::Storage result;
-    switch (tag)
+    if (auto* resource = std::get_if<std::any>(this))
     {
-    case Tag::Integer: result = payload.integer; break;
-    case Tag::Floating: result = payload.floating; break;
-    case Tag::Boolean: result = payload.boolean; break;
-    case Tag::Resource:
-        if (std::any_cast<VmArray>(&payload.resource->value))
+        Object::Storage result;
+        if (std::any_cast<VmArray>(resource) || std::any_cast<VmMap>(resource))
         {
 #ifdef CIFA_VALUE_PROFILE
             ++value_profile.array_export_take;
 #endif
-            result = export_resource(payload.resource->value);
+            result = export_resource(*resource);
         }
-        else result = std::move(payload.resource->value);
-        break;
-    default: break;
+        else result = std::move(*resource);
+        clear();
+        return result;
     }
+    Object::Storage result = std::move(static_cast<Object::Storage&>(*this));
     clear();
     return result;
 }
@@ -330,6 +404,32 @@ void CifaBytecode::RegisterSlots::export_argument(size_t slot, Object& destinati
     clear(slot);
 }
 
+void CifaBytecode::RegisterSlots::export_object(size_t slot, Object& destination) const
+{
+    const size_t index = window_base + slot;
+    destination.bound_type = typeid(void);
+    destination.declared_type_name.clear();
+    destination.element_type_name.clear();
+    destination.type1.clear();
+    destination.name.clear();
+    if (slot_names[index] != 0) destination.name = name_pool[slot_names[index]];
+    destination.argument_origin = origins[index];
+    const auto& type = type_pool[slot_types[index]];
+    destination.bound_type = type.bound;
+    destination.declared_type_name = type.declared;
+    destination.element_type_name = type.element;
+    destination.type1 = type.special;
+    if (bindings[index] != NumericBinding::None)
+    {
+        const bool integer = bindings[index] == NumericBinding::Int;
+        destination.bound_type = integer ? typeid(std::int64_t) : typeid(double);
+        destination.declared_type_name = integer ? "int" : "double";
+    }
+    destination.value = values[index].value.export_storage();
+    if (const auto* resource = value_get_if<std::any>(&destination.value);
+        resource && std::any_cast<Object::NoValue>(resource)) destination.type1 = "NoValue";
+}
+
 void CifaBytecode::RegisterSlots::clear(size_t slot)
 {
 #ifdef CIFA_VALUE_PROFILE
@@ -417,7 +517,7 @@ void CifaBytecode::RegisterSlots::import_value(size_t slot, Value&& value)
     store_payload(slot, std::forward<Value>(value).value);
 }
 
-CifaBytecode::BytecodeValue::Storage CifaBytecode::RegisterSlots::payload(size_t slot) const
+CifaBytecode::BytecodeValue::Storage const& CifaBytecode::RegisterSlots::payload(size_t slot) const
 {
     return values[window_base + slot].value;
 }
@@ -503,6 +603,17 @@ void CifaBytecode::RegisterSlots::copy(size_t destination, const RegisterSlots& 
     if (&values == &source.values && window_base + destination == source.window_base + slot) return;
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.copies;
+    value_profile.maximum_copy_opcode = (std::max)(value_profile.maximum_copy_opcode, value_profile_opcode);
+    if (value_profile_opcode < value_profile.copies_by_opcode.size())
+        ++value_profile.copies_by_opcode[value_profile_opcode];
+    else ++value_profile.copies_unattributed;
+    const auto& copied = source.values[source.window_base + slot].value;
+    if (copied.empty()) ++value_profile.copy_empty;
+    else if (copied.holds<std::int64_t>()) ++value_profile.copy_integer;
+    else if (copied.holds<double>()) ++value_profile.copy_double;
+    else if (copied.holds<bool>()) ++value_profile.copy_bool;
+    else ++value_profile.copy_resource;
+    if (&values == &source.values) ++value_profile.copy_same_storage;
 #endif
     const auto binding = source.bindings[source.window_base + slot];
     const auto origin = source.origins[source.window_base + slot];
@@ -714,16 +825,23 @@ void CifaBytecode::RegisterSlots::binary_fallback(Opcode opcode, size_t destinat
     Object left_argument, right_argument;
     export_argument(left, left_argument);
     if (right != left) export_argument(right, right_argument);
+    machine.export_host_globals();
     for (auto& callback : *callbacks)
     {
         auto result = callback(left_argument, right == left ? left_argument : right_argument);
-        if (machine.host.has_runtime_error() || machine.should_stop()) break;
+        if (machine.host.has_runtime_error() || machine.should_stop())
+        {
+            machine.import_host_globals();
+            break;
+        }
         if (result.hasValue())
         {
+            machine.import_host_globals();
             import_object(destination, std::move(result));
             return;
         }
     }
+    machine.import_host_globals();
     clear(destination);
 }
 
@@ -1018,8 +1136,7 @@ std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     for (size_t index = original_size; index > 0; --index)
     {
         const size_t current = index - 1;
-        const auto opcode = instructions.code[current].opcode;
-        remap[current] = compact_only(opcode) ? remap[current + 1] : --compact_size;
+        remap[current] = compact_only(instructions.code[current].opcode) ? remap[current + 1] : --compact_size;
     }
     std::vector<Instruction> code;
     std::vector<std::vector<std::pair<size_t, bool>>> diagnostic_frames;
@@ -1266,10 +1383,8 @@ bool CifaBytecode::try_fold_constant(const CalUnit& node, Object& value,
             }
         }
 
-        const auto builtin = builtin_function_generations.find(node.str);
-        const auto generation = function_generations.find(node.str);
-        if (builtin == builtin_function_generations.end() || generation == function_generations.end()
-            || generation->second != builtin->second) return false;
+        const auto native = native_functions.find(node.str);
+        if (native == native_functions.end() || !native->second.builtin) return false;
 
         const auto all_numeric = [&]()
         {
@@ -1291,10 +1406,12 @@ bool CifaBytecode::try_fold_constant(const CalUnit& node, Object& value,
             size_t best = 0;
             for (size_t index = 1; index < arguments.size(); ++index)
             {
-                const bool less = arguments[best].isInteger() && arguments[index].isInteger()
-                    ? arguments[best].toInt64() < arguments[index].toInt64()
+                const bool integers = arguments[best].isInteger() && arguments[index].isInteger();
+                const bool less = integers ? arguments[best].toInt64() < arguments[index].toInt64()
                     : arguments[best].toDouble() < arguments[index].toDouble();
-                if ((node.str == "max" && less) || (node.str == "min" && !less && arguments[best].toDouble() != arguments[index].toDouble()))
+                const bool different = integers ? arguments[best].toInt64() != arguments[index].toInt64()
+                    : arguments[best].toDouble() != arguments[index].toDouble();
+                if ((node.str == "max" && less) || (node.str == "min" && !less && different))
                     best = index;
             }
             const bool floating = std::any_of(arguments.begin(), arguments.end(), [](const Object& argument) { return argument.isType<double>(); });
@@ -1421,47 +1538,48 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<Instructi
     };
     if (node.v.size() != 2 || !eligible(eligible, node)
         || (node.v[0].v.empty() && node.v[1].v.empty())) return false;
+    struct Operand
+    {
+        size_t slot;
+        bool constant;
+        bool temporary;
+    };
     size_t temporary = 0;
-    const auto generate = [&](const auto& self, CalUnit& value, bool root) -> size_t
+    const auto generate = [&](const auto& self, CalUnit& value, bool root) -> Operand
     {
         if (value.v.empty())
         {
-            const size_t slot = temporary++;
             if (value.type == CalUnitType::Constant)
             {
                 Object number;
                 if (!Cifa::parse_number_literal(value.str, number)) translation_error = "unsupported bytecode numeric literal";
                 constants.push_back(std::move(number));
-                instructions.push_back({Opcode::RegisterSnapshot, source_ref(&value), constants.size() - 1, slot});
-                instructions.back().write = WriteOperation::Assign;
+                return {constants.size() - 1, true, false};
             }
-            else
-            {
-                instructions.push_back({Opcode::RegisterSnapshot, source_ref(&value), *local_slot(value, false), slot});
-                instructions.back().write = WriteOperation::Add;
-                instructions.back().variable_site = intern_name(value.str);
-            }
-            return slot;
+            return {*local_slot(value, false), false, false};
         }
         instructions.push_back({Opcode::Enter, source_ref(&value)});
-        const size_t left = self(self, value.v[0], false);
-        const size_t right = self(self, value.v[1], false);
+        const auto left = self(self, value.v[0], false);
+        const auto right = self(self, value.v[1], false);
         Opcode opcode;
         operation(value, opcode);
         const size_t destination = temporary++;
         RegisterBinarySite site{};
         site.code = {static_cast<std::uint16_t>(opcode), static_cast<std::uint16_t>(root ? 0 : 1), 0,
-            static_cast<std::uint32_t>(left), static_cast<std::uint32_t>(right)};
+            static_cast<std::uint32_t>(left.slot), static_cast<std::uint32_t>(right.slot)};
         site.left_name = intern_name(value.v[0].str);
         site.right_name = intern_name(value.v[1].str);
         site.left_source = source_ref(&value.v[0]);
         site.right_source = source_ref(&value.v[1]);
-        site.left_temporary = site.right_temporary = true;
+        site.left_constant = left.constant;
+        site.right_constant = right.constant;
+        site.left_temporary = left.temporary;
+        site.right_temporary = right.temporary;
         site.temporary_destination = root ? 0 : destination + 1;
         module_data->register_binary_sites.push_back(site);
         instructions.push_back({Opcode::RegisterBinary, source_ref(&value), module_data->register_binary_sites.size() - 1});
         instructions.push_back({Opcode::Leave, source_ref(&value)});
-        return destination;
+        return {destination, false, true};
     };
     generate(generate, node, true);
     return true;
@@ -1781,9 +1899,9 @@ void CifaBytecode::emit(CalUnit& node, std::vector<Instruction>& instructions)
                 }
             }
         }
+        const auto native_size = native_functions.find("size");
         const bool original_size = optimization_enabled && node.str == "size"
-            && builtin_function_generations.contains("size") && function_generations.contains("size")
-            && builtin_function_generations.at("size") == function_generations.at("size");
+            && native_size != native_functions.end() && native_size->second.builtin;
         if (original_size && node.v.size() == 1)
         {
             CalUnit* argument = &node.v[0];
@@ -1823,9 +1941,9 @@ void CifaBytecode::emit(CalUnit& node, std::vector<Instruction>& instructions)
         const MathKind direct_math_kind = math_kind(node.str);
         const size_t direct_math_arity = direct_math_kind <= MathKind::LGamma ? 1
             : direct_math_kind != MathKind::None ? 2 : 0;
+        const auto native_math = native_functions.find(node.str);
         const bool original_math = optimization_enabled && direct_math_kind != MathKind::None
-            && builtin_function_generations.contains(node.str) && function_generations.contains(node.str)
-            && builtin_function_generations.at(node.str) == function_generations.at(node.str);
+            && native_math != native_functions.end() && native_math->second.builtin;
         if (original_math)
         {
             std::vector<CalUnit*> arguments;
@@ -3033,19 +3151,133 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
 
 CifaBytecode::CifaBytecode() : session(std::make_unique<Session>(*this))
 {
-    register_function("run_string", [this](ObjectVector& arguments) -> Object
-        {
-            return arguments.empty() ? Object() : run_script(arguments[0].toString());
-        });
-    register_function("run_file", [this](ObjectVector& arguments) -> Object
-        {
-            return arguments.empty() ? Object() : run_file(arguments[0].toString());
-        });
+    for (const auto* name : {"print", "println", "to_string", "to_number", "type", "size", "sprintf", "format", "run_string", "run_file",
+        "exit", "max", "min", "ifv", "ifvalue",
+        "abs", "sqrt", "cbrt", "round", "trunc", "nearbyint", "rint", "ceil", "floor",
+        "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp",
+        "log", "log2", "log10", "erf", "erfc", "tgamma", "lgamma", "atan2", "pow",
+        "hypot", "fmod", "remainder", "copysign", "fdim", "fmax", "fmin"})
+        register_builtin(name);
 }
 
 CifaBytecode::~CifaBytecode() = default;
 
-void CifaBytecode::translate(Cifa& compiler, size_t script_function_version)
+CifaBytecode::NativeCallContext::NativeCallContext(Machine& value_machine, RegisterSlots& value_destination,
+    size_t value_result_slot, RegisterSlots& value_arguments, const size_t* value_argument_slots,
+    size_t value_argument_count, const std::vector<SourceLocation>& value_locations)
+    : machine(value_machine), destination(value_destination), arguments(value_arguments),
+      argument_slots(value_argument_slots), locations(value_locations), result_slot(value_result_slot),
+      argument_count_value(value_argument_count) {}
+
+bool CifaBytecode::NativeCallContext::is_empty(size_t index) const
+{
+    return index >= argument_count_value || arguments.empty(argument_slots[index]);
+}
+
+bool CifaBytecode::NativeCallContext::is_integer(size_t index) const
+{
+    if (index >= argument_count_value) return false;
+    BytecodeValue::Storage numeric;
+    return value_holds<std::int64_t>(arguments.payload(argument_slots[index], numeric));
+}
+
+bool CifaBytecode::NativeCallContext::is_number(size_t index) const
+{
+    if (index >= argument_count_value) return false;
+    std::int64_t integer = 0;
+    double floating = 0;
+    bool is_double = false;
+    return arguments.number(argument_slots[index], integer, floating, is_double);
+}
+
+bool CifaBytecode::NativeCallContext::is_boolean(size_t index) const
+{
+    if (index >= argument_count_value) return false;
+    BytecodeValue::Storage numeric;
+    return value_holds<bool>(arguments.payload(argument_slots[index], numeric));
+}
+
+bool CifaBytecode::NativeCallContext::is_string(size_t index) const
+{
+    if (index >= argument_count_value) return false;
+    BytecodeValue::Storage numeric;
+    const auto& value = arguments.payload(argument_slots[index], numeric);
+    const auto* resource = value_get_if<std::any>(&value);
+    return resource && std::any_cast<std::string>(resource) != nullptr;
+}
+
+std::int64_t CifaBytecode::NativeCallContext::to_integer(size_t index) const
+{
+    std::int64_t value = 0;
+    if (index >= argument_count_value) const_cast<NativeCallContext*>(this)->report_error("native argument is missing");
+    else if (!arguments.integer(argument_slots[index], value))
+        machine.conversion_error(arguments, argument_slots[index], "int", locations.empty() ? nullptr : &locations[index]);
+    return value;
+}
+
+double CifaBytecode::NativeCallContext::to_number(size_t index) const
+{
+    std::int64_t integer = 0;
+    double floating = 0;
+    bool is_double = false;
+    if (index >= argument_count_value)
+    {
+        const_cast<NativeCallContext*>(this)->report_error("native argument is missing");
+        return 0;
+    }
+    if (!arguments.number(argument_slots[index], integer, floating, is_double))
+    {
+        machine.conversion_error(arguments, argument_slots[index], "double", locations.empty() ? nullptr : &locations[index]);
+        return 0;
+    }
+    return is_double ? floating : static_cast<double>(integer);
+}
+
+bool CifaBytecode::NativeCallContext::to_boolean(size_t index) const
+{
+    if (index >= argument_count_value) { const_cast<NativeCallContext*>(this)->report_error("native argument requires a boolean"); return false; }
+    return machine.condition(arguments, argument_slots[index], locations.empty() ? nullptr : &locations[index]);
+}
+
+std::string CifaBytecode::NativeCallContext::to_string(size_t index) const
+{
+    if (index >= argument_count_value) { const_cast<NativeCallContext*>(this)->report_error("native argument is missing"); return {}; }
+    BytecodeValue::Storage numeric;
+    const auto& value = arguments.payload(argument_slots[index], numeric);
+    const auto* resource = value_get_if<std::any>(&value);
+    if (const auto* text = resource ? std::any_cast<std::string>(resource) : nullptr) return *text;
+    machine.conversion_error(arguments, argument_slots[index], "string", locations.empty() ? nullptr : &locations[index]);
+    return {};
+}
+
+void CifaBytecode::NativeCallContext::set_result(std::int64_t value) { destination.write_payload(result_slot, value); result_written = true; }
+void CifaBytecode::NativeCallContext::set_result(double value) { destination.write_payload(result_slot, value); result_written = true; }
+void CifaBytecode::NativeCallContext::set_result(bool value) { destination.write_payload(result_slot, value); result_written = true; }
+void CifaBytecode::NativeCallContext::set_result(std::string value) { destination.write_payload(result_slot, std::any(std::move(value))); result_written = true; }
+void CifaBytecode::NativeCallContext::set_empty_result() { destination.clear(result_slot); result_written = true; }
+void CifaBytecode::NativeCallContext::report_error(const std::string& message)
+{
+    machine.set_error(message, locations.empty() ? nullptr : &locations.front());
+}
+
+bool CifaBytecode::register_builtin(const std::string& name)
+{
+    native_functions[name] = NativeFunction{{}, true};
+    native_function_names.insert(name);
+    ++native_function_version;
+    return true;
+}
+
+bool CifaBytecode::register_native_function(const std::string& name, native_func_type function)
+{
+    if (!function || !validate_registration_name(name)) return false;
+    native_functions[name] = NativeFunction{std::move(function), false};
+    native_function_names.insert(name);
+    ++native_function_version;
+    return true;
+}
+
+void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, size_t host_native_function_version)
 {
     module_data->int_type_id = intern_name("int");
     module_data->double_type_id = intern_name("double");
@@ -3054,7 +3286,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version)
         source_lines.push_back({std::move(line.filename), line.line, std::move(line.text)});
     module_data->structures = compiler.compilation_struct_defs;
     compiled_valid = compiler.compiled && !compiler.compile_failed;
-    module_data->host_function_version = optimization_enabled ? compiler.function_version : 0;
+    module_data->host_function_version = optimization_enabled ? host_native_function_version : 0;
     module_data->script_function_version = optimization_enabled ? script_function_version : 0;
     module_data->freeze_script_functions = optimization_enabled;
     if (compiled_valid)
@@ -3442,37 +3674,39 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
     } restore_caller{frames, scopes};
     const Module* active_owner = &module;
-    std::unordered_map<const Module*, std::vector<Object*>> global_links;
-    auto link_globals = [&](const Module* owner) -> std::vector<Object*>&
+    const size_t missing_global = std::numeric_limits<size_t>::max();
+    std::unordered_map<const Module*, std::vector<size_t>> global_links;
+    auto link_globals = [&](const Module* owner) -> std::vector<size_t>&
     {
         auto [entry, inserted] = global_links.try_emplace(owner);
-        if (inserted) entry->second.resize(owner->names.size());
+        if (inserted) entry->second.resize(owner->names.size(), missing_global);
         return entry->second;
     };
     auto* active_globals = &link_globals(active_owner);
-    auto linked_global = [&](size_t name_id) -> Object*
+    auto linked_global = [&](size_t name_id) -> size_t
     {
-        auto*& linked = (*active_globals)[name_id];
+        auto& linked = (*active_globals)[name_id];
 #ifdef CIFA_VM_PROFILE
-        if (linked) ++profile.global_link_hits;
+        if (linked != missing_global) ++profile.global_link_hits;
         else ++profile.global_link_lookups;
 #endif
-        if (!linked)
-        {
-            const auto global = interpreter.global_variables.find(active_owner->names[name_id]);
-            if (global != interpreter.global_variables.end()) linked = &global->second;
-        }
+        if (linked == missing_global) linked = machine.find_global_slot(active_owner->names[name_id]);
         return linked;
     };
-    auto alias_target = [&](size_t name_id) -> Object&
+    auto alias_target = [&](size_t name_id) -> Machine::NamedValueRef
     {
-        const auto& name = active_owner->names[name_id];
-        if (auto* linked = linked_global(name_id)) return *linked;
-    #ifdef CIFA_VM_PROFILE
+        const size_t linked = linked_global(name_id);
+        if (linked != missing_global && machine.global_exists_at(linked))
+        {
+            const size_t index = machine.global_values.base() + linked;
+            return {&machine.global_values, linked,
+                machine.global_values.type_pool[machine.global_values.slot_types[index]].element, true};
+        }
+#ifdef CIFA_VM_PROFILE
         ++profile.global_link_creates;
-    #endif
-        auto& value = interpreter.global_variables[name];
-        (*active_globals)[name_id] = &value;
+#endif
+        auto value = machine.assign_named(active_owner->names[name_id], "", false, false, {});
+        (*active_globals)[name_id] = value.slot;
         return value;
     };
     auto read_alias = [&](size_t destination, size_t name_id, const SourceLocation& location)
@@ -3487,13 +3721,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         else
         {
-            auto* linked = linked_global(name_id);
-            if (linked)
+            const size_t linked = linked_global(name_id);
+            if (linked != missing_global && machine.global_exists_at(linked))
             {
 #ifdef CIFA_VM_PROFILE
                 ++profile.alias_read_paths[1];
 #endif
-                registers.import_object(destination, *linked);
+                registers.copy(destination, machine.global_values, linked);
             }
             else
             {
@@ -3580,7 +3814,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t size;
         ~RestoreReturns() { states.resize(size); }
     } restore_returns{return_states, return_base};
-    RegisterSlots call_result(registers, result_base, 1);
     auto initialize_numeric = [&](size_t slot, RegisterSlots& source, size_t argument, const VariableSite& binding)
     {
         const auto numeric_binding = binding.type_id == active_owner->int_type_id ? RegisterSlots::NumericBinding::Int
@@ -3598,10 +3831,12 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     };
     auto finish_call = [&]()
     {
-        if (active_function && call_result.empty(0))
+        auto& caller = frames.back();
+        RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
+        if (active_function && return_value.empty(0))
         {
-            call_result.write_payload(0, std::any(Object::NoValue{active_function->name, Machine::format_frame(*active_call)}));
-            call_result.set_type(0, {typeid(void), "", "", "NoValue"});
+            return_value.write_payload(0, std::any(Object::NoValue{active_function->name, Machine::format_frame(*active_call)}));
+            return_value.set_type(0, {typeid(void), "", "", "NoValue"});
         }
         auto saved = std::move(frames.back());
         frames.pop_back();
@@ -3612,7 +3847,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         scopes = std::move(saved.scopes);
         local_scope_bases = std::move(saved.local_scope_bases);
         registers.restore(saved.register_base, saved.register_size, saved.register_top);
-        registers.move(saved.return_register, call_result, 0);
         loop_states = std::move(saved.loops);
         switches = std::move(saved.switches);
         ranges = std::move(saved.ranges);
@@ -3633,11 +3867,16 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         if (pc >= active_instructions->code.size())
         {
             if (frames.empty()) break;
-            call_result.clear(0);
+            auto& caller = frames.back();
+            RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
+            return_value.clear(0);
             finish_call();
             continue;
         }
         const auto& instruction = active_instructions->code[pc++];
+    #ifdef CIFA_VALUE_PROFILE
+        value_profile_opcode = static_cast<size_t>(instruction.opcode);
+    #endif
     #ifdef CIFA_VM_PROFILE
         ++profile.opcodes[static_cast<size_t>(instruction.opcode)];
         profile.instruction_fields[0] += instruction.source.id != 0;
@@ -3662,32 +3901,152 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         const size_t output = instruction.destination;
         register_assignment_source = {};
         current_source = instruction.source.id != 0 ? &active_owner->source(instruction.source) : active_node;
-        if (instruction.opcode == Opcode::Exit)
+        switch (instruction.opcode)
         {
+        case Opcode::Exit:
             machine.exit_requested = true;
             result = Object();
             return true;
-        }
-        if (instruction.opcode == Opcode::Member)
+        case Opcode::Jump:
+            pc = instruction.operand;
+            continue;
+        case Opcode::Empty:
+            registers.clear(output);
+            continue;
+        case Opcode::Enter:
+        case Opcode::Leave:
+            continue;
+        case Opcode::Constant:
         {
-            registers.import_object(output, machine.resolve_member(active_owner->names[instruction.operand],
-                active_owner->names[instruction.auxiliary]));
+#ifdef CIFA_VM_PROFILE
+            VmProfile::Timer constant_timer(profile.constant_ns);
+#endif
+            const auto& constant = active_owner->constants[instruction.operand];
+            registers.write_payload(output, constant.value);
+            if (constant.continue_marker) registers.set_type(output, {typeid(void), "", "", "__"});
+            continue;
+        }
+        case Opcode::Branch:
+        {
+#ifdef CIFA_VM_PROFILE
+            VmProfile::Timer branch_timer(profile.branch_ns);
+#endif
+            const SourceLocation* condition_source = instruction.condition_source.id != 0
+                ? &active_owner->source(instruction.condition_source) : nullptr;
+            if (condition_source != nullptr) current_source = condition_source;
+            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            registers.clear(input_slot(instruction.input_count - 1));
+            if (!condition) pc = instruction.operand;
+            continue;
+        }
+        case Opcode::AndBranch:
+        {
+#ifdef CIFA_VM_PROFILE
+            VmProfile::Timer branch_timer(profile.branch_ns);
+#endif
+            const SourceLocation* condition_source = instruction.condition_source.id != 0
+                ? &active_owner->source(instruction.condition_source) : nullptr;
+            if (condition_source != nullptr) current_source = condition_source;
+            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (!condition)
+            {
+                registers.write_payload(output, std::int64_t(0));
+                pc = instruction.operand;
+            }
+            continue;
+        }
+        case Opcode::OrBranch:
+        {
+#ifdef CIFA_VM_PROFILE
+            VmProfile::Timer branch_timer(profile.branch_ns);
+#endif
+            const SourceLocation* condition_source = instruction.condition_source.id != 0
+                ? &active_owner->source(instruction.condition_source) : nullptr;
+            if (condition_source != nullptr) current_source = condition_source;
+            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (condition)
+            {
+                registers.write_payload(output, std::int64_t(1));
+                pc = instruction.operand;
+            }
+            continue;
+        }
+        case Opcode::ScopeEnter:
+        {
+#ifdef CIFA_VM_PROFILE
+            VmProfile::Timer scope_enter_timer(profile.scope_enter_ns);
+            if (instruction.auxiliary != 0) ++profile.scope_enter_with_slots;
+            else ++profile.scope_enter_without_slots;
+#endif
+            if (reusable_scopes.empty()) scopes.emplace_back();
+            else
+            {
+                scopes.push_back(std::move(reusable_scopes.back()));
+                reusable_scopes.pop_back();
+            }
+            scopes.back().bindings.reserve(instruction.operand);
+            local_scope_bases.push_back(instruction.auxiliary);
+            if (range_binding)
+            {
+                if (range_binding->slot != 0)
+                    scopes.back().bind(range_binding->name, active_locals, range_binding->slot - 1);
+                else
+                {
+                    auto& binding = scopes.back().create(range_binding->name);
+                    binding.file->move(binding.slot, registers, range_binding->value_slot);
+                }
+                range_binding.reset();
+            }
+            continue;
+        }
+        case Opcode::ScopeLeave:
+            if (instruction.auxiliary != 0)
+                for (size_t slot = instruction.auxiliary - 1; slot < active_locals->size(); ++slot)
+                {
+                    active_locals->clear(slot);
+                    active_aliases[slot] = false;
+                }
+            release_scope();
+            local_scope_bases.pop_back();
+            continue;
+        case Opcode::LoopMark:
+        {
+            auto& state = loop_states[instruction.auxiliary];
+            state = LoopState{scopes.size(), local_scope_bases.size()};
+            for (const auto& entry : ranges) state->ranges.push_back(entry.first);
+            for (const auto& entry : switches) state->switches.push_back(entry.first);
+            continue;
+        }
+        case Opcode::Member:
+        {
+            const auto member = machine.resolve_member(active_owner->names[instruction.operand],
+                active_owner->names[instruction.auxiliary]);
+            machine.read_indexed(registers, output, member, true);
             if (machine.should_stop()) { result = Object(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::MethodPush)
+        case Opcode::MethodPush:
         {
     #ifdef CIFA_VM_PROFILE
             VmProfile::Timer method_push_timer(profile.method_push_ns);
-    #endif
-    #ifdef CIFA_VM_PROFILE
             ++profile.method_push;
     #endif
             const auto& site = active_owner->calls[instruction.operand];
-            auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
+            Machine::NamedValueRef receiver;
+            if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
+                && !active_aliases[site.local_slot - 1])
+            {
+                const size_t slot = site.local_slot - 1;
+                const size_t absolute = active_locals->base() + slot;
+                receiver = {active_locals, slot,
+                    active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
+            }
+            else receiver = machine.named_value(active_owner->names[site.base_name_id]);
             auto* container = receiver.resource();
             auto* array = receiver.file && container ? std::any_cast<VmArray>(container) : nullptr;
-            auto* global_array = receiver.global && container ? std::any_cast<ObjectVector>(container) : nullptr;
             const auto& location = active_owner->source(site.method_source);
             const size_t argument = input_slot(instruction.input_count - 1);
 #ifdef CIFA_VM_PROFILE
@@ -3695,7 +4054,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             profile.method_push_lookup_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 method_push_stage - method_push_timer.started).count());
 #endif
-            if (!array && !global_array)
+            if (!array)
             {
                 registers.clear(argument);
                 machine.set_error("push_back() requires an array or map", &location);
@@ -3703,15 +4062,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             else
             {
-                if (global_array)
-                {
-                    Object value;
-                    registers.export_argument(argument, value);
-                    if (!receiver.element_type.empty()) value = machine.convert_type(value, receiver.element_type, location);
-                    if (!machine.should_stop()) global_array->push_back(std::move(value));
-                    registers.write_payload(output, double(global_array->size()));
-                    continue;
-                }
                 auto& values = array->values;
                 if (receiver.element_type.empty())
                 {
@@ -3808,7 +4158,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::MethodBegin || instruction.opcode == Opcode::MethodValue)
+        case Opcode::MethodBegin:
         {
             const auto& site = active_owner->calls[instruction.operand];
             const auto& method_name = active_owner->names[site.name_id];
@@ -3817,7 +4167,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
                 + active_instructions->temporary_count + active_instructions->switch_count
                 + active_instructions->range_count + 1, 0);
-            if (instruction.opcode == Opcode::MethodBegin && !site.arguments.empty())
+            if (!site.arguments.empty())
             {
                 const size_t count = method_name == "push_back" ? site.arguments.size()
                     : method_name == "insert" ? std::min<size_t>(2, site.arguments.size()) : 1;
@@ -3825,34 +4175,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 method_argument_top += count;
                 registers.clear(output);
                 continue;
-            }
-            if (instruction.opcode == Opcode::MethodValue)
-            {
-                auto& pending = method_arguments[instruction.operand];
-                const size_t argument = active_instructions->register_capacity + active_instructions->temporary_count
-                    + active_instructions->switch_count + active_instructions->range_count
-                    + 1 + pending.base + pending.received++;
-                registers.move(argument, registers, input_slot(instruction.input_count - 1));
-                if (method_name == "insert" && pending.received < 2)
-                {
-                    const auto size = receiver.size();
-                    if (!size)
-                    {
-                        machine.set_error(method_name + "() requires an array or map",
-                            &active_owner->source(site.method_source));
-                        result = machine.error_result();
-                        return true;
-                    }
-                    registers.write_payload(output, double(*size));
-                    continue;
-                }
-                values = RegisterSlots(registers, registers.base() + active_instructions->register_capacity
-                    + active_instructions->temporary_count + active_instructions->switch_count
-                    + active_instructions->range_count + 1 + pending.base, pending.count);
-                method_argument_top = pending.base;
-                method_arguments.erase(instruction.operand);
-                for (size_t index = 0; index < values.size(); ++index)
-                    arguments.push_back(site.arguments[method_name == "insert" ? index : instruction.auxiliary]);
             }
             machine.call_method(registers, output, method_name, active_owner->source(site.method_source), receiver, arguments, values);
             if (machine.exit_requested) { result = Object(); return true; }
@@ -3869,17 +4191,66 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        if (instruction.opcode == Opcode::BindArgument)
+        case Opcode::MethodValue:
+        {
+            const auto& site = active_owner->calls[instruction.operand];
+            const auto& method_name = active_owner->names[site.name_id];
+            auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
+            std::vector<SourceLocation> arguments;
+            RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
+                + active_instructions->temporary_count + active_instructions->switch_count
+                + active_instructions->range_count + 1, 0);
+            auto& pending = method_arguments[instruction.operand];
+            const size_t argument = active_instructions->register_capacity + active_instructions->temporary_count
+                + active_instructions->switch_count + active_instructions->range_count
+                + 1 + pending.base + pending.received++;
+            registers.move(argument, registers, input_slot(instruction.input_count - 1));
+            if (method_name == "insert" && pending.received < 2)
+            {
+                const auto size = receiver.size();
+                if (!size)
+                {
+                    machine.set_error(method_name + "() requires an array or map",
+                        &active_owner->source(site.method_source));
+                    result = machine.error_result();
+                    return true;
+                }
+                registers.write_payload(output, double(*size));
+                continue;
+            }
+            values = RegisterSlots(registers, registers.base() + active_instructions->register_capacity
+                + active_instructions->temporary_count + active_instructions->switch_count
+                + active_instructions->range_count + 1 + pending.base, pending.count);
+            method_argument_top = pending.base;
+            method_arguments.erase(instruction.operand);
+            for (size_t index = 0; index < values.size(); ++index)
+                arguments.push_back(site.arguments[method_name == "insert" ? index : instruction.auxiliary]);
+            machine.call_method(registers, output, method_name, active_owner->source(site.method_source), receiver, arguments, values);
+            if (machine.exit_requested) { result = Object(); return true; }
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            const size_t local_slot = active_owner->calls[instruction.operand].local_slot;
+            if (local_slot != 0)
+            {
+                if (local_slot - 1 >= active_locals->size())
+                {
+                    machine.set_error("bytecode local slot out of range");
+                    result = machine.error_result();
+                    return true;
+                }
+            }
+            continue;
+        }
+        case Opcode::BindArgument:
         {
             const auto& call = active_owner->calls[instruction.auxiliary];
             const auto& call_name = active_owner->names[call.name_id];
-            if (interpreter.functions.contains(call_name) && !pending_calls.empty()
+            if (interpreter.native_functions.contains(call_name) && !pending_calls.empty()
                 && pending_calls.back().call_site == instruction.auxiliary)
             {
                 pending_calls.back().parameters->move(instruction.operand, registers, input_slot(instruction.input_count - 1));
                 continue;
             }
-            if (!interpreter.functions.contains(call_name))
+            if (!interpreter.native_functions.contains(call_name))
             {
                 std::shared_ptr<const Module> function_module;
                 const auto* function = machine.find_function(call_name, call.arguments.size(), function_module);
@@ -3907,7 +4278,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        if (instruction.opcode == Opcode::MethodNoArgs)
+        case Opcode::MethodNoArgs:
         {
             const auto& site = active_owner->calls[instruction.operand];
             auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
@@ -3929,7 +4300,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        if (instruction.opcode == Opcode::RangeBegin)
+        case Opcode::RangeBegin:
         {
             RangeState state;
             const size_t argument = input_slot(instruction.input_count - 1);
@@ -3942,7 +4313,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             ranges[instruction.operand] = std::move(state);
             continue;
         }
-        if (instruction.opcode == Opcode::RangeNext)
+        case Opcode::RangeNext:
         {
             auto& state = ranges.at(instruction.operand);
             auto* payload = value_get_if<std::any>(&registers.resource_payload(state.snapshot_slot));
@@ -3977,7 +4348,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             registers.write_payload(output, available);
             continue;
         }
-        if (instruction.opcode == Opcode::RangeEnd)
+        case Opcode::RangeEnd:
         {
             registers.clear(ranges.at(instruction.operand).snapshot_slot);
             ranges.erase(instruction.operand);
@@ -3985,14 +4356,23 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             range_binding.reset();
             continue;
         }
-        if (instruction.opcode == Opcode::Index)
+        case Opcode::Index:
         {
             const auto& site = active_owner->index_sites[instruction.auxiliary];
             const auto& name = active_owner->names[site.name_id];
-            auto receiver = machine.named_value(name);
+            Machine::NamedValueRef receiver;
+            if (!site.declaration && site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
+                && !active_aliases[site.local_slot - 1])
+            {
+                const size_t slot = site.local_slot - 1;
+                const size_t absolute = active_locals->base() + slot;
+                receiver = {active_locals, slot,
+                    active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
+            }
+            else receiver = machine.named_value(name);
             auto* container = receiver.resource();
             auto* array = container ? std::any_cast<VmArray>(container) : nullptr;
-            const bool map_access = (container && std::any_cast<ObjectMap>(container)) || site.string_index;
+            const bool map_access = (container && std::any_cast<VmMap>(container)) || site.string_index;
             if (site.declaration)
             {
                 if (auto* binding = machine.find_slot(name))
@@ -4056,11 +4436,18 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 auto& values = array->values;
                 if (index >= values.size())
                 {
-                    const auto old_size = values.size();
                     values.resize(index + 1);
+                    machine.read_indexed(registers, output,
+                        {&values[index], nullptr, name, receiver.element_type}, false);
                 }
-                machine.read_indexed(registers, output,
-                    {&values[index], nullptr, name, receiver.element_type}, false);
+                else
+                {
+                    const auto& readable = std::as_const(values);
+                    const auto& element = readable[index];
+                    if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
+                    registers.store_payload(output, element);
+                    registers.set_name(output, name);
+                }
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 continue;
             }
@@ -4078,7 +4465,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::Array)
+        case Opcode::Array:
         {
             VmArray elements(instruction.operand);
             for (size_t index = elements.values.size(); index > 0; --index)
@@ -4090,11 +4477,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             registers.write_payload(output, std::any(std::move(elements)));
             continue;
         }
-        if (instruction.opcode == Opcode::CallBegin)
+        case Opcode::CallBegin:
         {
             const auto& call = active_owner->calls[instruction.operand];
             const auto& call_name = active_owner->names[call.name_id];
-            if (!interpreter.functions.contains(call_name))
+            if (!interpreter.native_functions.contains(call_name))
             {
 #ifdef CIFA_VM_PROFILE
                 ++profile.script_calls;
@@ -4133,27 +4520,54 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        if (instruction.opcode == Opcode::CallEnd) continue;
-        if (instruction.opcode == Opcode::Call)
+        case Opcode::CallEnd:
+            continue;
+        case Opcode::Call:
         {
             auto& call = active_owner->calls[instruction.operand];
             auto& call_source = active_owner->source(call.source);
             const auto& call_name = active_owner->names[call.name_id];
-            if (interpreter.functions.contains(call_name))
+            if (interpreter.native_functions.contains(call_name))
             {
 #ifdef CIFA_VM_PROFILE
                 ++profile.host_calls;
                 ++profile.host_call_names[call_name];
                 const auto host_prepare_start = std::chrono::steady_clock::now();
 #endif
-                ObjectVector arguments(call.arguments.size());
                 RegisterSlots* prepared_arguments = !pending_calls.empty() && pending_calls.back().call_site == instruction.operand
                     ? pending_calls.back().parameters : nullptr;
-                for (size_t index = 0; index < arguments.size(); ++index)
+                const size_t* argument_slots = active_instructions->register_inputs.data()
+                    + instruction.input_offset + instruction.input_count - call.arguments.size();
+                std::vector<size_t> prepared_slots;
+                if (prepared_arguments)
                 {
-                    if (prepared_arguments) prepared_arguments->export_argument(index, arguments[index]);
-                    else registers.export_argument(input_slot(instruction.input_count - arguments.size() + index), arguments[index]);
-                    if (arguments[index].name.empty()) arguments[index].name = call.arguments[index].str;
+                    prepared_slots.resize(call.arguments.size());
+                    for (size_t index = 0; index < prepared_slots.size(); ++index) prepared_slots[index] = index;
+                    argument_slots = prepared_slots.data();
+                }
+                if (machine.call_native_registers(call_name, registers, output,
+                    prepared_arguments ? *prepared_arguments : registers, argument_slots, call.arguments.size(), call.arguments))
+                {
+                    if (prepared_arguments)
+                    {
+                        registers.restore(registers.base(), registers.size(), pending_calls.back().caller_top);
+                        pending_calls.pop_back();
+                        local_windows.pop_back();
+                    }
+                    else
+                    {
+                        for (size_t index = 0; index < call.arguments.size(); ++index)
+                            if (argument_slots[index] != output) registers.clear(argument_slots[index]);
+                    }
+                    if (active_owner->host_function_version != 0
+                        && active_owner->host_function_version != machine.host.native_function_version)
+                        machine.set_error("native functions changed during optimized bytecode execution", &call_source);
+                    if (active_owner->freeze_script_functions
+                        && active_owner->script_function_version != machine.function_version)
+                        machine.set_error("script functions changed during optimized bytecode execution", &call_source);
+                    if (machine.exit_requested) { result = Object(); return true; }
+                    if (machine.should_stop()) { result = machine.error_result(); return true; }
+                    continue;
                 }
                 if (prepared_arguments)
                 {
@@ -4161,23 +4575,14 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     pending_calls.pop_back();
                     local_windows.pop_back();
                 }
-                Object value;
 #ifdef CIFA_VM_PROFILE
-                const auto host_invoke_start = std::chrono::steady_clock::now();
                 profile.host_prepare_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    host_invoke_start - host_prepare_start).count());
-#endif
-                if (active_owner->host_function_version != 0 && machine.call_builtin_math(call_name, arguments, value))
-                    registers.import_object(output, std::move(value));
-                else registers.import_object(output, machine.call_host(call_name, arguments, call.arguments));
-#ifdef CIFA_VM_PROFILE
-                profile.host_invoke_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - host_invoke_start).count());
+                    std::chrono::steady_clock::now() - host_prepare_start).count());
 #endif
                 if (active_owner->host_function_version != 0
-                    && active_owner->host_function_version != machine.host.function_version)
+                    && active_owner->host_function_version != machine.host.native_function_version)
                 {
-                    machine.set_error("host functions changed during optimized bytecode execution", &call_source);
+                    machine.set_error("native functions changed during optimized bytecode execution", &call_source);
                 }
                 if (active_owner->freeze_script_functions
                     && active_owner->script_function_version != machine.function_version)
@@ -4273,7 +4678,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::SwitchMark)
+        case Opcode::SwitchMark:
         {
             auto& state = switches[instruction.operand];
             state.condition_slot = active_instructions->register_capacity + active_instructions->temporary_count + switches.size() - 1;
@@ -4281,12 +4686,12 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             state.active = false;
             continue;
         }
-        if (instruction.opcode == Opcode::SwitchCase)
+        case Opcode::SwitchCase:
         {
             registers.write_payload(output, switches.at(instruction.operand).active);
             continue;
         }
-        if (instruction.opcode == Opcode::SwitchDefault)
+        case Opcode::SwitchDefault:
         {
             auto& state = switches.at(instruction.operand);
             if (instruction.auxiliary != 0)
@@ -4309,21 +4714,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (interpreter.should_stop_execution()) { result = Object(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::SwitchEnd)
+        case Opcode::SwitchEnd:
         {
             registers.clear(switches.at(instruction.operand).condition_slot);
             switches.erase(instruction.operand);
             continue;
         }
-        if (instruction.opcode == Opcode::LoopMark)
-        {
-            auto& state = loop_states[instruction.auxiliary];
-            state = LoopState{scopes.size(), local_scope_bases.size()};
-            for (const auto& entry : ranges) state->ranges.push_back(entry.first);
-            for (const auto& entry : switches) state->switches.push_back(entry.first);
-            continue;
-        }
-        if (instruction.opcode == Opcode::Unwind)
+        case Opcode::Unwind:
         {
             const auto& state = loop_states.at(instruction.operand).value();
             for (auto range = ranges.begin(); range != ranges.end();)
@@ -4355,7 +4752,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        if (instruction.opcode == Opcode::PrepareStore)
+        case Opcode::PrepareStore:
         {
             auto& target = active_owner->source(instruction.target_source);
             if (instruction.member_site != 0)
@@ -4402,7 +4799,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::DeclareLocal)
+        case Opcode::DeclareLocal:
         {
             auto& source = active_owner->source(instruction.source);
             if (instruction.operand >= active_locals->size())
@@ -4420,7 +4817,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (active_aliases[instruction.operand]) active_locals->clear(instruction.operand);
             continue;
         }
-        if (instruction.opcode == Opcode::IncrementLocal)
+        case Opcode::IncrementLocal:
         {
 #ifdef CIFA_VM_PROFILE
             VmProfile::PathTimer increment_local_timer(profile.increment_local_ns,
@@ -4506,29 +4903,28 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
 #ifdef CIFA_VM_PROFILE
             increment_local_timer.select(2);
 #endif
-            auto& target = alias_target(binding.name_id);
+            const auto target = alias_target(binding.name_id);
             const bool preserve_old = !instruction.discard_result
                 && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
-            if (preserve_old) registers.import_object(output, target);
+            if (preserve_old) registers.copy(output, *target.file, target.slot);
             const size_t computed = registers.size() - 2;
             const size_t unit = registers.size() - 1;
-            registers.import_object(computed, target);
+            registers.copy(computed, *target.file, target.slot);
             registers.write_payload(unit, std::int64_t(1));
             const auto operation = write_opcode(instruction.write);
             if (!operation) machine.set_error("invalid bytecode write operation");
             else registers.binary_fallback(*operation, computed, computed, unit, machine, source, false);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
-            Object value;
-            registers.export_argument(computed, value);
             registers.clear(unit);
             const auto& site = active_owner->variable_sites[instruction.variable_site - 1];
-            machine.assign(target, std::move(value), site.with_type, active_owner->names[site.type_id], source);
+            if (site.with_type) machine.bind_type(*target.file, target.slot, active_owner->names[site.type_id], source);
+            if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers, computed, unit, source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (!instruction.discard_result && !preserve_old)
-                registers.import_object(output, target);
+                registers.copy(output, *target.file, target.slot);
             continue;
         }
-        if (instruction.opcode == Opcode::StoreLocal)
+        case Opcode::StoreLocal:
         {
 #ifdef CIFA_VM_PROFILE
             VmProfile::PathTimer local_store_timer(profile.local_store_ns,
@@ -4756,19 +5152,18 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             const auto value_start = std::chrono::steady_clock::now();
 #endif
-            auto& target = alias_target(binding.name_id);
+            const auto target = alias_target(binding.name_id);
             const size_t argument = input_slot(instruction.input_count - 1);
-            Object value;
-            if (instruction.write == WriteOperation::Assign) registers.export_argument(argument, value);
-            else
+            size_t value_slot = argument;
+            const size_t computed = registers.size() - 2;
+            if (instruction.write != WriteOperation::Assign)
             {
-                const size_t computed = registers.size() - 2;
-                registers.import_object(computed, target);
+                registers.copy(computed, *target.file, target.slot);
                 const auto operation = write_opcode(instruction.write);
                 if (!operation) machine.set_error("invalid bytecode write operation");
                 else registers.binary_fallback(*operation, computed, computed, argument, machine, source, false);
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
-                registers.export_argument(computed, value);
+                value_slot = computed;
                 registers.clear(argument);
             }
 #ifdef CIFA_VM_PROFILE
@@ -4777,7 +5172,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 assign_start - value_start).count());
 #endif
             const auto& site = active_owner->variable_sites[instruction.variable_site - 1];
-            machine.assign(target, std::move(value), site.with_type, active_owner->names[site.type_id], source);
+            if (site.with_type) machine.bind_type(*target.file, target.slot, active_owner->names[site.type_id], source);
+            if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                value_slot, registers.size() - 1, source);
 #ifdef CIFA_VM_PROFILE
             const auto bind_start = std::chrono::steady_clock::now();
             profile.local_store_assign_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -4816,14 +5213,15 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             profile.local_store_bind_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 result_start - bind_start).count());
 #endif
-            if (!instruction.discard_result) registers.import_object(output, target);
+            if (!instruction.discard_result) registers.copy(output, *target.file, target.slot);
 #ifdef CIFA_VM_PROFILE
             profile.local_store_result_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - result_start).count());
 #endif
             continue;
         }
-        if (instruction.opcode == Opcode::Store || instruction.opcode == Opcode::Increment)
+        case Opcode::Store:
+        case Opcode::Increment:
         {
             auto& source = active_owner->source(instruction.source);
             const bool increment = instruction.opcode == Opcode::Increment;
@@ -4878,7 +5276,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             Machine::IndexedValueRef target;
             if (member)
-                target.object = &machine.resolve_member(
+                target = machine.resolve_member(
                     active_owner->names[active_owner->member_sites[instruction.member_site - 1].first],
                     active_owner->names[active_owner->member_sites[instruction.member_site - 1].second]);
             else if (indexed)
@@ -4888,8 +5286,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     active_instructions->register_inputs.data() + instruction.input_offset + instruction.input_count
                         - (increment ? 0 : 1) - site->dimensions);
             else
-                target.object = &machine.assign_named(active_owner->names[variable->name_id], active_owner->names[variable->type_id],
+            {
+                const auto named = machine.assign_named(active_owner->names[variable->name_id], active_owner->names[variable->type_id],
                     variable->with_type, increment && variable->with_type, active_owner->source(instruction.target_source));
+                target = {nullptr, nullptr, active_owner->names[variable->name_id], named.element_type, named.file, named.slot};
+            }
             const bool post = increment && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
             if (post) machine.read_indexed(registers, output, target, false);
             const size_t computed = registers.size() - 2;
@@ -4905,6 +5306,19 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 value_slot = computed;
             }
             if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (target.file && !target.compact && !target.object)
+            {
+                const bool with_type = variable != nullptr ? variable->with_type : site != nullptr && site->with_type;
+                const std::string& type_name = variable != nullptr ? active_owner->names[variable->type_id]
+                    : site != nullptr ? active_owner->names[site->type_id] : std::string();
+                if (with_type) machine.bind_type(*target.file, target.slot, type_name, source);
+                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                    value_slot, registers.size() - 1, source);
+                if (machine.should_stop()) { result = machine.error_result(); return true; }
+                if (argument != value_slot) registers.clear(argument);
+                if (!post) registers.copy(output, *target.file, target.slot);
+                continue;
+            }
             Object value;
             registers.export_argument(value_slot, value);
             if (argument != value_slot) registers.clear(argument);
@@ -4926,109 +5340,27 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!post) machine.read_indexed(registers, output, target, false);
             continue;
         }
-        if (instruction.opcode == Opcode::ScopeEnter)
+        case Opcode::Return:
         {
-#ifdef CIFA_VM_PROFILE
-            VmProfile::Timer scope_enter_timer(profile.scope_enter_ns);
-            if (instruction.auxiliary != 0) ++profile.scope_enter_with_slots;
-            else ++profile.scope_enter_without_slots;
-#endif
-            if (reusable_scopes.empty()) scopes.emplace_back();
-            else
-            {
-                scopes.push_back(std::move(reusable_scopes.back()));
-                reusable_scopes.pop_back();
-            }
-            scopes.back().bindings.reserve(instruction.operand);
-            local_scope_bases.push_back(instruction.auxiliary);
-            if (range_binding)
-            {
-                if (range_binding->slot != 0)
-                    scopes.back().bind(range_binding->name, active_locals, range_binding->slot - 1);
-                else
-                {
-                    auto& binding = scopes.back().create(range_binding->name);
-                    binding.file->move(binding.slot, registers, range_binding->value_slot);
-                }
-                range_binding.reset();
-            }
-            continue;
-        }
-        if (instruction.opcode == Opcode::ScopeLeave)
-        {
-            if (instruction.auxiliary != 0)
-                for (size_t slot = instruction.auxiliary - 1; slot < active_locals->size(); ++slot)
-                {
-                    active_locals->clear(slot);
-                    active_aliases[slot] = false;
-                }
-            release_scope();
-            local_scope_bases.pop_back();
-            continue;
-        }
-        if (instruction.opcode == Opcode::Return)
-        {
-            call_result.move(0, registers, input_slot(instruction.input_count - 1));
-            const auto& states = return_states;
-            if (!states.empty() && !states.back().return_type.empty() && states.back().return_type != "void")
-            {
-                machine.convert_type(call_result, 0, call_result, 0, states.back().return_type, active_owner->source(instruction.source));
-            }
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            if (return_states.empty()) return_states.emplace_back();
+            const size_t value_slot = input_slot(instruction.input_count - 1);
             if (!frames.empty())
             {
+                auto& caller = frames.back();
+                RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
+                return_value.move(0, registers, value_slot);
+                const auto& states = return_states;
+                if (!states.empty() && !states.back().return_type.empty() && states.back().return_type != "void")
+                    machine.convert_type(return_value, 0, return_value, 0, states.back().return_type, active_owner->source(instruction.source));
+                if (machine.should_stop()) { result = machine.error_result(); return true; }
+                if (return_states.empty()) return_states.emplace_back();
                 finish_call();
                 continue;
             }
-            call_result.export_argument(0, result);
+            if (return_states.empty()) return_states.emplace_back();
+            registers.export_argument(value_slot, result);
             return true;
         }
-        if (instruction.opcode == Opcode::Jump) { pc = instruction.operand; continue; }
-        if (instruction.opcode == Opcode::Empty) { registers.clear(output); continue; }
-        if (instruction.opcode == Opcode::Branch || instruction.opcode == Opcode::AndBranch || instruction.opcode == Opcode::OrBranch)
-        {
-#ifdef CIFA_VM_PROFILE
-            VmProfile::Timer branch_timer(profile.branch_ns);
-#endif
-            const SourceLocation* condition_source = instruction.condition_source.id != 0
-                ? &active_owner->source(instruction.condition_source) : nullptr;
-            const SourceLocation* call_source = &active_owner->source(instruction.source);
-            if (condition_source != nullptr) current_source = condition_source;
-            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            if (instruction.opcode == Opcode::Branch)
-            {
-                registers.clear(input_slot(instruction.input_count - 1));
-                if (!condition) pc = instruction.operand;
-            }
-            else if ((instruction.opcode == Opcode::AndBranch && !condition)
-                || (instruction.opcode == Opcode::OrBranch && condition))
-            {
-                registers.write_payload(output, std::int64_t(condition ? 1 : 0));
-                pc = instruction.operand;
-            }
-            continue;
-        }
-        if (instruction.opcode == Opcode::Constant)
-        {
-#ifdef CIFA_VM_PROFILE
-            VmProfile::Timer constant_timer(profile.constant_ns);
-#endif
-            const auto& constant = active_owner->constants[instruction.operand];
-            registers.write_payload(output, constant.value);
-            if (constant.continue_marker) registers.set_type(output, {typeid(void), "", "", "__"});
-            continue;
-        }
-        if (instruction.opcode == Opcode::Enter)
-        {
-            continue;
-        }
-        if (instruction.opcode == Opcode::Leave)
-        {
-            continue;
-        }
-        if (instruction.opcode == Opcode::RegisterSnapshot)
+        case Opcode::RegisterSnapshot:
         {
 #ifdef CIFA_VM_PROFILE
             VmProfile::PathTimer register_snapshot_timer(profile.register_snapshot_ns,
@@ -5065,26 +5397,26 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::RegisterBinary)
+        case Opcode::RegisterBinary:
         {
 #ifdef CIFA_VM_PROFILE
             VmProfile::PathTimer register_binary_timer(profile.register_binary_ns,
             profile.register_binary_path_ns.data(), profile.register_binary_path_counts.data());
 #endif
             const auto& site = active_owner->register_binary_sites[instruction.operand];
+            const size_t binary_destination = site.temporary_destination != 0
+                ? active_instructions->register_capacity + site.temporary_destination - 1
+                : (site.code.flags & 1) != 0 ? registers.size() - 1 : output;
             if (site.left_temporary && site.right_temporary)
             {
                 const size_t left = active_instructions->register_capacity + site.code.left;
                 const size_t right = active_instructions->register_capacity + site.code.right;
-                const size_t destination = site.temporary_destination != 0
-                    ? active_instructions->register_capacity + site.temporary_destination - 1
-                    : (site.code.flags & 1) != 0 ? registers.size() - 1 : output;
-                if (!registers.binary(static_cast<Opcode>(site.code.opcode), destination, left, right, machine, *current_source))
+                if (!registers.binary(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, *current_source))
                 {
 #ifdef CIFA_VM_PROFILE
                     ++profile.register_binary_fallback;
 #endif
-                    registers.binary_fallback(static_cast<Opcode>(site.code.opcode), destination, left, right, machine, *current_source, true);
+                    registers.binary_fallback(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, *current_source, true);
                 }
 #ifdef CIFA_VM_PROFILE
                 else ++profile.register_binary_fast;
@@ -5095,9 +5427,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     const size_t slot = site.code.destination - 1;
                     const auto& binding = active_owner->variable_sites[site.variable_site - 1];
                     const auto& name = active_owner->names[binding.name_id];
-                    const bool initialized = initialize_numeric(slot, registers, destination, binding);
+                    const bool initialized = initialize_numeric(slot, registers, binary_destination, binding);
                     const bool assigned = !initialized && !binding.with_type && !active_aliases[slot]
-                        && active_locals->assign_numeric(slot, registers, destination);
+                        && active_locals->assign_numeric(slot, registers, binary_destination);
                     if (initialized || assigned)
                     {
 #ifdef CIFA_VM_PROFILE
@@ -5109,7 +5441,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                         if ((site.code.flags & 1) != 0 || instruction.discard_result) ++profile.register_binary_numeric_discard;
                         else ++profile.register_binary_numeric_result;
 #endif
-                        registers.clear(destination);
+                        registers.clear(binary_destination);
                         if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *active_locals, slot);
                         continue;
                     }
@@ -5127,10 +5459,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     {
                         if (binding.with_type) machine.bind_type(*target_file, target_slot,
                             active_owner->names[binding.type_id], *current_source);
-                        const size_t conversion = destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
-                        if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, destination, conversion, *current_source);
+                        const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
+                        if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, binary_destination, conversion, *current_source);
                         if (machine.should_stop()) { result = machine.error_result(); return true; }
-                        registers.clear(destination);
+                        registers.clear(binary_destination);
                         if (binding.with_type)
                         {
                             if (!existing) scopes.back().bind(name, active_locals, slot);
@@ -5139,24 +5471,30 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                         if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
                         continue;
                     }
-                    auto& target = alias_target(binding.name_id);
-                    Object value;
-                    registers.export_argument(destination, value);
-                    machine.assign(target, std::move(value), binding.with_type, active_owner->names[binding.type_id], *current_source);
+                    const auto target = alias_target(binding.name_id);
+                    if (binding.with_type) machine.bind_type(*target.file, target.slot,
+                        active_owner->names[binding.type_id], *current_source);
+                    const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
+                    if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                        binary_destination, conversion, *current_source);
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     bind_local_storage(name, slot, false);
-                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.import_object(output, target);
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
                 }
 #ifdef CIFA_VM_PROFILE
                 register_binary_timer.select(0);
 #endif
                 continue;
             }
-            if ((site.left_constant || !active_aliases[site.code.left]) && (site.right_constant || !active_aliases[site.code.right]))
+            if ((site.left_constant || site.left_temporary || !active_aliases[site.code.left])
+                && (site.right_constant || site.right_temporary || !active_aliases[site.code.right]))
             {
                 const size_t scratch_left = registers.size() - 2;
-                const auto read_number = [&](bool constant, size_t slot, std::int64_t& integer, double& floating, bool& is_double)
+                const auto read_number = [&](bool constant, bool temporary_value, size_t slot,
+                    std::int64_t& integer, double& floating, bool& is_double)
                 {
+                    if (temporary_value)
+                        return registers.number(active_instructions->register_capacity + slot, integer, floating, is_double);
                     if (!constant) return active_locals->number(slot, integer, floating, is_double);
                     const auto& value = active_owner->constants[slot].value;
                     if (const auto* number = value_get_if<std::int64_t>(&value)) integer = *number;
@@ -5168,8 +5506,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 std::int64_t left_integer = 0, right_integer = 0;
                 double left_number = 0, right_number = 0;
                 bool left_double = false, right_double = false;
-                if (read_number(site.left_constant, site.code.left, left_integer, left_number, left_double)
-                    && read_number(site.right_constant, site.code.right, right_integer, right_number, right_double)
+                if (read_number(site.left_constant, site.left_temporary, site.code.left, left_integer, left_number, left_double)
+                    && read_number(site.right_constant, site.right_temporary, site.code.right, right_integer, right_number, right_double)
                     && registers.binary_numbers(static_cast<Opcode>(site.code.opcode), scratch_left,
                         left_integer, left_number, left_double, right_integer, right_number, right_double, machine, *current_source))
                 {
@@ -5182,7 +5520,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
 #ifdef CIFA_VM_PROFILE
                         register_binary_timer.select(3);
 #endif
-                        registers.move(output, registers, scratch_left);
+                        registers.move(binary_destination, registers, scratch_left);
                         continue;
                     }
                     const size_t slot = site.code.destination - 1;
@@ -5231,14 +5569,14 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                         if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
                         continue;
                     }
-                    auto& target = alias_target(binding.name_id);
-                    Object value;
-                    registers.export_argument(scratch_left, value);
-                    machine.assign(target, std::move(value), binding.with_type,
+                    const auto target = alias_target(binding.name_id);
+                    if (binding.with_type) machine.bind_type(*target.file, target.slot,
                         active_owner->names[binding.type_id], *current_source);
+                    if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                        scratch_left, registers.size() - 1, *current_source);
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     bind_local_storage(name, slot, false);
-                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.import_object(output, target);
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
                     continue;
                 }
                 else
@@ -5252,9 +5590,15 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             const size_t left_slot = registers.size() - 2;
             const size_t right_slot = registers.size() - 1;
-            const auto read_register = [&](size_t destination, bool constant, size_t slot, size_t name_id, SourceRef reference)
+            const auto read_register = [&](size_t destination, bool constant, bool temporary_value,
+                size_t slot, size_t name_id, SourceRef reference)
             {
                 if (constant) { registers.write_payload(destination, active_owner->constants[slot].value); return; }
+                if (temporary_value)
+                {
+                    registers.copy(destination, registers, active_instructions->register_capacity + slot);
+                    return;
+                }
                 const auto& name = active_owner->names[name_id];
                 if (active_aliases[slot])
                     read_alias(destination, name_id, active_owner->source(reference));
@@ -5262,9 +5606,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 if (registers.empty(destination))
                     machine.set_error("variable '" + name + "' has not been initialized", &active_owner->source(reference));
             };
-            read_register(left_slot, site.left_constant, site.code.left, site.left_name, site.left_source);
+            read_register(left_slot, site.left_constant, site.left_temporary,
+                site.code.left, site.left_name, site.left_source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
-            read_register(right_slot, site.right_constant, site.code.right, site.right_name, site.right_source);
+            read_register(right_slot, site.right_constant, site.right_temporary,
+                site.code.right, site.right_name, site.right_source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             registers.binary_fallback(static_cast<Opcode>(site.code.opcode), left_slot, left_slot, right_slot, machine, *current_source, true);
 #ifdef CIFA_VM_PROFILE
@@ -5298,19 +5644,19 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
                     continue;
                 }
-                auto& target = alias_target(binding.name_id);
-                Object value;
-                registers.export_argument(left_slot, value);
-                machine.assign(target, std::move(value), binding.with_type,
+                const auto target = alias_target(binding.name_id);
+                if (binding.with_type) machine.bind_type(*target.file, target.slot,
                     active_owner->names[binding.type_id], active_owner->source(site.assignment_source));
+                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                    left_slot, right_slot, active_owner->source(site.assignment_source));
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 bind_local_storage(name, slot, false);
-                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.import_object(output, target);
+                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
             }
-            else registers.move(output, registers, left_slot);
+            else registers.move(binary_destination, registers, left_slot);
             continue;
         }
-        if (instruction.opcode == Opcode::LoadLocal)
+        case Opcode::LoadLocal:
         {
 #ifdef CIFA_VM_PROFILE
             VmProfile::Timer local_load_timer(profile.local_load_ns);
@@ -5337,7 +5683,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::Load || instruction.opcode == Opcode::Peek)
+        case Opcode::Load:
+        case Opcode::Peek:
         {
             auto& source = active_owner->source(instruction.source);
             if (instruction.auxiliary == 1)
@@ -5361,13 +5708,17 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     continue;
                 }
-                auto* linked = linked_global(instruction.operand);
-                auto* existing = linked;
-                auto& value = linked ? *linked : interpreter.global_variables[name];
-                if (!linked) (*active_globals)[instruction.operand] = &value;
-                if (instruction.opcode != Opcode::Peek && existing != nullptr && !value.hasValue())
+                size_t linked = linked_global(instruction.operand);
+                const bool existed = linked != missing_global && machine.global_exists_at(linked);
+                if (!existed)
+                {
+                    const auto value = machine.assign_named(name, "", false, false, source);
+                    linked = value.slot;
+                    (*active_globals)[instruction.operand] = linked;
+                }
+                if (instruction.opcode != Opcode::Peek && existed && machine.global_values.empty(linked))
                     machine.set_error("variable '" + name + "' has not been initialized", &source);
-                registers.import_object(output, value);
+                registers.copy(output, machine.global_values, linked);
             }
             else
             {
@@ -5379,145 +5730,156 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::Size && instruction.auxiliary == 1)
+        case Opcode::Size:
         {
-            const auto& name = active_owner->names[instruction.operand];
-            const auto value = machine.named_value(name);
-            const auto& location = active_owner->source(instruction.target_source);
-            if (value.existed && value.empty())
-                machine.set_error("variable '" + name + "' has not been initialized", &location);
-            if (const auto size = value.size()) registers.write_payload(output, double(*size));
-            else machine.set_error("function 'size' requires a string, array, or map", &location);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (instruction.auxiliary == 1)
+            {
+                const auto& name = active_owner->names[instruction.operand];
+                const auto value = machine.named_value(name);
+                const auto& location = active_owner->source(instruction.target_source);
+                if (value.existed && value.empty())
+                    machine.set_error("variable '" + name + "' has not been initialized", &location);
+                if (const auto size = value.size()) registers.write_payload(output, double(*size));
+                else machine.set_error("function 'size' requires a string, array, or map", &location);
+                if (machine.should_stop()) { result = machine.error_result(); return true; }
+                continue;
+            }
+            const size_t argument = input_slot(instruction.input_count - 1);
+            BytecodeValue::Storage numeric;
+            const auto& input = registers.payload(argument, numeric);
+            const auto* container = value_get_if<std::any>(&input);
+            std::optional<size_t> length;
+            if (container)
+            {
+                if (const auto* text = std::any_cast<std::string>(container)) length = text->size();
+                else if (const auto* array = std::any_cast<VmArray>(container)) length = array->values.size();
+                else if (const auto* map = std::any_cast<VmMap>(container)) length = map->values.size();
+            }
+            registers.clear(argument);
+            if (length) registers.write_payload(output, double(*length));
+            else
+            {
+                const auto& location = instruction.target_source.id == 0
+                    ? active_owner->source(instruction.source) : active_owner->source(instruction.target_source);
+                machine.set_error("function 'size' requires a string, array, or map", &location);
+                result = machine.error_result();
+                return true;
+            }
             continue;
         }
-        if (instruction.opcode == Opcode::MathUnary || instruction.opcode == Opcode::MathBinary)
+        case Opcode::MathUnary:
         {
             const auto& call = active_owner->calls[instruction.operand];
             const auto& name = active_owner->names[call.name_id];
-            if (instruction.opcode == Opcode::MathUnary)
+            const size_t argument = input_slot(instruction.input_count - 1);
+            BytecodeValue::Storage numeric;
+            const auto& input = registers.payload(argument, numeric);
+            if (input.index() >= 1 && input.index() <= 3)
             {
-                const size_t argument = input_slot(instruction.input_count - 1);
-                BytecodeValue::Storage numeric;
-                const auto& input = registers.payload(argument, numeric);
-                if (input.index() >= 1 && input.index() <= 3)
+                const auto* integer = value_get_if<std::int64_t>(&input);
+                const double value = integer ? static_cast<double>(*integer)
+                    : value_holds<double>(input) ? value_get<double>(input) : double(value_get<bool>(input));
+                if (call.math_kind == MathKind::Abs && integer && *integer != std::numeric_limits<std::int64_t>::min())
                 {
-                    const auto* integer = value_get_if<std::int64_t>(&input);
-                    const double value = integer ? static_cast<double>(*integer)
-                        : value_holds<double>(input) ? value_get<double>(input) : double(value_get<bool>(input));
-                    if (call.math_kind == MathKind::Abs && integer && *integer != std::numeric_limits<std::int64_t>::min())
-                    {
-                        const auto result_value = *integer < 0 ? -*integer : *integer;
-                        registers.clear(argument);
-                        registers.write_payload(output, result_value);
-                    }
-                    else
-                    {
-                        registers.clear(argument);
-                        double computed = 0;
-                        switch (call.math_kind)
-                        {
-                        case MathKind::Abs: computed = std::fabs(value); break;
-                        case MathKind::Sqrt: computed = std::sqrt(value); break;
-                        case MathKind::Cbrt: computed = std::cbrt(value); break;
-                        case MathKind::Round: computed = std::round(value); break;
-                        case MathKind::Trunc: computed = std::trunc(value); break;
-                        case MathKind::NearbyInt: computed = std::nearbyint(value); break;
-                        case MathKind::Rint: computed = std::rint(value); break;
-                        case MathKind::Ceil: computed = std::ceil(value); break;
-                        case MathKind::Floor: computed = std::floor(value); break;
-                        case MathKind::Sin: computed = std::sin(value); break;
-                        case MathKind::Cos: computed = std::cos(value); break;
-                        case MathKind::Tan: computed = std::tan(value); break;
-                        case MathKind::Asin: computed = std::asin(value); break;
-                        case MathKind::Acos: computed = std::acos(value); break;
-                        case MathKind::Atan: computed = std::atan(value); break;
-                        case MathKind::Sinh: computed = std::sinh(value); break;
-                        case MathKind::Cosh: computed = std::cosh(value); break;
-                        case MathKind::Tanh: computed = std::tanh(value); break;
-                        case MathKind::Exp: computed = std::exp(value); break;
-                        case MathKind::Log: computed = std::log(value); break;
-                        case MathKind::Log2: computed = std::log2(value); break;
-                        case MathKind::Log10: computed = std::log10(value); break;
-                        case MathKind::Erf: computed = std::erf(value); break;
-                        case MathKind::Erfc: computed = std::erfc(value); break;
-                        case MathKind::TGamma: computed = std::tgamma(value); break;
-                        case MathKind::LGamma: computed = std::lgamma(value); break;
-                        default: continue;
-                        }
-                        registers.write_payload(output, computed);
-                    }
+                    const auto result_value = *integer < 0 ? -*integer : *integer;
+                    registers.clear(argument);
+                    registers.write_payload(output, result_value);
                 }
                 else
                 {
-                    ObjectVector arguments;
-                    arguments.emplace_back();
-                    registers.export_argument(argument, arguments.back());
-                    registers.import_object(output, machine.call_host(name, arguments, call.arguments));
-                }
-            }
-            else
-            {
-                const size_t right_slot = input_slot(instruction.input_count - 1);
-                const size_t left_slot = input_slot(instruction.input_count - 2);
-                BytecodeValue::Storage right_numeric, left_numeric;
-                const auto& right = registers.payload(right_slot, right_numeric);
-                const auto& left = registers.payload(left_slot, left_numeric);
-                if (left.index() >= 1 && left.index() <= 3 && right.index() >= 1 && right.index() <= 3)
-                {
-                    const auto number = [](const BytecodeValue::Storage& value) {
-                        if (const auto* integer = value_get_if<std::int64_t>(&value)) return static_cast<double>(*integer);
-                        if (const auto* floating = value_get_if<double>(&value)) return *floating;
-                        return double(value_get<bool>(value));
-                    };
-                    const double first = number(left);
-                    const double second = number(right);
-                    registers.clear(left_slot);
-                    registers.clear(right_slot);
+                    registers.clear(argument);
                     double computed = 0;
                     switch (call.math_kind)
                     {
-                    case MathKind::Atan2: computed = std::atan2(first, second); break;
-                    case MathKind::Pow: computed = std::pow(first, second); break;
-                    case MathKind::Hypot: computed = std::hypot(first, second); break;
-                    case MathKind::Fmod: computed = std::fmod(first, second); break;
-                    case MathKind::Remainder: computed = std::remainder(first, second); break;
-                    case MathKind::CopySign: computed = std::copysign(first, second); break;
-                    case MathKind::FDim: computed = std::fdim(first, second); break;
-                    case MathKind::FMax: computed = std::fmax(first, second); break;
-                    case MathKind::FMin: computed = std::fmin(first, second); break;
+                    case MathKind::Abs: computed = std::fabs(value); break;
+                    case MathKind::Sqrt: computed = std::sqrt(value); break;
+                    case MathKind::Cbrt: computed = std::cbrt(value); break;
+                    case MathKind::Round: computed = std::round(value); break;
+                    case MathKind::Trunc: computed = std::trunc(value); break;
+                    case MathKind::NearbyInt: computed = std::nearbyint(value); break;
+                    case MathKind::Rint: computed = std::rint(value); break;
+                    case MathKind::Ceil: computed = std::ceil(value); break;
+                    case MathKind::Floor: computed = std::floor(value); break;
+                    case MathKind::Sin: computed = std::sin(value); break;
+                    case MathKind::Cos: computed = std::cos(value); break;
+                    case MathKind::Tan: computed = std::tan(value); break;
+                    case MathKind::Asin: computed = std::asin(value); break;
+                    case MathKind::Acos: computed = std::acos(value); break;
+                    case MathKind::Atan: computed = std::atan(value); break;
+                    case MathKind::Sinh: computed = std::sinh(value); break;
+                    case MathKind::Cosh: computed = std::cosh(value); break;
+                    case MathKind::Tanh: computed = std::tanh(value); break;
+                    case MathKind::Exp: computed = std::exp(value); break;
+                    case MathKind::Log: computed = std::log(value); break;
+                    case MathKind::Log2: computed = std::log2(value); break;
+                    case MathKind::Log10: computed = std::log10(value); break;
+                    case MathKind::Erf: computed = std::erf(value); break;
+                    case MathKind::Erfc: computed = std::erfc(value); break;
+                    case MathKind::TGamma: computed = std::tgamma(value); break;
+                    case MathKind::LGamma: computed = std::lgamma(value); break;
                     default: continue;
                     }
                     registers.write_payload(output, computed);
                 }
-                else
-                {
-                    ObjectVector arguments;
-                    arguments.resize(2);
-                    registers.export_argument(left_slot, arguments[0]);
-                    registers.export_argument(right_slot, arguments[1]);
-                    registers.import_object(output, machine.call_host(name, arguments, call.arguments));
-                }
+            }
+            else
+            {
+                machine.conversion_error(registers, argument, "number", &call.arguments.front());
             }
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        if (instruction.opcode == Opcode::Positive || instruction.opcode == Opcode::Negative
-            || instruction.opcode == Opcode::LogicalNot || instruction.opcode == Opcode::BitNot
-            || instruction.opcode == Opcode::Cast || instruction.opcode == Opcode::Size)
+        case Opcode::MathBinary:
+        {
+            const auto& call = active_owner->calls[instruction.operand];
+            const auto& name = active_owner->names[call.name_id];
+            const size_t right_slot = input_slot(instruction.input_count - 1);
+            const size_t left_slot = input_slot(instruction.input_count - 2);
+            BytecodeValue::Storage right_numeric, left_numeric;
+            const auto& right = registers.payload(right_slot, right_numeric);
+            const auto& left = registers.payload(left_slot, left_numeric);
+            if (left.index() >= 1 && left.index() <= 3 && right.index() >= 1 && right.index() <= 3)
+            {
+                const auto number = [](const BytecodeValue::Storage& value) {
+                    if (const auto* integer = value_get_if<std::int64_t>(&value)) return static_cast<double>(*integer);
+                    if (const auto* floating = value_get_if<double>(&value)) return *floating;
+                    return double(value_get<bool>(value));
+                };
+                const double first = number(left);
+                const double second = number(right);
+                registers.clear(left_slot);
+                registers.clear(right_slot);
+                double computed = 0;
+                switch (call.math_kind)
+                {
+                case MathKind::Atan2: computed = std::atan2(first, second); break;
+                case MathKind::Pow: computed = std::pow(first, second); break;
+                case MathKind::Hypot: computed = std::hypot(first, second); break;
+                case MathKind::Fmod: computed = std::fmod(first, second); break;
+                case MathKind::Remainder: computed = std::remainder(first, second); break;
+                case MathKind::CopySign: computed = std::copysign(first, second); break;
+                case MathKind::FDim: computed = std::fdim(first, second); break;
+                case MathKind::FMax: computed = std::fmax(first, second); break;
+                case MathKind::FMin: computed = std::fmin(first, second); break;
+                default: continue;
+                }
+                registers.write_payload(output, computed);
+            }
+            else
+            {
+                const size_t invalid = left.index() >= 1 && left.index() <= 3 ? right_slot : left_slot;
+                const size_t location = invalid == left_slot ? 0 : 1;
+                machine.conversion_error(registers, invalid, "number", &call.arguments[location]);
+            }
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            continue;
+        }
+        case Opcode::Positive:
         {
             const size_t argument = input_slot(instruction.input_count - 1);
             BytecodeValue::Storage numeric;
             const auto& input = registers.payload(argument, numeric);
-            if (instruction.opcode == Opcode::Cast)
-            {
-                machine.convert_type(registers, output, registers, argument, active_owner->names[instruction.operand],
-                    active_owner->source(instruction.source));
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                if (output != argument) registers.clear(argument);
-                continue;
-            }
-            if (instruction.opcode == Opcode::Positive && (input.index() >= 1 && input.index() <= 3))
+            if (input.index() >= 1 && input.index() <= 3)
             {
                 if (const auto* boolean = value_get_if<bool>(&input))
                 {
@@ -5528,7 +5890,15 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 else registers.move(output, registers, argument);
                 continue;
             }
-            if (instruction.opcode == Opcode::Negative && (input.index() >= 1 && input.index() <= 3))
+            registers.move(output, registers, argument);
+            continue;
+        }
+        case Opcode::Negative:
+        {
+            const size_t argument = input_slot(instruction.input_count - 1);
+            BytecodeValue::Storage numeric;
+            const auto& input = registers.payload(argument, numeric);
+            if (input.index() >= 1 && input.index() <= 3)
             {
                 BytecodeValue::Storage negative;
                 if (const auto* floating = value_get_if<double>(&input)) negative = 0.0 - *floating;
@@ -5542,29 +5912,18 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 registers.write_payload(output, std::move(negative));
                 continue;
             }
-            if (instruction.opcode == Opcode::Size)
-            {
-                const auto* container = value_get_if<std::any>(&input);
-                std::optional<size_t> length;
-                if (container)
-                {
-                    if (const auto* text = std::any_cast<std::string>(container)) length = text->size();
-                    else if (const auto* array = std::any_cast<VmArray>(container)) length = array->values.size();
-                    else if (const auto* map = std::any_cast<ObjectMap>(container)) length = map->size();
-                }
-                registers.clear(argument);
-                if (length) registers.write_payload(output, double(*length));
-                else
-                {
-                    const auto& location = instruction.target_source.id == 0
-                        ? active_owner->source(instruction.source) : active_owner->source(instruction.target_source);
-                    machine.set_error("function 'size' requires a string, array, or map", &location);
-                    result = machine.error_result();
-                    return true;
-                }
-                continue;
-            }
-            if (instruction.opcode == Opcode::LogicalNot && (input.index() >= 1 && input.index() <= 3))
+            const size_t zero = registers.size() - 1;
+            registers.write_payload(zero, std::int64_t(0));
+            registers.binary_fallback(Opcode::Subtract, output, zero, argument, machine, *current_source, false);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            continue;
+        }
+        case Opcode::LogicalNot:
+        {
+            const size_t argument = input_slot(instruction.input_count - 1);
+            BytecodeValue::Storage numeric;
+            const auto& input = registers.payload(argument, numeric);
+            if (input.index() >= 1 && input.index() <= 3)
             {
                 const bool zero = value_holds<double>(input) ? value_get<double>(input) == 0
                     : value_holds<std::int64_t>(input) ? value_get<std::int64_t>(input) == 0
@@ -5573,8 +5932,18 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 registers.write_payload(output, zero);
                 continue;
             }
-            if (instruction.opcode == Opcode::BitNot
-                && (value_holds<std::int64_t>(input) || value_holds<bool>(input)))
+            const bool inverted = !machine.condition(registers, argument, nullptr);
+            registers.clear(argument);
+            if (!machine.should_stop()) registers.write_payload(output, inverted);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            continue;
+        }
+        case Opcode::BitNot:
+        {
+            const size_t argument = input_slot(instruction.input_count - 1);
+            BytecodeValue::Storage numeric;
+            const auto& input = registers.payload(argument, numeric);
+            if (value_holds<std::int64_t>(input) || value_holds<bool>(input))
             {
                 const auto number = value_holds<std::int64_t>(input)
                     ? value_get<std::int64_t>(input) : std::int64_t(value_get<bool>(input));
@@ -5582,32 +5951,23 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 registers.write_payload(output, ~number);
                 continue;
             }
-            if (instruction.opcode == Opcode::Positive)
-            {
-                registers.move(output, registers, argument);
-                continue;
-            }
-            if (instruction.opcode == Opcode::Negative)
-            {
-                const size_t zero = registers.size() - 1;
-                registers.write_payload(zero, std::int64_t(0));
-                registers.binary_fallback(Opcode::Subtract, output, zero, argument, machine, *current_source, false);
-            }
-            else if (instruction.opcode == Opcode::LogicalNot)
-            {
-                const bool inverted = !machine.condition(registers, argument, nullptr);
-                registers.clear(argument);
-                if (!machine.should_stop()) registers.write_payload(output, inverted);
-            }
-            else if (instruction.opcode == Opcode::BitNot)
-            {
-                std::int64_t integer = 0;
-                if (!registers.integer(argument, integer)) machine.conversion_error(registers, argument, "int", nullptr);
-                registers.clear(argument);
-                if (!machine.should_stop()) registers.write_payload(output, ~integer);
-            }
+            std::int64_t integer = 0;
+            if (!registers.integer(argument, integer)) machine.conversion_error(registers, argument, "int", nullptr);
+            registers.clear(argument);
+            if (!machine.should_stop()) registers.write_payload(output, ~integer);
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            continue;
         }
-        else
+        case Opcode::Cast:
+        {
+            const size_t argument = input_slot(instruction.input_count - 1);
+            machine.convert_type(registers, output, registers, argument, active_owner->names[instruction.operand],
+                active_owner->source(instruction.source));
+            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (output != argument) registers.clear(argument);
+            continue;
+        }
+        default:
         {
             if (registers.binary(instruction.opcode, output, input_slot(instruction.input_count - 2), input_slot(instruction.input_count - 1),
                 machine, *current_source))
@@ -5617,6 +5977,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             registers.binary_fallback(instruction.opcode, output, input_slot(instruction.input_count - 2),
                 input_slot(instruction.input_count - 1), machine, *current_source, active_owner->host_function_version != 0);
+            break;
+        }
         }
         if (machine.should_stop())
         {
@@ -5626,6 +5988,53 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     }
     registers.export_argument(0, result);
     return true;
+}
+
+size_t CifaBytecode::Machine::ensure_global_slot(const std::string& name)
+{
+    if (const auto found = global_slots.find(name); found != global_slots.end()) return found->second;
+    const size_t slot = global_values.append();
+    global_slots.emplace(name, slot);
+    global_exists.push_back(false);
+    global_values.set_name(slot, name);
+    return slot;
+}
+
+size_t CifaBytecode::Machine::find_global_slot(const std::string& name) const
+{
+    const auto found = global_slots.find(name);
+    return found == global_slots.end() ? std::numeric_limits<size_t>::max() : found->second;
+}
+
+bool CifaBytecode::Machine::global_exists_at(size_t slot) const
+{
+    return slot < global_exists.size() && global_exists[slot];
+}
+
+void CifaBytecode::Machine::import_host_globals()
+{
+    std::fill(global_exists.begin(), global_exists.end(), false);
+    for (const auto& [name, value] : host.global_variables)
+    {
+        const size_t slot = ensure_global_slot(name);
+        global_values.import_object(slot, value);
+        global_exists[slot] = true;
+    }
+    for (size_t slot = 0; slot < global_exists.size(); ++slot)
+        if (!global_exists[slot]) global_values.clear(slot);
+}
+
+void CifaBytecode::Machine::export_host_globals()
+{
+    for (const auto& [name, slot] : global_slots)
+    {
+        if (!global_exists_at(slot))
+        {
+            host.global_variables.erase(name);
+            continue;
+        }
+        global_values.export_object(slot, host.global_variables[name]);
+    }
 }
 
 void CifaBytecode::Machine::publish(const std::shared_ptr<const Module>& module)
@@ -5715,30 +6124,22 @@ CifaBytecode::Scope::Binding* CifaBytecode::Machine::find_slot(const std::string
     return nullptr;
 }
 
-Object& CifaBytecode::Machine::resolve_member(const std::string& base_name, const std::string& field_name)
+CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::resolve_member(
+    const std::string& base_name, const std::string& field_name)
 {
-    const auto* binding = find_slot(base_name);
-    if (binding)
+    auto base = named_value(base_name);
+    if (base.file)
     {
-        auto* resource = value_get_if<std::any>(&binding->file->resource_payload(binding->slot));
-        if (auto* fields = resource ? std::any_cast<ObjectMap>(resource) : nullptr)
+        auto* resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
+        if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
         {
-            auto& element = (*fields)[field_name];
+            auto& element = fields->values[field_name];
             element.name = base_name + "." + field_name;
-            return element;
+            return {nullptr, &element, element.name, element.element_type_name};
         }
     }
-    if (!binding)
-    {
-        const auto global = host.global_variables.find(base_name);
-        if (global != host.global_variables.end() && global->second.isType<ObjectMap>())
-        {
-            auto& element = global->second.ref<ObjectMap>()[field_name];
-            element.name = base_name + "." + field_name;
-            return element;
-        }
-    }
-    return host.global_variables[base_name + "::" + field_name];
+    const auto fallback = assign_named(base_name + "::" + field_name, "", false, false, {});
+    return {nullptr, nullptr, base_name + "::" + field_name, fallback.element_type, fallback.file, fallback.slot};
 }
 
 bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t target, RegisterSlots& source, size_t slot,
@@ -5755,7 +6156,7 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
     BytecodeValue::Storage numeric;
     const auto& payload = source.payload(slot, numeric);
     const auto* resource = value_get_if<std::any>(&payload);
-    const auto identity = resource ? std::type_index(resource->type()) : value_holds<double>(payload)
+    const auto identity = resource ? std::type_index(std::any_cast<VmMap>(resource) ? typeid(ObjectMap) : resource->type()) : value_holds<double>(payload)
         ? std::type_index(typeid(double)) : value_holds<bool>(payload)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     const auto registered = host.registered_types.find(type_name);
@@ -5841,7 +6242,7 @@ bool CifaBytecode::Machine::bind_type(RegisterSlots& values, size_t slot, const 
         BytecodeValue::Storage numeric;
         const auto& payload = values.payload(slot, numeric);
         const auto* resource = value_get_if<std::any>(&payload);
-        descriptor.bound = resource ? std::type_index(resource->type()) : value_holds<double>(payload)
+        descriptor.bound = resource ? std::type_index(std::any_cast<VmMap>(resource) ? typeid(ObjectMap) : resource->type()) : value_holds<double>(payload)
             ? std::type_index(typeid(double)) : value_holds<bool>(payload)
             ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
         const auto name = host.type_names.find(descriptor.bound);
@@ -5885,12 +6286,17 @@ bool CifaBytecode::Machine::bind_type(Object& value, const std::string& type_nam
     return true;
 }
 
-Object& CifaBytecode::Machine::assign_named(const std::string& name, const std::string& type_name, bool with_type,
+CifaBytecode::Machine::NamedValueRef CifaBytecode::Machine::assign_named(
+    const std::string& name, const std::string& type_name, bool with_type,
     bool declare_current, const SourceLocation& location)
 {
-    auto& value = host.global_variables[name];
-    if (with_type) bind_type(value, type_name, location);
-    return value;
+    const size_t slot = ensure_global_slot(name);
+    const bool existed = global_exists_at(slot);
+    global_exists[slot] = true;
+    global_values.set_name(slot, name);
+    if (with_type) bind_type(global_values, slot, type_name, location);
+    const size_t index = global_values.base() + slot;
+    return {&global_values, slot, global_values.type_pool[global_values.slot_types[index]].element, existed};
 }
 
 bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, RegisterSlots& source, size_t slot,
@@ -5921,7 +6327,7 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     }
     const auto& converted = source.payload(value_slot, numeric);
     const auto* converted_resource = value_get_if<std::any>(&converted);
-    const auto identity = converted_resource ? std::type_index(converted_resource->type()) : value_holds<double>(converted)
+    const auto identity = converted_resource ? std::type_index(std::any_cast<VmMap>(converted_resource) ? typeid(ObjectMap) : converted_resource->type()) : value_holds<double>(converted)
         ? std::type_index(typeid(double)) : value_holds<bool>(converted)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     if (!no_value && type.declared == "auto" && !source.empty(value_slot))
@@ -6000,14 +6406,18 @@ void CifaBytecode::Machine::read_named(RegisterSlots& destination, size_t slot, 
     if (initialize_struct && with_type && structures.contains(type_name))
     {
         auto* existing_slot = find_slot(name);
-        const auto global = host.global_variables.find(name);
+        const size_t global_slot = find_global_slot(name);
         bool existing_map = false;
         if (existing_slot)
         {
             auto* resource = value_get_if<std::any>(&existing_slot->file->resource_payload(existing_slot->slot));
-            existing_map = resource && std::any_cast<ObjectMap>(resource);
+            existing_map = resource && std::any_cast<VmMap>(resource);
         }
-        else existing_map = global != host.global_variables.end() && global->second.isType<ObjectMap>();
+        else if (global_slot != std::numeric_limits<size_t>::max() && global_exists_at(global_slot))
+        {
+            auto* resource = value_get_if<std::any>(&global_values.resource_payload(global_slot));
+            existing_map = resource && std::any_cast<VmMap>(resource);
+        }
         if (!existing_map)
         {
             ObjectMap fields;
@@ -6021,18 +6431,17 @@ void CifaBytecode::Machine::read_named(RegisterSlots& destination, size_t slot, 
             if (!scopes.empty())
             {
                 auto& binding = scopes.back().create(name);
-                binding.file->write_payload(binding.slot, std::any(std::move(fields)));
+                binding.file->write_payload(binding.slot, std::any(VmMap(std::move(fields))));
                 binding.file->set_type(binding.slot, {typeid(ObjectMap), type_name, "", ""});
                 binding.file->set_name(binding.slot, name);
                 destination.copy(slot, *binding.file, binding.slot);
                 return;
             }
-            auto& value = assign_named(name, type_name, true, true, location);
-            value = Object(std::move(fields));
-            value.declared_type_name = type_name;
-            value.bound_type = typeid(ObjectMap);
-            value.name = name;
-            destination.import_object(slot, value);
+            const auto value = assign_named(name, type_name, true, true, location);
+            value.file->write_payload(value.slot, std::any(VmMap(std::move(fields))));
+            value.file->set_type(value.slot, {typeid(ObjectMap), type_name, "", ""});
+            value.file->set_name(value.slot, name);
+            destination.copy(slot, *value.file, value.slot);
             return;
         }
     }
@@ -6048,18 +6457,19 @@ void CifaBytecode::Machine::read_named(RegisterSlots& destination, size_t slot, 
             return;
         }
     }
-    if (!host.global_variables.contains(name) && !scopes.empty())
+    const size_t global_slot = find_global_slot(name);
+    const bool global_exists = global_slot != std::numeric_limits<size_t>::max() && global_exists_at(global_slot);
+    if (!global_exists && !scopes.empty())
     {
         auto& binding = scopes.back().create(name);
         if (with_type && !bind_type(*binding.file, binding.slot, type_name, location)) return;
         destination.copy(slot, *binding.file, binding.slot);
         return;
     }
-    const bool existed = host.global_variables.contains(name);
-    auto& value = host.global_variables[name];
-    if (with_type) bind_type(value, type_name, location);
-    if (!only_check && existed && !with_type && !value.hasValue()) set_error("variable '" + name + "' has not been initialized", &location);
-    destination.import_object(slot, value);
+    const auto value = assign_named(name, type_name, with_type, false, location);
+    if (!only_check && value.existed && !with_type && value.file->empty(value.slot))
+        set_error("variable '" + name + "' has not been initialized", &location);
+    destination.copy(slot, *value.file, value.slot);
 }
 
 void CifaBytecode::Machine::set_no_value_error(const Object& value, const SourceLocation* location)
@@ -6171,6 +6581,13 @@ bool CifaBytecode::Machine::bind_range(RegisterSlots& values, size_t slot, const
 void CifaBytecode::Machine::read_indexed(RegisterSlots& destination, size_t slot,
     const IndexedValueRef& element, bool map_access)
 {
+    if (element.file)
+    {
+        if (element.file->empty(element.slot) && !map_access)
+            set_error("array element '" + element.name + "' has not been initialized");
+        destination.copy(slot, *element.file, element.slot);
+        return;
+    }
     if (element.compact)
     {
         if (element.compact->empty() && !map_access)
@@ -6198,6 +6615,13 @@ void CifaBytecode::Machine::read_indexed(RegisterSlots& destination, size_t slot
 bool CifaBytecode::Machine::assign_indexed(const IndexedValueRef& target, Object value, bool with_type,
     const std::string& type_name, const SourceLocation& location)
 {
+    if (target.file)
+    {
+        RegisterSlots boundary(2);
+        boundary.import_object(0, std::move(value));
+        if (with_type && !bind_type(*target.file, target.slot, type_name, location)) return false;
+        return assign(*target.file, target.slot, boundary, 0, 1, location);
+    }
     if (target.object) return assign(*target.object, std::move(value), with_type, type_name, location);
     if (!target.compact) return false;
     const auto& target_type = !target.element_type.empty() ? target.element_type : type_name;
@@ -6236,8 +6660,8 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
     if (binding && (!declare_current || (!scopes.empty() && scopes.back().find(name) == binding)))
     {
         auto* resource = value_get_if<std::any>(&binding->file->resource_payload(binding->slot));
-        if (auto* fields = resource ? std::any_cast<ObjectMap>(resource) : nullptr)
-            current = &(*fields)[string_value(indices, index_slots[0])];
+        if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
+            current = &fields->values[string_value(indices, index_slots[0])];
         else if (auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr)
         {
             const auto offset = integer_key(0);
@@ -6266,8 +6690,8 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         const size_t slot = binding->slot;
         if (string_key(0))
         {
-            file.write_payload(slot, std::any(ObjectMap{}));
-            auto& values = *std::any_cast<ObjectMap>(&value_get<std::any>(file.resource_payload(slot)));
+            file.write_payload(slot, std::any(VmMap{}));
+            auto& values = std::any_cast<VmMap&>(value_get<std::any>(file.resource_payload(slot))).values;
             current = &values[string_value(indices, index_slots[0])];
         }
         else
@@ -6284,29 +6708,47 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
     }
     if (!current && !compact)
     {
-    auto& base = host.global_variables[name];
+    const auto base = assign_named(name, "", false, false, {});
+    auto* resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
     if (is_decl_array)
     {
-        const auto requested = dimensions == 0 || value_holds<std::monostate>(indices.payload(index_slots[0]))
+        BytecodeValue::Storage index_numeric;
+        const auto requested = dimensions == 0
+            || value_holds<std::monostate>(indices.payload(index_slots[0], index_numeric))
             ? 0 : integer_key(0);
         const size_t size = requested < 0 ? 0 : static_cast<size_t>(requested);
-        if (!base.isType<ObjectVector>()) base = Object(ObjectVector(size));
-        else if (!only_check) base.ref<ObjectVector>().resize(size);
-        base.name = name;
-        base.element_type_name = type_name;
-        for (auto& element : base.ref<ObjectVector>())
-            if (!element.isTyped())
-            {
-                bind_type(element, type_name, SourceLocation{});
-                element.name = name;
-            }
-        return {nullptr, &base, name, type_name};
+        auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr;
+        if (!elements)
+        {
+            base.file->write_payload(base.slot, std::any(VmArray(size)));
+            elements = std::any_cast<VmArray>(&value_get<std::any>(base.file->resource_payload(base.slot)));
+        }
+        else if (!only_check) elements->values.resize(size);
+        const size_t absolute = base.file->base() + base.slot;
+        auto descriptor = base.file->type_pool[base.file->slot_types[absolute]];
+        descriptor.element = type_name;
+        base.file->set_type(base.slot, descriptor);
+        base.file->set_name(base.slot, name);
+        return {nullptr, nullptr, name, type_name, base.file, base.slot};
     }
-    if (!base.isType<ObjectVector>() && !base.isType<ObjectMap>())
+    if (!(resource && (std::any_cast<VmArray>(resource) || std::any_cast<VmMap>(resource))))
     {
-        base = string_key(0) ? Object(ObjectMap{}) : Object(ObjectVector{});
+        base.file->write_payload(base.slot, string_key(0) ? std::any(VmMap{}) : std::any(VmArray{}));
+        resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
     }
-    current = &base;
+    if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
+        current = &fields->values[string_value(indices, index_slots[0])];
+    else if (auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr)
+    {
+        const auto offset = integer_key(0);
+        if (offset < 0) { set_error("array index is out of range"); return {}; }
+        const size_t index = static_cast<size_t>(offset);
+        if (index >= elements->values.size()) elements->values.resize(index + 1);
+        const size_t absolute = base.file->base() + base.slot;
+        compact_element_type = base.file->type_pool[base.file->slot_types[absolute]].element;
+        compact = &elements->values[index];
+    }
+    first_dimension = 1;
     }
     }
     for (size_t index = first_dimension; compact && index < dimensions; ++index)
@@ -6384,7 +6826,9 @@ Object CifaBytecode::Machine::call_host(const std::string& name, ObjectVector& a
             else set_error(message, location);
             host.set_runtime_error(message, source);
         });
+    export_host_globals();
     Object result = function->second(arguments);
+    import_host_globals();
     Object::clear_runtime_error_reporter();
     earlier_errors.insert(host.errors.begin(), host.errors.end());
     host.errors = std::move(earlier_errors);
@@ -6407,68 +6851,422 @@ Object CifaBytecode::Machine::call_host(const std::string& name, ObjectVector& a
     return result;
 }
 
-bool CifaBytecode::Machine::call_builtin_math(const std::string& name, const ObjectVector& arguments, Object& result) const
+bool CifaBytecode::Machine::call_native_registers(const std::string& name, RegisterSlots& destination, size_t result,
+    RegisterSlots& values, const size_t* arguments, size_t count, const std::vector<SourceLocation>& locations)
 {
-    const auto builtin = host.builtin_function_generations.find(name);
-    const auto generation = host.function_generations.find(name);
-    if (builtin == host.builtin_function_generations.end() || generation == host.function_generations.end()
-        || builtin->second != generation->second) return false;
-    if (name == "abs" && arguments.size() == 1 && arguments[0].isNumber())
+    const auto found = host.native_functions.find(name);
+    if (found == host.native_functions.end()) return false;
+    if (!found->second.builtin)
     {
-        if (arguments[0].isInteger())
+        NativeCallContext context(*this, destination, result, values, arguments, count, locations);
+        found->second.function(context);
+        if (!context.result_written && !should_stop()) context.set_empty_result();
+        return true;
+    }
+    if (name == "run_string" || name == "run_file")
+    {
+        if (count != 1)
         {
-            const auto integer = arguments[0].toInt64();
-            if (integer == std::numeric_limits<std::int64_t>::min()) return false;
-            result = Object(integer < 0 ? -integer : integer);
+            set_error("function '" + name + "' expects 1 argument, got " + std::to_string(count));
+            return true;
         }
-        else result = Object(std::fabs(arguments[0].toDouble()));
+        const auto source = string_value(values, arguments[0]);
+        if (should_stop()) return true;
+        auto nested_result = name == "run_string" ? host.run_script(source) : host.run_file(source);
+        if (host.has_runtime_error())
+        {
+            error = host.get_runtime_error();
+            return true;
+        }
+        destination.import_object(result, std::move(nested_result));
         return true;
     }
-    if (arguments.size() == 1 && arguments[0].isNumber())
+    if (call_builtin_registers(name, destination, result, values, arguments, count)) return true;
+    if (count != 0) conversion_error(values, arguments[0], "valid argument for function '" + name + "'", locations.empty() ? nullptr : &locations.front());
+    else set_error("invalid arguments for function '" + name + "'", locations.empty() ? nullptr : &locations.front());
+    return true;
+}
+
+bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, RegisterSlots& destination, size_t result,
+    RegisterSlots& values, const size_t* arguments, size_t count)
+{
+    const auto text_argument = [&](size_t index, std::string& text) -> bool
     {
-        const double input = arguments[0].toDouble();
-        if (name == "sqrt") result = Object(std::sqrt(input));
-        else if (name == "cbrt") result = Object(std::cbrt(input));
-        else if (name == "round") result = Object(std::round(input));
-        else if (name == "trunc") result = Object(std::trunc(input));
-        else if (name == "nearbyint") result = Object(std::nearbyint(input));
-        else if (name == "rint") result = Object(std::rint(input));
-        else if (name == "ceil") result = Object(std::ceil(input));
-        else if (name == "floor") result = Object(std::floor(input));
-        else if (name == "sin") result = Object(std::sin(input));
-        else if (name == "cos") result = Object(std::cos(input));
-        else if (name == "tan") result = Object(std::tan(input));
-        else if (name == "asin") result = Object(std::asin(input));
-        else if (name == "acos") result = Object(std::acos(input));
-        else if (name == "atan") result = Object(std::atan(input));
-        else if (name == "sinh") result = Object(std::sinh(input));
-        else if (name == "cosh") result = Object(std::cosh(input));
-        else if (name == "tanh") result = Object(std::tanh(input));
-        else if (name == "exp") result = Object(std::exp(input));
-        else if (name == "log") result = Object(std::log(input));
-        else if (name == "log2") result = Object(std::log2(input));
-        else if (name == "log10") result = Object(std::log10(input));
-        else if (name == "erf") result = Object(std::erf(input));
-        else if (name == "erfc") result = Object(std::erfc(input));
-        else if (name == "tgamma") result = Object(std::tgamma(input));
-        else if (name == "lgamma") result = Object(std::lgamma(input));
-        else return false;
+        if (index >= count) return false;
+        BytecodeValue::Storage numeric;
+        const auto& value = values.payload(arguments[index], numeric);
+        const auto* resource = value_get_if<std::any>(&value);
+        const auto* string = resource ? std::any_cast<std::string>(resource) : nullptr;
+        if (!string) return false;
+        text = *string;
+        return true;
+    };
+    const auto format_argument = [&](size_t index, const std::string& specification, std::string& text) -> bool
+    {
+        if (index >= count) return false;
+        BytecodeValue::Storage numeric;
+        const auto& value = values.payload(arguments[index], numeric);
+        try
+        {
+            if (const auto* integer = value_get_if<std::int64_t>(&value))
+            {
+                text = specification.empty() ? std::format("{}", *integer)
+                    : std::vformat("{:" + specification + "}", std::make_format_args(*integer));
+                return true;
+            }
+            if (const auto* floating = value_get_if<double>(&value))
+            {
+                text = specification.empty() ? std::format("{}", *floating)
+                    : std::vformat("{:" + specification + "}", std::make_format_args(*floating));
+                return true;
+            }
+            if (const auto* boolean = value_get_if<bool>(&value))
+            {
+                text = specification.empty() ? (*boolean ? "true" : "false")
+                    : std::vformat("{:" + specification + "}", std::make_format_args(*boolean));
+                return true;
+            }
+            if (const auto* resource = value_get_if<std::any>(&value))
+            {
+                if (const auto* string = std::any_cast<std::string>(resource))
+                {
+                    text = specification.empty() ? *string
+                        : std::vformat("{:" + specification + "}", std::make_format_args(*string));
+                    return true;
+                }
+            }
+        }
+        catch (const std::format_error&)
+        {
+            return false;
+        }
+        return false;
+    };
+    if (name == "exit")
+    {
+        exit_requested = true;
+        destination.clear(result);
         return true;
     }
-    if (arguments.size() == 2 && arguments[0].isNumber() && arguments[1].isNumber())
+    if (name == "print" || name == "println")
     {
-        const double left = arguments[0].toDouble();
-        const double right = arguments[1].toDouble();
-        if (name == "atan2") result = Object(std::atan2(left, right));
-        else if (name == "pow") result = Object(std::pow(left, right));
-        else if (name == "hypot") result = Object(std::hypot(left, right));
-        else if (name == "fmod") result = Object(std::fmod(left, right));
-        else if (name == "remainder") result = Object(std::remainder(left, right));
-        else if (name == "copysign") result = Object(std::copysign(left, right));
-        else if (name == "fdim") result = Object(std::fdim(left, right));
-        else if (name == "fmax") result = Object(std::fmax(left, right));
-        else if (name == "fmin") result = Object(std::fmin(left, right));
+        for (size_t index = 0; index < count; ++index)
+        {
+            BytecodeValue::Storage numeric;
+            const auto& value = values.payload(arguments[index], numeric);
+            if (const auto* integer = value_get_if<std::int64_t>(&value)) std::cout << *integer;
+            else if (const auto* floating = value_get_if<double>(&value)) std::cout << *floating;
+            else if (const auto* boolean = value_get_if<bool>(&value)) std::cout << (*boolean ? 1 : 0);
+            else if (const auto* resource = value_get_if<std::any>(&value))
+            {
+                const auto* text = std::any_cast<std::string>(resource);
+                if (!text) { conversion_error(values, arguments[index], "string", nullptr); return true; }
+                std::cout << *text;
+            }
+            else { set_error("output requires a value"); return true; }
+        }
+        if (name == "println") std::cout << '\n';
+        destination.write_payload(result, static_cast<double>(count));
+        return true;
+    }
+    if (name == "to_string")
+    {
+        std::string text;
+        if (count != 0)
+        {
+            BytecodeValue::Storage numeric;
+            const auto& argument = values.payload(arguments[0], numeric);
+            if (const auto* integer = value_get_if<std::int64_t>(&argument)) text = std::format("{}", *integer);
+            else if (const auto* floating = value_get_if<double>(&argument)) text = std::format("{}", *floating);
+            else if (const auto* resource = value_get_if<std::any>(&argument))
+            {
+                const auto* string = std::any_cast<std::string>(resource);
+                if (!string) return false;
+                text = *string;
+            }
+            else return false;
+        }
+        destination.write_payload(result, std::any(std::move(text)));
+        return true;
+    }
+    if (name == "to_number")
+    {
+        if (count == 0) { destination.clear(result); return true; }
+        BytecodeValue::Storage numeric;
+        const auto& value = values.payload(arguments[0], numeric);
+        if (const auto* integer = value_get_if<std::int64_t>(&value)) destination.write_payload(result, *integer);
+        else if (const auto* floating = value_get_if<double>(&value)) destination.write_payload(result, *floating);
+        else if (const auto* boolean = value_get_if<bool>(&value)) destination.write_payload(result, std::int64_t(*boolean));
+        else if (const auto* resource = value_get_if<std::any>(&value))
+        {
+            const auto* text = std::any_cast<std::string>(resource);
+            if (!text) { conversion_error(values, arguments[0], "number", nullptr); return true; }
+            destination.write_payload(result, std::atof(text->c_str()));
+        }
+        else destination.clear(result);
+        return true;
+    }
+    if (name == "type")
+    {
+        std::string type = "empty";
+        if (count != 0)
+        {
+            const size_t slot = values.base() + arguments[0];
+            const auto& descriptor = values.type_pool[values.slot_types[slot]];
+            BytecodeValue::Storage numeric;
+            const auto& value = values.payload(arguments[0], numeric);
+            const auto* resource = value_get_if<std::any>(&value);
+            if (descriptor.special == "NoValue" || (resource && std::any_cast<Object::NoValue>(resource))) type = "NoValue";
+            else if (descriptor.bound == typeid(std::int64_t)) type = "int";
+            else if (descriptor.bound == typeid(double)) type = "double";
+            else if (descriptor.bound == typeid(bool)) type = "bool";
+            else if (!descriptor.declared.empty() && descriptor.declared != "auto")
+            {
+                type = descriptor.declared == "float" ? "double"
+                    : descriptor.declared == "char" ? "int" : descriptor.declared;
+            }
+            else if (values.bindings[slot] == RegisterSlots::NumericBinding::Int) type = "int";
+            else if (values.bindings[slot] == RegisterSlots::NumericBinding::Double) type = "double";
+            else if (!values.empty(arguments[0]))
+            {
+                if (value_holds<std::int64_t>(value)) type = "int";
+                else if (value_holds<double>(value)) type = "double";
+                else if (value_holds<bool>(value)) type = "bool";
+                else if (const auto* resource = value_get_if<std::any>(&value))
+                {
+                    if (std::any_cast<std::string>(resource)) type = "string";
+                    else if (std::any_cast<VmArray>(resource)) type = "array";
+                    else if (std::any_cast<VmMap>(resource)) type = "map";
+                    else type = resource->type().name();
+                }
+            }
+        }
+        destination.write_payload(result, std::any(std::move(type)));
+        return true;
+    }
+    if (name == "size")
+    {
+        if (count == 0) { destination.write_payload(result, std::int64_t{0}); return true; }
+        if (count != 1) { set_error("function 'size' expects 0 or 1 arguments, got " + std::to_string(count)); return true; }
+        BytecodeValue::Storage numeric;
+        const auto& value = values.payload(arguments[0], numeric);
+        const auto* resource = value_get_if<std::any>(&value);
+        if (const auto* text = resource ? std::any_cast<std::string>(resource) : nullptr)
+            destination.write_payload(result, static_cast<std::int64_t>(text->size()));
+        else if (const auto* array = resource ? std::any_cast<VmArray>(resource) : nullptr)
+            destination.write_payload(result, static_cast<std::int64_t>(array->values.size()));
+        else if (const auto* map = resource ? std::any_cast<VmMap>(resource) : nullptr)
+            destination.write_payload(result, static_cast<std::int64_t>(map->values.size()));
+        else conversion_error(values, arguments[0], "string, array, or map", nullptr);
+        return true;
+    }
+    if (name == "sprintf")
+    {
+        std::string format;
+        if (count == 0) { destination.write_payload(result, std::any(format)); return true; }
+        if (!text_argument(0, format)) { conversion_error(values, arguments[0], "string", nullptr); return true; }
+        std::string output;
+        size_t argument_index = 1;
+        for (size_t index = 0; index < format.size();)
+        {
+            if (format[index] != '%') { output += format[index++]; continue; }
+            if (index + 1 < format.size() && format[index + 1] == '%') { output += '%'; index += 2; continue; }
+            const size_t specification_begin = index++;
+            while (index < format.size() && std::string_view("-+ #0").find(format[index]) != std::string_view::npos) ++index;
+            while (index < format.size() && std::isdigit(static_cast<unsigned char>(format[index]))) ++index;
+            if (index < format.size() && format[index] == '.')
+            {
+                ++index;
+                while (index < format.size() && std::isdigit(static_cast<unsigned char>(format[index]))) ++index;
+            }
+            while (index < format.size() && std::string_view("hlLzjtq").find(format[index]) != std::string_view::npos) ++index;
+            if (index >= format.size()) break;
+            const char conversion = format[index++];
+            if (argument_index >= count) continue;
+            std::string base = "%";
+            for (size_t position = specification_begin + 1; position + 1 < index; ++position)
+                if (std::string_view("hlLzjtq").find(format[position]) == std::string_view::npos) base += format[position];
+            char buffer[512] = {};
+            BytecodeValue::Storage numeric;
+            const auto& value = values.payload(arguments[argument_index++], numeric);
+            if (conversion == 's')
+            {
+                const auto* resource = value_get_if<std::any>(&value);
+                const auto* string = resource ? std::any_cast<std::string>(resource) : nullptr;
+                if (!string) { conversion_error(values, arguments[argument_index - 1], "string", nullptr); return true; }
+                std::snprintf(buffer, sizeof(buffer), (base + 's').c_str(), string->c_str());
+            }
+            else if (conversion == 'd' || conversion == 'i' || conversion == 'u' || conversion == 'o' || conversion == 'x' || conversion == 'X')
+            {
+                std::int64_t integer = 0;
+                if (!values.integer(arguments[argument_index - 1], integer)) { conversion_error(values, arguments[argument_index - 1], "int", nullptr); return true; }
+                if (conversion == 'd' || conversion == 'i')
+                    std::snprintf(buffer, sizeof(buffer), (base + (conversion == 'd' ? "lld" : "lli")).c_str(), static_cast<long long>(integer));
+                else std::snprintf(buffer, sizeof(buffer), (base + "ll" + conversion).c_str(), static_cast<unsigned long long>(integer));
+            }
+            else
+            {
+                std::int64_t integer = 0;
+                double floating = 0;
+                bool is_double = false;
+                if (!values.number(arguments[argument_index - 1], integer, floating, is_double)) { conversion_error(values, arguments[argument_index - 1], "double", nullptr); return true; }
+                std::snprintf(buffer, sizeof(buffer), (base + conversion).c_str(), is_double ? floating : static_cast<double>(integer));
+            }
+            output += buffer;
+        }
+        destination.write_payload(result, std::any(std::move(output)));
+        return true;
+    }
+    if (name == "format")
+    {
+        std::string format;
+        if (count == 0) { destination.write_payload(result, std::any(format)); return true; }
+        if (!text_argument(0, format)) { conversion_error(values, arguments[0], "string", nullptr); return true; }
+        std::string output;
+        size_t automatic_index = 0;
+        for (size_t index = 0; index < format.size();)
+        {
+            if (format[index] == '{' && index + 1 < format.size() && format[index + 1] == '{') { output += '{'; index += 2; continue; }
+            if (format[index] == '}' && index + 1 < format.size() && format[index + 1] == '}') { output += '}'; index += 2; continue; }
+            if (format[index] != '{') { output += format[index++]; continue; }
+            const size_t end = format.find('}', index + 1);
+            if (end == std::string::npos) { output += format[index++]; continue; }
+            const std::string inner = format.substr(index + 1, end - index - 1);
+            const size_t colon = inner.find(':');
+            const std::string index_text = inner.substr(0, colon);
+            const std::string specification = colon == std::string::npos ? std::string{} : inner.substr(colon + 1);
+            size_t value_index = automatic_index++;
+            if (!index_text.empty())
+            {
+                if (!std::all_of(index_text.begin(), index_text.end(), [](unsigned char character) { return std::isdigit(character) != 0; }))
+                { output += format[index++]; continue; }
+                value_index = static_cast<size_t>(std::stoull(index_text));
+            }
+            std::string formatted;
+            if (value_index + 1 < count && format_argument(value_index + 1, specification, formatted)) output += formatted;
+            index = end + 1;
+        }
+        destination.write_payload(result, std::any(std::move(output)));
+        return true;
+    }
+    if (name == "ifv" || name == "ifvalue")
+    {
+        if (count != 3)
+        {
+            set_error("function '" + name + "' expects 3 arguments, got " + std::to_string(count));
+            return true;
+        }
+        const bool selected = condition(values, arguments[0], nullptr);
+        if (!should_stop()) destination.copy(result, values, arguments[selected ? 1 : 2]);
+        return true;
+    }
+    if (name == "max" || name == "min")
+    {
+        if (count == 0) { destination.clear(result); return true; }
+        std::int64_t best_integer = 0;
+        double best_floating = 0;
+        bool best_double = false;
+        if (!values.number(arguments[0], best_integer, best_floating, best_double))
+        { conversion_error(values, arguments[0], "number", nullptr); return true; }
+        bool any_double = best_double;
+        for (size_t index = 1; index < count; ++index)
+        {
+            std::int64_t integer = 0;
+            double floating = 0;
+            bool is_double = false;
+            if (!values.number(arguments[index], integer, floating, is_double))
+            { conversion_error(values, arguments[index], "number", nullptr); return true; }
+            const bool greater = !is_double && !best_double ? integer > best_integer
+                : (is_double ? floating : static_cast<double>(integer))
+                    > (best_double ? best_floating : static_cast<double>(best_integer));
+            const bool less = !is_double && !best_double ? integer < best_integer
+                : (is_double ? floating : static_cast<double>(integer))
+                    < (best_double ? best_floating : static_cast<double>(best_integer));
+            if ((name == "max" && greater) || (name == "min" && less))
+            {
+                best_integer = integer;
+                best_floating = floating;
+                best_double = is_double;
+            }
+            any_double = any_double || is_double;
+        }
+        destination.write_payload(result, any_double
+            ? BytecodeValue::Storage(best_double ? best_floating : static_cast<double>(best_integer))
+            : BytecodeValue::Storage(best_integer));
+        return true;
+    }
+    if (name == "abs" && count == 1)
+    {
+        std::int64_t integer = 0;
+        double floating = 0;
+        bool is_double = false;
+        if (!values.number(arguments[0], integer, floating, is_double)) return false;
+        if (!is_double)
+        {
+            if (integer == std::numeric_limits<std::int64_t>::min()) return false;
+            destination.write_payload(result, integer < 0 ? -integer : integer);
+        }
+        else destination.write_payload(result, std::fabs(floating));
+        return true;
+    }
+    if (count == 1)
+    {
+        std::int64_t integer = 0;
+        double input = 0;
+        bool is_double = false;
+        if (!values.number(arguments[0], integer, input, is_double)) return false;
+        if (!is_double) input = static_cast<double>(integer);
+        double output = 0;
+        if (name == "sqrt") output = std::sqrt(input);
+        else if (name == "cbrt") output = std::cbrt(input);
+        else if (name == "round") output = std::round(input);
+        else if (name == "trunc") output = std::trunc(input);
+        else if (name == "nearbyint") output = std::nearbyint(input);
+        else if (name == "rint") output = std::rint(input);
+        else if (name == "ceil") output = std::ceil(input);
+        else if (name == "floor") output = std::floor(input);
+        else if (name == "sin") output = std::sin(input);
+        else if (name == "cos") output = std::cos(input);
+        else if (name == "tan") output = std::tan(input);
+        else if (name == "asin") output = std::asin(input);
+        else if (name == "acos") output = std::acos(input);
+        else if (name == "atan") output = std::atan(input);
+        else if (name == "sinh") output = std::sinh(input);
+        else if (name == "cosh") output = std::cosh(input);
+        else if (name == "tanh") output = std::tanh(input);
+        else if (name == "exp") output = std::exp(input);
+        else if (name == "log") output = std::log(input);
+        else if (name == "log2") output = std::log2(input);
+        else if (name == "log10") output = std::log10(input);
+        else if (name == "erf") output = std::erf(input);
+        else if (name == "erfc") output = std::erfc(input);
+        else if (name == "tgamma") output = std::tgamma(input);
+        else if (name == "lgamma") output = std::lgamma(input);
         else return false;
+        destination.write_payload(result, output);
+        return true;
+    }
+    if (count == 2)
+    {
+        std::int64_t left_integer = 0, right_integer = 0;
+        double left = 0, right = 0;
+        bool left_double = false, right_double = false;
+        if (!values.number(arguments[0], left_integer, left, left_double)
+            || !values.number(arguments[1], right_integer, right, right_double)) return false;
+        if (!left_double) left = static_cast<double>(left_integer);
+        if (!right_double) right = static_cast<double>(right_integer);
+        double output = 0;
+        if (name == "atan2") output = std::atan2(left, right);
+        else if (name == "pow") output = std::pow(left, right);
+        else if (name == "hypot") output = std::hypot(left, right);
+        else if (name == "fmod") output = std::fmod(left, right);
+        else if (name == "remainder") output = std::remainder(left, right);
+        else if (name == "copysign") output = std::copysign(left, right);
+        else if (name == "fdim") output = std::fdim(left, right);
+        else if (name == "fmax") output = std::fmax(left, right);
+        else if (name == "fmin") output = std::fmin(left, right);
+        else return false;
+        destination.write_payload(result, output);
         return true;
     }
     return false;
@@ -6481,21 +7279,23 @@ CifaBytecode::Machine::NamedValueRef CifaBytecode::Machine::named_value(const st
         if (auto* binding = scope->find(name))
         {
             auto& file = *binding->file;
-            return {&file, binding->slot, nullptr,
+            return {&file, binding->slot,
                 file.type_pool[file.slot_types[file.base() + binding->slot]].element, true};
         }
     }
-    const auto global = host.global_variables.find(name);
-    if (global != host.global_variables.end())
+    const size_t global_slot = find_global_slot(name);
+    if (global_slot != std::numeric_limits<size_t>::max() && global_exists_at(global_slot))
     {
-        return {nullptr, 0, &global->second, global->second.element_type_name, true};
+        const size_t index = global_values.base() + global_slot;
+        return {&global_values, global_slot,
+            global_values.type_pool[global_values.slot_types[index]].element, true};
     }
     if (!scopes.empty())
     {
         auto& binding = scopes.back().create(name);
-        return {binding.file, binding.slot, nullptr, {}, false};
+        return {binding.file, binding.slot, {}, false};
     }
-    return {nullptr, 0, &host.global_variables[name], {}, false};
+    return assign_named(name, "", false, false, {});
 }
 
 void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot, const std::string& name, const SourceLocation& location,
@@ -6510,57 +7310,6 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         return std::int64_t(0);
     };
     auto* container = receiver.resource();
-    if (auto* array = receiver.global && container ? std::any_cast<ObjectVector>(container) : nullptr)
-    {
-        auto& values = *array;
-        if (name == "push_back")
-        {
-            for (size_t index = 0; index < locations.size(); ++index)
-            {
-                Object value;
-                arguments.export_argument(index, value);
-                if (!receiver.element_type.empty()) value = convert_type(value, receiver.element_type, locations[index]);
-                if (should_stop()) return;
-                values.push_back(std::move(value));
-            }
-        }
-        else if (name == "pop_back") { if (!values.empty()) values.pop_back(); }
-        else if (name == "resize") { if (!locations.empty()) values.resize(static_cast<size_t>(integer_argument(0))); }
-        else if (name == "insert" && locations.size() >= 2)
-        {
-            const auto requested = integer_argument(0);
-            const auto position = static_cast<size_t>(std::clamp<int64_t>(requested, 0, static_cast<int64_t>(values.size())));
-            Object value;
-            arguments.export_argument(1, value);
-            if (!receiver.element_type.empty()) value = convert_type(value, receiver.element_type, locations[1]);
-            if (should_stop()) return;
-            values.insert(values.begin() + position, std::move(value));
-        }
-        else if (name == "erase" && !locations.empty())
-        {
-            const auto index = integer_argument(0);
-            if (index >= 0 && static_cast<size_t>(index) < values.size()) values.erase(values.begin() + index);
-        }
-        else if (name == "clear") values.clear();
-        else if (name == "contains")
-        {
-            if (!locations.empty())
-            {
-                Object sought;
-                arguments.export_argument(0, sought);
-                for (const auto& value : values)
-                    if (host.equal(value, sought).toBool()) { destination.write_payload(slot, 1.0); return; }
-            }
-            destination.write_payload(slot, 0.0);
-            return;
-        }
-        else if (name == "keys") { set_error("keys() is not supported on arrays", &location); return; }
-        else if (name != "push_back" && name != "pop_back" && name != "resize"
-            && name != "insert" && name != "erase" && name != "clear")
-        { set_error(name + "() is not supported on arrays", &location); return; }
-        destination.write_payload(slot, double(values.size()));
-        return;
-    }
     if (auto* array = container ? std::any_cast<VmArray>(container) : nullptr)
     {
         auto& values = array->values;
@@ -6656,9 +7405,9 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         else set_error(name + "() is not supported on arrays", &location);
         return;
     }
-    if (auto* map = container ? std::any_cast<ObjectMap>(container) : nullptr)
+    if (auto* map = container ? std::any_cast<VmMap>(container) : nullptr)
     {
-        auto& values = *map;
+        auto& values = map->values;
         if (name == "erase")
         {
             if (!locations.empty()) values.erase(string_value(arguments, 0));
@@ -6686,6 +7435,12 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
 
 Object CifaBytecode::run_module(Machine& machine, const Module& module)
 {
+    machine.import_host_globals();
+    struct ExportGlobals
+    {
+        Machine& machine;
+        ~ExportGlobals() { machine.export_host_globals(); }
+    } export_globals{machine};
     machine.publish(std::shared_ptr<const Module>(&module, [](const Module*) { }));
     Object result;
     execute_instructions(machine, module, module.root_instructions, result);
@@ -6702,13 +7457,25 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
 {
     code.runtime_error.clear();
     auto& vm = *machine;
+    vm.import_host_globals();
+    struct ExportGlobals
+    {
+        Machine& machine;
+        ~ExportGlobals() { machine.export_host_globals(); }
+    } export_globals{vm};
     const bool nested = active;
     auto saved_scopes = std::move(vm.scopes);
     auto saved_returns = std::move(vm.returns);
     auto saved_call_stack = std::move(vm.call_stack);
     auto saved_append_diagnostic_frames = std::move(vm.append_diagnostic_frames);
     auto saved_error = std::move(vm.error);
+    RegisterSlots saved_registers;
     const bool saved_exit_requested = vm.exit_requested;
+    if (nested)
+    {
+        saved_registers = std::move(vm.registers);
+        vm.registers = RegisterSlots{};
+    }
     vm.scopes.clear();
     vm.returns.clear();
     vm.call_stack.clear();
@@ -6726,6 +7493,7 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
         std::vector<std::pair<const SourceLocation*, bool>> call_stack;
         std::function<void(std::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
         std::string error;
+        RegisterSlots registers;
         bool exit_requested;
         ~RestoreNestedState()
         {
@@ -6739,19 +7507,20 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
             machine.call_stack = std::move(call_stack);
             machine.append_diagnostic_frames = std::move(append_diagnostic_frames);
             machine.error = std::move(error);
+            machine.registers = std::move(registers);
             machine.exit_requested = exit_requested;
         }
     } restore{*this, vm, nested, std::move(saved_scopes), std::move(saved_returns), std::move(saved_call_stack),
-        std::move(saved_append_diagnostic_frames), std::move(saved_error), saved_exit_requested};
+        std::move(saved_append_diagnostic_frames), std::move(saved_error), std::move(saved_registers), saved_exit_requested};
     if (!code.valid())
     {
         vm.set_error(code.translation_error.empty() ? "cannot run an invalid bytecode module" : code.translation_error);
         code.runtime_error = vm.error;
         return vm.error_result();
     }
-    if (code.module_data->host_function_version != 0 && code.module_data->host_function_version != vm.host.function_version)
+    if (code.module_data->host_function_version != 0 && code.module_data->host_function_version != vm.host.native_function_version)
     {
-        vm.set_error("host functions changed after optimized bytecode compilation");
+        vm.set_error("native functions changed after optimized bytecode compilation");
         code.runtime_error = vm.error;
         return vm.error_result();
     }
@@ -6830,13 +7599,18 @@ size_t CifaBytecode::Session::script_function_version() const
     return machine->function_version;
 }
 
+void CifaBytecode::Session::sync_globals_to_host()
+{
+    if (active) machine->export_host_globals();
+}
+
 bool CifaBytecode::compile_script(std::string script)
 {
     if (compiled_valid || !translation_error.empty()) return false;
     prepare_compile_visibility();
     const bool parsed = compile_script_internal(std::move(script));
     clear_compile_visibility();
-    if (parsed) translate(*this, session->script_function_version());
+    if (parsed) translate(*this, session->script_function_version(), native_function_version);
     return valid() && !has_error();
 }
 
@@ -6846,8 +7620,34 @@ bool CifaBytecode::compile_file(const std::string& filename)
     prepare_compile_visibility();
     const bool parsed = compile_file_internal(filename);
     clear_compile_visibility();
-    if (parsed) translate(*this, session->script_function_version());
+    if (parsed) translate(*this, session->script_function_version(), native_function_version);
     return valid() && !has_error();
+}
+
+CifaBytecode::BytecodeStatistics CifaBytecode::bytecode_statistics() const
+{
+    BytecodeStatistics statistics;
+    statistics.instruction_size = sizeof(Instruction);
+    statistics.root_instruction_count = module_data->root_instructions.code.size();
+    statistics.root_operand_count = module_data->root_instructions.register_inputs.size();
+    statistics.root_register_capacity = module_data->root_instructions.register_capacity;
+    statistics.constant_count = module_data->constants.size();
+    statistics.call_site_count = module_data->calls.size();
+    statistics.total_instruction_count = statistics.root_instruction_count;
+    statistics.total_operand_count = statistics.root_operand_count;
+    for (const auto& [name, overloads] : module_data->function_code)
+    {
+        for (const auto& [arity, function] : overloads)
+        {
+            statistics.functions.push_back({name, arity, function->instructions.code.size(),
+                function->instructions.register_inputs.size(), function->instructions.register_capacity});
+            statistics.total_instruction_count += function->instructions.code.size();
+            statistics.total_operand_count += function->instructions.register_inputs.size();
+        }
+    }
+    std::ranges::sort(statistics.functions, {}, [](const BytecodeStatistics::Function& function)
+        { return std::pair(function.name, function.arity); });
+    return statistics;
 }
 
 Object CifaBytecode::run(const std::string& entry_label)
@@ -6871,11 +7671,22 @@ Object CifaBytecode::run_script(std::string script)
     auto nested = std::make_unique<CifaBytecode>();
     nested->set_output_error(false);
     nested->set_optimization_enabled(optimization_enabled);
+    session->sync_globals_to_host();
+    const bool preserve_errors = session->is_active();
+    ErrorSet earlier_errors;
+    if (preserve_errors) earlier_errors = std::move(errors);
     prepare_compile_visibility();
     const bool parsed = compile_script_internal(std::move(script));
     clear_compile_visibility();
-    if (!parsed || has_error()) return Object("", "Error");
-    nested->translate(*this, session->script_function_version());
+    const bool compile_error = !parsed || has_error();
+    if (preserve_errors)
+    {
+        auto current_errors = std::move(errors);
+        errors = std::move(earlier_errors);
+        errors.insert(std::make_move_iterator(current_errors.begin()), std::make_move_iterator(current_errors.end()));
+    }
+    if (compile_error) return Object("", "Error");
+    nested->translate(*this, session->script_function_version(), native_function_version);
     if (!nested->valid()) return Object("", "Error");
     const auto result = session->run(*nested);
     if (nested->has_runtime_error()) runtime_error = nested->get_runtime_error();
@@ -6894,11 +7705,22 @@ Object CifaBytecode::run_file(const std::string& filename)
     auto nested = std::make_unique<CifaBytecode>();
     nested->set_output_error(false);
     nested->set_optimization_enabled(optimization_enabled);
+    session->sync_globals_to_host();
+    const bool preserve_errors = session->is_active();
+    ErrorSet earlier_errors;
+    if (preserve_errors) earlier_errors = std::move(errors);
     prepare_compile_visibility();
     const bool parsed = compile_file_internal(filename);
     clear_compile_visibility();
-    if (!parsed || has_error()) return Object("", "Error");
-    nested->translate(*this, session->script_function_version());
+    const bool compile_error = !parsed || has_error();
+    if (preserve_errors)
+    {
+        auto current_errors = std::move(errors);
+        errors = std::move(earlier_errors);
+        errors.insert(std::make_move_iterator(current_errors.begin()), std::make_move_iterator(current_errors.end()));
+    }
+    if (compile_error) return Object("", "Error");
+    nested->translate(*this, session->script_function_version(), native_function_version);
     if (!nested->valid()) return Object("", "Error");
     const auto result = session->run(*nested);
     if (nested->has_runtime_error()) runtime_error = nested->get_runtime_error();
@@ -6911,12 +7733,14 @@ void CifaBytecode::prepare_compile_visibility()
     session->copy_catalog(persistent_functions, persistent_struct_defs);
     compile_visible_functions = &persistent_functions;
     compile_visible_struct_defs = &persistent_struct_defs;
+    compile_visible_host_functions = &native_function_names;
 }
 
 void CifaBytecode::clear_compile_visibility()
 {
     compile_visible_functions = nullptr;
     compile_visible_struct_defs = nullptr;
+    compile_visible_host_functions = nullptr;
 }
 }
 

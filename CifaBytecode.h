@@ -92,30 +92,12 @@ class CifaBytecode : public Cifa
         size_t scope_capacity = 0;
     };
     struct VmArray;
-    struct CompactValue
+    struct VmMap;
+    struct CompactValue : Object::Storage
     {
-        enum class Tag : std::uint8_t { Empty, Integer, Floating, Boolean, Resource };
-        struct Resource
-        {
-            std::any value;
-            explicit Resource(std::any payload) : value(std::move(payload)) {}
-        };
-        union Payload
-        {
-            std::uint64_t bits;
-            std::int64_t integer;
-            double floating;
-            bool boolean;
-            Resource* resource;
-            constexpr Payload() : bits(0) {}
-        } payload;
-        Tag tag = Tag::Empty;
-
         CompactValue() = default;
-        CompactValue(std::monostate) {}
-        CompactValue(std::int64_t value);
-        CompactValue(double value);
-        CompactValue(bool value);
+        using Object::Storage::Storage;
+        using Object::Storage::operator=;
         explicit CompactValue(std::any value);
         CompactValue(const Object::Storage& value);
         CompactValue(Object::Storage&& value);
@@ -123,14 +105,9 @@ class CifaBytecode : public Cifa
         CompactValue(CompactValue&& other) noexcept;
         CompactValue& operator=(const CompactValue& other);
         CompactValue& operator=(CompactValue&& other) noexcept;
-        ~CompactValue();
 
-        void clear();
-        bool empty() const { return tag == Tag::Empty; }
-        size_t index() const { return static_cast<size_t>(tag); }
-        std::int64_t integer() const { return payload.integer; }
-        double floating() const { return payload.floating; }
-        bool boolean() const { return payload.boolean; }
+        void clear() { emplace<std::monostate>(); }
+        bool empty() const { return std::holds_alternative<std::monostate>(*this); }
         static std::any import_resource(const std::any& value);
         static std::any import_resource(std::any&& value);
         static std::any export_resource(const std::any& value);
@@ -138,29 +115,21 @@ class CifaBytecode : public Cifa
         Object::Storage take_storage();
         template<class T> T* resource()
         {
-            return tag == Tag::Resource ? std::any_cast<T>(&payload.resource->value) : nullptr;
+            auto* value = std::get_if<std::any>(this);
+            return value ? std::any_cast<T>(value) : nullptr;
         }
         template<class T> const T* resource() const
         {
-            return tag == Tag::Resource ? std::any_cast<T>(&payload.resource->value) : nullptr;
+            const auto* value = std::get_if<std::any>(this);
+            return value ? std::any_cast<T>(value) : nullptr;
         }
         template<class T> bool holds() const
         {
-            if constexpr (std::same_as<T, std::monostate>) return tag == Tag::Empty;
-            else if constexpr (std::same_as<T, std::int64_t>) return tag == Tag::Integer;
-            else if constexpr (std::same_as<T, double>) return tag == Tag::Floating;
-            else if constexpr (std::same_as<T, bool>) return tag == Tag::Boolean;
-            else if constexpr (std::same_as<T, std::any>) return tag == Tag::Resource;
-            else return false;
+            return std::holds_alternative<T>(*this);
         }
         template<class T> T* get_if()
         {
-            if (!holds<T>()) return nullptr;
-            if constexpr (std::same_as<T, std::int64_t>) return &payload.integer;
-            else if constexpr (std::same_as<T, double>) return &payload.floating;
-            else if constexpr (std::same_as<T, bool>) return &payload.boolean;
-            else if constexpr (std::same_as<T, std::any>) return &payload.resource->value;
-            else return nullptr;
+            return std::get_if<T>(this);
         }
         template<class T> const T* get_if() const
         {
@@ -168,19 +137,76 @@ class CifaBytecode : public Cifa
         }
         template<class T> T& get() { return *get_if<T>(); }
         template<class T> const T& get() const { return *get_if<T>(); }
-        template<class T> void emplace()
-        {
-            static_assert(std::same_as<T, std::monostate>);
-            clear();
-        }
+        using Object::Storage::emplace;
     };
-    static_assert(sizeof(CompactValue) == 16);
+    static_assert(sizeof(CompactValue) == sizeof(Object::Storage));
     struct VmArray
     {
-        std::vector<CompactValue> values;
+        struct Values
+        {
+            using Container = std::vector<CompactValue>;
+            using const_iterator = Container::const_iterator;
+            std::shared_ptr<Container> storage;
+
+            Values();
+            explicit Values(size_t size);
+            explicit Values(Container elements);
+            size_t size() const { return storage->size(); }
+            size_t capacity() const { return storage->capacity(); }
+            bool empty() const { return storage->empty(); }
+            operator const Container&() const { return *storage; }
+            const CompactValue& operator[](size_t index) const { return (*storage)[index]; }
+            CompactValue& operator[](size_t index) { return writable()[index]; }
+            const CompactValue& front() const { return storage->front(); }
+            CompactValue& front() { return writable().front(); }
+            const_iterator begin() const { return storage->begin(); }
+            const_iterator end() const { return storage->end(); }
+            const_iterator begin() { return storage->begin(); }
+            const_iterator end() { return storage->end(); }
+            void resize(size_t size) { writable().resize(size); }
+            void clear() { writable().clear(); }
+            void push_back(CompactValue value) { writable().push_back(std::move(value)); }
+            template<class... Arguments> void emplace_back(Arguments&&... arguments)
+            {
+                writable().emplace_back(std::forward<Arguments>(arguments)...);
+            }
+            void pop_back() { writable().pop_back(); }
+            Container::iterator insert(const_iterator position, CompactValue value);
+            Container::iterator erase(const_iterator position);
+
+        private:
+            Container& writable();
+        };
+        Values values;
         VmArray() = default;
         explicit VmArray(size_t size) : values(size) {}
         explicit VmArray(std::vector<CompactValue> elements) : values(std::move(elements)) {}
+    };
+    struct VmMap
+    {
+        struct Values
+        {
+            using Container = ObjectMap;
+            using const_iterator = Container::const_iterator;
+            std::shared_ptr<Container> storage;
+
+            Values();
+            explicit Values(Container elements);
+            size_t size() const { return storage->size(); }
+            bool contains(const std::string& key) const { return storage->find(key) != storage->end(); }
+            const_iterator begin() const { return storage->begin(); }
+            const_iterator end() const { return storage->end(); }
+            Object& operator[](const std::string& key) { return writable()[key]; }
+            size_t erase(const std::string& key) { return writable().erase(key); }
+            void clear() { writable().clear(); }
+            const Container& readable() const { return *storage; }
+
+        private:
+            Container& writable();
+        };
+        Values values;
+        VmMap() = default;
+        explicit VmMap(ObjectMap elements) : values(std::move(elements)) {}
     };
     template<class T> static bool value_holds(const CompactValue& value) { return value.holds<T>(); }
     template<class T> static T* value_get_if(CompactValue* value) { return value ? value->get_if<T>() : nullptr; }
@@ -212,7 +238,7 @@ class CifaBytecode : public Cifa
         using Storage = CompactValue;
         Storage value;
     };
-    static_assert(sizeof(BytecodeValue) == 16);
+    static_assert(sizeof(BytecodeValue) == sizeof(BytecodeValue::Storage));
     struct ConstantValue
     {
         BytecodeValue::Storage value;
@@ -286,6 +312,7 @@ class CifaBytecode : public Cifa
         void enter(size_t count);
         size_t append();
         void restore(size_t base, size_t size, size_t top);
+        void export_object(size_t slot, Object& destination) const;
         void export_argument(size_t slot, Object& destination);
         void import_object(size_t slot, const Object& value);
         void import_object(size_t slot, Object&& value);
@@ -293,7 +320,7 @@ class CifaBytecode : public Cifa
         void clear(size_t slot);
         void set_name(size_t slot, const std::string& name);
         void set_type(size_t slot, const TypeDescriptor& type);
-        BytecodeValue::Storage payload(size_t slot) const;
+        const BytecodeValue::Storage& payload(size_t slot) const;
         const BytecodeValue::Storage& payload(size_t slot, BytecodeValue::Storage& numeric) const;
         BytecodeValue::Storage& resource_payload(size_t slot);
         void release_payload(size_t slot);
@@ -437,6 +464,9 @@ class CifaBytecode : public Cifa
         };
         CifaBytecode& host;
         RegisterSlots registers;
+        RegisterSlots global_values;
+        std::unordered_map<std::string, size_t> global_slots;
+        std::vector<bool> global_exists;
         ScopeStack scopes;
         std::unordered_map<std::string, std::unordered_map<size_t, std::shared_ptr<const Module>>> functions;
         struct CachedFunction
@@ -459,14 +489,12 @@ class CifaBytecode : public Cifa
         {
             RegisterSlots* file = nullptr;
             size_t slot = 0;
-            Object* global = nullptr;
             std::string element_type;
             bool existed = false;
 
             std::any* resource()
             {
-                if (file) return file->resource_payload(slot).get_if<std::any>();
-                return global ? value_get_if<std::any>(&global->value) : nullptr;
+                return file ? file->resource_payload(slot).get_if<std::any>() : nullptr;
             }
             const std::any* resource() const
             {
@@ -474,19 +502,15 @@ class CifaBytecode : public Cifa
             }
             bool empty() const
             {
-                return file ? file->empty(slot) : !global || value_holds<std::monostate>(global->value);
+                return !file || file->empty(slot);
             }
             std::optional<size_t> size() const
             {
                 const auto* value = resource();
                 if (!value) return std::nullopt;
                 if (const auto* text = std::any_cast<std::string>(value)) return text->size();
-                if (const auto* map = std::any_cast<ObjectMap>(value)) return map->size();
-                if (file)
-                {
-                    if (const auto* array = std::any_cast<VmArray>(value)) return array->values.size();
-                }
-                else if (const auto* array = std::any_cast<ObjectVector>(value)) return array->size();
+                if (const auto* map = std::any_cast<VmMap>(value)) return map->values.size();
+                if (const auto* array = std::any_cast<VmArray>(value)) return array->values.size();
                 return std::nullopt;
             }
         };
@@ -496,9 +520,16 @@ class CifaBytecode : public Cifa
             Object* object = nullptr;
             std::string name;
             std::string element_type;
+            RegisterSlots* file = nullptr;
+            size_t slot = 0;
         };
 
         explicit Machine(CifaBytecode& value_host) : host(value_host) { }
+    size_t ensure_global_slot(const std::string& name);
+    size_t find_global_slot(const std::string& name) const;
+    bool global_exists_at(size_t slot) const;
+    void import_host_globals();
+    void export_host_globals();
         void publish(const std::shared_ptr<const Module>& module);
         const FunctionCode* find_function(const std::string& name, size_t arity, std::shared_ptr<const Module>& owner) const;
         const FunctionCode* find_cached_function(const CallSite& call, const std::string& name, size_t arity,
@@ -510,10 +541,10 @@ class CifaBytecode : public Cifa
         Object error_result() const { return Object("RuntimeError", "Error"); }
         Scope::Binding* find_slot(const std::string& name);
         NamedValueRef named_value(const std::string& name);
-        Object& resolve_member(const std::string& base_name, const std::string& field_name);
+        IndexedValueRef resolve_member(const std::string& base_name, const std::string& field_name);
         void read_named(RegisterSlots& destination, size_t slot, const std::string& name, const std::string& type_name, bool with_type, bool only_check,
             bool initialize_struct, const SourceLocation& location);
-        Object& assign_named(const std::string& name, const std::string& type_name, bool with_type, bool declare_current,
+        NamedValueRef assign_named(const std::string& name, const std::string& type_name, bool with_type, bool declare_current,
             const SourceLocation& location);
         bool assign(Object& target, Object value, bool with_type, const std::string& type_name, const SourceLocation& location);
         bool assign(RegisterSlots& destination, size_t target, RegisterSlots& source, size_t slot,
@@ -530,7 +561,11 @@ class CifaBytecode : public Cifa
             RegisterSlots& destination, size_t target);
         bool bind_range(RegisterSlots& values, size_t slot, const std::string& name, const std::string& type_name, const SourceLocation& location);
         Object call_host(const std::string& name, ObjectVector& arguments, const std::vector<SourceLocation>& locations);
-        bool call_builtin_math(const std::string& name, const ObjectVector& arguments, Object& result) const;
+        bool call_native_registers(const std::string& name, RegisterSlots& destination, size_t result,
+            RegisterSlots& values, const size_t* arguments, size_t count,
+            const std::vector<SourceLocation>& locations);
+        bool call_builtin_registers(const std::string& name, RegisterSlots& destination, size_t result,
+            RegisterSlots& values, const size_t* arguments, size_t count);
         void call_method(RegisterSlots& destination, size_t slot, const std::string& name, const SourceLocation& location,
             NamedValueRef& receiver, const std::vector<SourceLocation>& locations, RegisterSlots& arguments);
         IndexedValueRef indexed(const std::string& name, const std::string& type_name, size_t dimensions, bool is_decl_array,
@@ -605,6 +640,76 @@ class CifaBytecode : public Cifa
     static Object run_module(Machine& machine, const Module& module);
 
 public:
+    class NativeCallContext
+    {
+        friend struct Machine;
+        Machine& machine;
+        RegisterSlots& destination;
+        RegisterSlots& arguments;
+        const size_t* argument_slots;
+        const std::vector<SourceLocation>& locations;
+        size_t result_slot;
+        size_t argument_count_value;
+        bool result_written = false;
+
+        NativeCallContext(Machine& value_machine, RegisterSlots& value_destination, size_t value_result_slot,
+            RegisterSlots& value_arguments, const size_t* value_argument_slots, size_t value_argument_count,
+            const std::vector<SourceLocation>& value_locations);
+
+    public:
+        size_t argument_count() const { return argument_count_value; }
+        bool is_empty(size_t index) const;
+        bool is_integer(size_t index) const;
+        bool is_number(size_t index) const;
+        bool is_boolean(size_t index) const;
+        bool is_string(size_t index) const;
+        std::int64_t to_integer(size_t index) const;
+        double to_number(size_t index) const;
+        bool to_boolean(size_t index) const;
+        std::string to_string(size_t index) const;
+        template<class T> const T* resource(size_t index) const
+        {
+            if (index >= argument_count_value) return nullptr;
+            BytecodeValue::Storage numeric;
+            const auto& value = arguments.payload(argument_slots[index], numeric);
+            const auto* payload = value_get_if<std::any>(&value);
+            return payload ? std::any_cast<T>(payload) : nullptr;
+        }
+        void set_result(std::int64_t value);
+        void set_result(double value);
+        void set_result(bool value);
+        void set_result(std::string value);
+        template<class T> void set_resource(T value)
+        {
+            destination.write_payload(result_slot, std::any(std::move(value)));
+            result_written = true;
+        }
+        void set_empty_result();
+        void report_error(const std::string& message);
+    };
+    using native_func_type = std::function<void(NativeCallContext&)>;
+
+    struct BytecodeStatistics
+    {
+        struct Function
+        {
+            std::string name;
+            size_t arity = 0;
+            size_t instruction_count = 0;
+            size_t operand_count = 0;
+            size_t register_capacity = 0;
+        };
+        size_t instruction_size = 0;
+        size_t root_instruction_count = 0;
+        size_t root_operand_count = 0;
+        size_t root_register_capacity = 0;
+        size_t constant_count = 0;
+        size_t call_site_count = 0;
+        size_t total_instruction_count = 0;
+        size_t total_operand_count = 0;
+        std::vector<Function> functions;
+    };
+
     class Session
     {
     public:
@@ -618,7 +723,9 @@ public:
         void copy_catalog(std::unordered_map<std::string, FunctionOverloads>& functions,
             std::unordered_map<std::string, std::vector<StructField>>& structures) const;
         bool is_exit_requested() const;
+        bool is_active() const { return active; }
         size_t script_function_version() const;
+        void sync_globals_to_host();
 
     private:
         std::unique_ptr<Machine> machine;
@@ -643,15 +750,26 @@ public:
     Object run(const std::string& entry_label = {});
     Object run_script(std::string script);
     Object run_file(const std::string& filename);
+    bool register_native_function(const std::string& name, native_func_type function);
+    BytecodeStatistics bytecode_statistics() const;
 
 private:
-    void translate(Cifa& compiler, size_t script_function_version);
+    struct NativeFunction
+    {
+        native_func_type function;
+        bool builtin = false;
+    };
+    bool register_builtin(const std::string& name);
+    void translate(Cifa& compiler, size_t script_function_version, size_t host_native_function_version);
     void prepare_compile_visibility();
     void clear_compile_visibility();
     std::unique_ptr<Session> session;
     std::vector<std::unique_ptr<CifaBytecode>> nested_modules;
     std::unordered_map<std::string, FunctionOverloads> persistent_functions;
     std::unordered_map<std::string, std::vector<StructField>> persistent_struct_defs;
+    std::unordered_map<std::string, NativeFunction> native_functions;
+    std::unordered_set<std::string> native_function_names;
+    size_t native_function_version = 0;
     bool optimization_enabled = true;
 };
 }
