@@ -431,7 +431,11 @@ struct RegisterBackendTest
         size_t reserved_scope_bindings = 0;
         for (const auto& instruction : function.instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::RegisterBinary) ++arithmetic;
+            if (instruction.opcode == CifaBytecode::Opcode::Enter
+                || instruction.opcode == CifaBytecode::Opcode::Leave
+                || instruction.opcode == CifaBytecode::Opcode::CallEnd
+                || instruction.opcode == CifaBytecode::Opcode::Removed) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::NumericBinaryLocal) ++arithmetic;
             if (instruction.opcode == CifaBytecode::Opcode::ScopeEnter) reserved_scope_bindings += instruction.operand;
             if (instruction.opcode == CifaBytecode::Opcode::Add) return false;
             if (instruction.input_offset + instruction.input_count > function.instructions.register_inputs.size()) return false;
@@ -441,6 +445,183 @@ struct RegisterBackendTest
         }
         if (arithmetic != 1 || reserved_scope_bindings == 0
             || interpreter.run().toInt64() != 5 || interpreter.has_runtime_error()) return false;
+
+        CifaBytecode native_call;
+        native_call.set_output_error(false);
+        native_call.set_optimization_enabled(false);
+        native_call.register_native_function("identity", [](CifaBytecode::NativeCallContext& context)
+            { context.set_result(context.to_integer(0)); });
+        if (!native_call.compile_script("return identity(-2);")) return false;
+        size_t native_calls = 0;
+        for (const auto& instruction : native_call.module_data->root_instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::Call) ++native_calls;
+            if (instruction.opcode == CifaBytecode::Opcode::CallBegin
+                || instruction.opcode == CifaBytecode::Opcode::BindArgument
+                || instruction.opcode == CifaBytecode::Opcode::CallEnd) return false;
+        }
+        const auto native_call_result = native_call.run();
+        if (native_calls != 1 || native_call_result.toInt64() != -2 || native_call.has_runtime_error()) return false;
+
+        size_t script_call_begins = 0;
+        size_t script_argument_bindings = 0;
+        for (const auto& instruction : interpreter.module_data->root_instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::CallBegin) ++script_call_begins;
+            if (instruction.opcode == CifaBytecode::Opcode::BindArgument) ++script_argument_bindings;
+        }
+        if (script_call_begins != 1 || script_argument_bindings != 2) return false;
+
+        CifaBytecode method_call;
+        method_call.set_output_error(false);
+        method_call.set_optimization_enabled(false);
+        if (!method_call.compile_script("values = {1, 2}; values.resize(3); return size(values);")) return false;
+        size_t method_begins = 0;
+        size_t method_values = 0;
+        for (const auto& instruction : method_call.module_data->root_instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::MethodBegin) ++method_begins;
+            if (instruction.opcode == CifaBytecode::Opcode::MethodValue) ++method_values;
+        }
+        const auto method_call_result = method_call.run();
+        if (method_begins != 1 || method_values != 1
+            || method_call_result.toInt64() != 3 || method_call.has_runtime_error()) return false;
+
+        CifaBytecode numeric_expression;
+        numeric_expression.set_output_error(false);
+        numeric_expression.set_optimization_enabled(false);
+        if (!numeric_expression.compile_script("int sum(int left, int right) { return left + right; } return sum(2, 3);")) return false;
+        const auto& numeric_function = *numeric_expression.module_data->function_code.at("sum").at(2);
+        size_t numeric_operations = 0;
+        size_t numeric_local_operations = 0;
+        for (const auto& instruction : numeric_function.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::NumericBinary) ++numeric_operations;
+            if (instruction.opcode == CifaBytecode::Opcode::NumericBinaryLocal) ++numeric_local_operations;
+            if (instruction.opcode == CifaBytecode::Opcode::RegisterBinary) return false;
+        }
+        if (numeric_operations != 1 || numeric_local_operations != 0 || numeric_expression.run().toInt64() != 5
+            || numeric_expression.has_runtime_error()) return false;
+
+        CifaBytecode numeric_local_assignment;
+        numeric_local_assignment.set_output_error(false);
+        numeric_local_assignment.set_optimization_enabled(false);
+        if (!numeric_local_assignment.compile_script(
+            "int calculate(int left, int right) { int value = left + right; value = value * 2; return value; } return calculate(2, 3);"))
+            return false;
+        const auto& numeric_local_function = *numeric_local_assignment.module_data->function_code.at("calculate").at(2);
+        size_t direct_local_operations = 0;
+        for (const auto& instruction : numeric_local_function.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::NumericBinaryLocal) ++direct_local_operations;
+            if (instruction.opcode == CifaBytecode::Opcode::StoreLocal) return false;
+        }
+        if (direct_local_operations != 2 || numeric_local_assignment.run().toInt64() != 10
+            || numeric_local_assignment.has_runtime_error()) return false;
+
+        CifaBytecode constant_local_assignment;
+        constant_local_assignment.set_output_error(false);
+        constant_local_assignment.set_optimization_enabled(false);
+        if (!constant_local_assignment.compile_script(
+            "int constant_value() { int value = 7; return value; } return constant_value();")) return false;
+        const auto& constant_local_function = *constant_local_assignment.module_data->function_code.at("constant_value").at(0);
+        size_t constant_local_operations = 0;
+        for (const auto& instruction : constant_local_function.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::ConstantLocal) ++constant_local_operations;
+            if (instruction.opcode == CifaBytecode::Opcode::StoreLocal) return false;
+        }
+        if (constant_local_operations != 1 || constant_local_assignment.run().toInt64() != 7
+            || constant_local_assignment.has_runtime_error()) return false;
+
+        CifaBytecode local_math;
+        local_math.set_output_error(false);
+        local_math.set_optimization_enabled(true);
+        if (!local_math.compile_script(
+            "double calculate(double left, double right) { return pow(left, right); } return calculate(2, 3);")) return false;
+        const auto& math_function = *local_math.module_data->function_code.at("calculate").at(2);
+        size_t local_math_binary = 0;
+        size_t local_math_loads = 0;
+        for (const auto& instruction : math_function.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::MathBinary) ++local_math_binary;
+            if (instruction.opcode == CifaBytecode::Opcode::LoadLocal) ++local_math_loads;
+        }
+        if (local_math_binary != 1 || local_math_loads != 0 || local_math.run().toDouble() != 8.0
+            || local_math.has_runtime_error()) return false;
+
+        CifaBytecode numeric_for;
+        numeric_for.set_output_error(false);
+        numeric_for.set_optimization_enabled(false);
+        if (!numeric_for.compile_script(
+            "int sum_to(int limit) { int total = 0; for (int index = 0; index < limit; index++) total += index; return total; } return sum_to(10);"))
+            return false;
+        const auto& for_function = *numeric_for.module_data->function_code.at("sum_to").at(1);
+        size_t numeric_for_next = 0;
+        for (const auto& instruction : for_function.instructions.code)
+            if (instruction.opcode == CifaBytecode::Opcode::NumericForNext) ++numeric_for_next;
+        if (numeric_for_next != 1 || numeric_for.run().toInt64() != 45 || numeric_for.has_runtime_error()) return false;
+
+        CifaBytecode numeric_branch;
+        numeric_branch.set_output_error(false);
+        numeric_branch.set_optimization_enabled(false);
+        if (!numeric_branch.compile_script(
+            "int classify(int value) { if (value < 3) return 7; return 9; } return classify(2) * 10 + classify(4);"))
+            return false;
+        const auto& branch_function = *numeric_branch.module_data->function_code.at("classify").at(1);
+        size_t numeric_compare_branches = 0;
+        for (const auto& instruction : branch_function.instructions.code)
+            if (instruction.opcode == CifaBytecode::Opcode::NumericCompareBranch) ++numeric_compare_branches;
+        if (numeric_compare_branches != 1 || numeric_branch.run().toInt64() != 79 || numeric_branch.has_runtime_error()) return false;
+
+        CifaBytecode array_push;
+        array_push.set_output_error(false);
+        array_push.set_optimization_enabled(false);
+        if (!array_push.compile_script(
+            "values = {}; values.push_back(3); int local_push() { int local[]; local.push_back(4); return local[0]; } return values[0] + local_push();"))
+            return false;
+        size_t global_pushes = 0;
+        for (const auto& instruction : array_push.root_instructions.code)
+            if (instruction.opcode == CifaBytecode::Opcode::ArrayPushGlobal) ++global_pushes;
+        const auto& local_push = *array_push.module_data->function_code.at("local_push").at(0);
+        size_t local_pushes = 0;
+        for (const auto& instruction : local_push.instructions.code)
+            if (instruction.opcode == CifaBytecode::Opcode::MethodPush) ++local_pushes;
+        if (global_pushes != 1 || local_pushes != 1 || array_push.run().toInt64() != 7
+            || array_push.has_runtime_error()) return false;
+
+        CifaBytecode local_push_fusion;
+        local_push_fusion.set_output_error(false);
+        local_push_fusion.set_optimization_enabled(false);
+        if (!local_push_fusion.compile_script(
+            "values = {}; int append(int value) { values.push_back(value); return size(values); } return append(6) * 10 + values[0];"))
+            return false;
+        const auto& append = *local_push_fusion.module_data->function_code.at("append").at(1);
+        size_t fused_local_pushes = 0;
+        size_t remaining_loads = 0;
+        for (const auto& instruction : append.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::ArrayPushGlobalLocal) ++fused_local_pushes;
+            if (instruction.opcode == CifaBytecode::Opcode::LoadLocal) ++remaining_loads;
+        }
+        if (fused_local_pushes != 1 || remaining_loads != 0 || local_push_fusion.run().toInt64() != 16
+            || local_push_fusion.has_runtime_error()) return false;
+
+        CifaBytecode local_index_fusion;
+        local_index_fusion.set_output_error(false);
+        local_index_fusion.set_optimization_enabled(true);
+        if (!local_index_fusion.compile_script(
+            "values = {4, 9}; int read_at(int index) { return values[index]; } return read_at(1);")) return false;
+        const auto& read_at = *local_index_fusion.module_data->function_code.at("read_at").at(1);
+        size_t fused_local_indices = 0;
+        size_t index_loads = 0;
+        for (const auto& instruction : read_at.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::IndexLocal) ++fused_local_indices;
+            if (instruction.opcode == CifaBytecode::Opcode::LoadLocal) ++index_loads;
+        }
+        if (fused_local_indices != 1 || index_loads != 0 || local_index_fusion.run().toInt64() != 9
+            || local_index_fusion.has_runtime_error()) return false;
 
         for (bool optimized : {false, true})
         {
@@ -471,7 +652,6 @@ struct RegisterBackendTest
                     || actual.toString() != "abbaab" || calls != (repeat + 1) * 2) return false;
             }
         }
-
         for (bool optimized : {false, true})
         {
             CifaBytecode switch_error;
@@ -506,7 +686,6 @@ struct RegisterBackendTest
             if (!switch_error.has_runtime_error() || effects != 0
                 || switch_error.get_runtime_error().find("function 'missing_switch' has no return value") == std::string::npos) return false;
         }
-
         const std::string nested_arguments = R"(
             int combine(int left, int right) { int total = left * 10 + right; return total; }
             int recurse(int count) {
@@ -543,7 +722,6 @@ struct RegisterBackendTest
                     if (!CifaBytecode::value_holds<std::monostate>(slots.payload(index))) return false;
             }
         }
-
         CifaBytecode reentrant_host;
         reentrant_host.set_optimization_enabled(false);
         for (bool optimized : {false, true})

@@ -9,13 +9,14 @@ class CifaBytecode : public Cifa
 {
     friend class Cifa;
     friend struct RegisterBackendTest;
-    enum class Opcode { Constant, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Enter, Leave, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
+    enum class Opcode { Constant, ConstantLocal, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Enter, Leave, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
         LessEqual, GreaterEqual, Equal, NotEqual, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight,
         Positive, Negative, LogicalNot, BitNot, Cast, Size, MathUnary, MathBinary, Empty, Jump, Branch,
         AndBranch, OrBranch, LogicalAnd, LogicalOr, Return, ScopeEnter, ScopeLeave,
         PrepareStore, Store, Increment, Unwind, LoopMark, SwitchMark, SwitchCase, SwitchDefault, SwitchEnd,
-        CallBegin, Call, CallEnd, Peek, Array, Index, RangeBegin, RangeNext, RangeEnd, MethodNoArgs, BindArgument,
-        MethodBegin, MethodValue, MethodPush, Member, RegisterBinary, RegisterSnapshot, Exit };
+        CallBegin, Call, CallEnd, Peek, Array, Index, IndexLocal, RangeBegin, RangeNext, RangeEnd, MethodNoArgs, BindArgument,
+        MethodBegin, MethodValue, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
+        NumericCompareBranch, NumericForNext, RegisterBinary, RegisterSnapshot, Exit, Removed };
     struct SourceRef
     {
         size_t id = 0;
@@ -56,19 +57,39 @@ class CifaBytecode : public Cifa
     struct Instruction
     {
         Opcode opcode;
+        size_t operand = 0;
+        size_t auxiliary = 0;
+        size_t member_site = 0;
+        WriteOperation write = WriteOperation::Assign;
+        size_t variable_site = 0;
+        size_t destination = 0;
+        size_t input_offset = 0;
+        size_t input_count = 0;
+        bool discard_result = false;
+    };
+    struct BuildInstruction
+    {
+        Opcode opcode;
         SourceRef source;
         size_t operand = 0;
         size_t auxiliary = 0;
         size_t member_site = 0;
         WriteOperation write = WriteOperation::Assign;
         size_t variable_site = 0;
-        SourceRef condition_source;
-        SourceRef target_source;
         size_t destination = 0;
         size_t input_offset = 0;
         size_t input_count = 0;
         bool discard_result = false;
     };
+    static_assert(sizeof(Instruction) == 80);
+    static_assert(sizeof(BuildInstruction) == 88);
+    struct InstructionDiagnostic
+    {
+        SourceRef source;
+        SourceRef condition_source;
+        SourceRef target_source;
+    };
+    static_assert(sizeof(InstructionDiagnostic) == sizeof(size_t) * 3);
     struct RegisterOperation
     {
         std::uint16_t opcode;
@@ -80,7 +101,11 @@ class CifaBytecode : public Cifa
     static_assert(sizeof(RegisterOperation) == 16);
     struct Instructions
     {
+        std::vector<BuildInstruction> build_code;
         std::vector<Instruction> code;
+        std::vector<InstructionDiagnostic> diagnostics;
+        std::vector<RegisterOperation> numeric_operations;
+        std::vector<size_t> numeric_local_sites;
         std::vector<size_t> register_inputs;
         std::vector<std::vector<std::pair<size_t, bool>>> diagnostic_frames;
         size_t register_capacity = 0;
@@ -354,7 +379,8 @@ class CifaBytecode : public Cifa
         bool binary_payloads(Opcode opcode, size_t destination, const BytecodeValue::Storage& left_payload,
             const BytecodeValue::Storage& right_payload, Machine& machine, const SourceLocation& location);
         bool binary_numbers(Opcode opcode, size_t destination, std::int64_t left_integer, double left_number, bool left_double,
-            std::int64_t right_integer, double right_number, bool right_double, Machine& machine, const SourceLocation& location);
+            std::int64_t right_integer, double right_number, bool right_double, Machine& machine, const SourceLocation& location,
+            bool preserve_binding = false);
     };
     struct RegisterBinarySite
     {
@@ -405,10 +431,14 @@ class CifaBytecode : public Cifa
         SourceRef source;
         std::vector<SourceLocation> arguments;
         size_t local_slot = 0;
+        bool global_receiver = false;
         size_t name_id = 0;
         size_t base_name_id = 0;
         SourceRef method_source;
         MathKind math_kind = MathKind::None;
+        std::array<size_t, 2> math_local_slots{};
+        std::array<size_t, 2> math_local_names{};
+        bool math_local_operands = false;
     };
     struct Module;
     struct FunctionCode
@@ -612,12 +642,15 @@ class CifaBytecode : public Cifa
     FunctionCode* compiling_function = nullptr;
     std::vector<std::unordered_map<std::string, size_t>> compile_local_scopes;
     std::vector<size_t> compile_local_scope_bases;
+    std::unordered_set<std::string> compile_array_locals;
     const std::unordered_map<std::string, FunctionOverloads>* compile_script_functions = nullptr;
     bool compile_allows_script_constant_folding = false;
     std::unordered_set<std::string> compile_inline_functions;
+    std::unordered_map<const std::vector<BuildInstruction>*, std::vector<InstructionDiagnostic>> pending_diagnostics;
 
     size_t source_id(const CalUnit& source);
     SourceRef source_ref(const CalUnit* node);
+    InstructionDiagnostic& pending_diagnostic(std::vector<BuildInstruction>& instructions);
     size_t intern_name(const std::string& name);
     size_t index_site(const CalUnit& node);
     void seal(Instructions& instructions);
@@ -630,10 +663,10 @@ class CifaBytecode : public Cifa
     bool try_fold_constant(const CalUnit& node, Object& value,
         const std::unordered_map<std::string, Object>* parameters = nullptr,
         std::unordered_set<std::string>* active_functions = nullptr) const;
-    void emit(CalUnit& node, std::vector<Instruction>& instructions);
-    size_t emit_statement(CalUnit& node, std::vector<Instruction>& instructions);
-    static void discard_statement_result(std::vector<Instruction>& instructions, size_t begin);
-    bool emit_register_expression(CalUnit& node, std::vector<Instruction>& instructions);
+    void emit(CalUnit& node, std::vector<BuildInstruction>& instructions);
+    size_t emit_statement(CalUnit& node, std::vector<BuildInstruction>& instructions);
+    static void discard_statement_result(std::vector<BuildInstruction>& instructions, size_t begin);
+    bool emit_register_expression(CalUnit& node, std::vector<BuildInstruction>& instructions);
     bool verify(Instructions& instructions, size_t local_slot_count = 0);
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
         Object& result, size_t start = 0);
