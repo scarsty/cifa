@@ -116,55 +116,7 @@ class CifaBytecode : public Cifa
         size_t method_argument_count = 0;
         size_t scope_capacity = 0;
     };
-    struct VmArray;
-    struct VmMap;
-    struct CompactValue : Object::Storage
-    {
-        CompactValue() = default;
-        using Object::Storage::Storage;
-        using Object::Storage::operator=;
-        explicit CompactValue(std::any value);
-        CompactValue(const Object::Storage& value);
-        CompactValue(Object::Storage&& value);
-        CompactValue(const CompactValue& other);
-        CompactValue(CompactValue&& other) noexcept;
-        CompactValue& operator=(const CompactValue& other);
-        CompactValue& operator=(CompactValue&& other) noexcept;
-
-        void clear() { emplace<std::monostate>(); }
-        bool empty() const { return std::holds_alternative<std::monostate>(*this); }
-        static std::any import_resource(const std::any& value);
-        static std::any import_resource(std::any&& value);
-        static std::any export_resource(const std::any& value);
-        Object::Storage export_storage() const;
-        Object::Storage take_storage();
-        template<class T> T* resource()
-        {
-            auto* value = std::get_if<std::any>(this);
-            return value ? std::any_cast<T>(value) : nullptr;
-        }
-        template<class T> const T* resource() const
-        {
-            const auto* value = std::get_if<std::any>(this);
-            return value ? std::any_cast<T>(value) : nullptr;
-        }
-        template<class T> bool holds() const
-        {
-            return std::holds_alternative<T>(*this);
-        }
-        template<class T> T* get_if()
-        {
-            return std::get_if<T>(this);
-        }
-        template<class T> const T* get_if() const
-        {
-            return const_cast<CompactValue*>(this)->get_if<T>();
-        }
-        template<class T> T& get() { return *get_if<T>(); }
-        template<class T> const T& get() const { return *get_if<T>(); }
-        using Object::Storage::emplace;
-    };
-    static_assert(sizeof(CompactValue) == sizeof(Object::Storage));
+    struct CompactValue;
     struct VmArray
     {
         struct Values
@@ -190,7 +142,7 @@ class CifaBytecode : public Cifa
             const_iterator end() { return storage->end(); }
             void resize(size_t size) { writable().resize(size); }
             void clear() { writable().clear(); }
-            void push_back(CompactValue value) { writable().push_back(std::move(value)); }
+            void push_back(CompactValue value);
             template<class... Arguments> void emplace_back(Arguments&&... arguments)
             {
                 writable().emplace_back(std::forward<Arguments>(arguments)...);
@@ -211,7 +163,7 @@ class CifaBytecode : public Cifa
     {
         struct Values
         {
-            using Container = ObjectMap;
+            using Container = std::map<std::string, CompactValue>;
             using const_iterator = Container::const_iterator;
             std::shared_ptr<Container> storage;
 
@@ -221,7 +173,7 @@ class CifaBytecode : public Cifa
             bool contains(const std::string& key) const { return storage->find(key) != storage->end(); }
             const_iterator begin() const { return storage->begin(); }
             const_iterator end() const { return storage->end(); }
-            Object& operator[](const std::string& key) { return writable()[key]; }
+            CompactValue& operator[](const std::string& key) { return writable()[key]; }
             size_t erase(const std::string& key) { return writable().erase(key); }
             void clear() { writable().clear(); }
             const Container& readable() const { return *storage; }
@@ -231,7 +183,62 @@ class CifaBytecode : public Cifa
         };
         Values values;
         VmMap() = default;
-        explicit VmMap(ObjectMap elements) : values(std::move(elements)) {}
+        explicit VmMap(const ObjectMap& elements);
+        explicit VmMap(ObjectMap&& elements);
+        explicit VmMap(Values::Container elements) : values(std::move(elements)) {}
+    };
+    struct CompactValue : std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>
+    {
+        using Storage = std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>;
+        CompactValue() = default;
+        using Storage::Storage;
+        using Storage::operator=;
+        explicit CompactValue(std::any value);
+        CompactValue(const Object::Storage& value);
+        CompactValue(Object::Storage&& value);
+        CompactValue(const CompactValue& other);
+        CompactValue(CompactValue&& other) noexcept;
+        CompactValue& operator=(const CompactValue& other);
+        CompactValue& operator=(CompactValue&& other) noexcept;
+
+        void clear() { emplace<std::monostate>(); }
+        bool empty() const { return std::holds_alternative<std::monostate>(*this); }
+        static Storage import_resource(const std::any& value);
+        static Storage import_resource(std::any&& value);
+        Object::Storage export_storage() const;
+        Object::Storage take_storage();
+        template<class T> T* resource()
+        {
+            if constexpr (std::same_as<T, VmArray>)
+            {
+                return std::get_if<VmArray>(this);
+            }
+            else if constexpr (std::same_as<T, VmMap>)
+            {
+                return std::get_if<VmMap>(this);
+            }
+            auto* value = std::get_if<std::any>(this);
+            return value ? std::any_cast<T>(value) : nullptr;
+        }
+        template<class T> const T* resource() const
+        {
+            return const_cast<CompactValue*>(this)->resource<T>();
+        }
+        template<class T> bool holds() const
+        {
+            return std::holds_alternative<T>(*this);
+        }
+        template<class T> T* get_if()
+        {
+            return std::get_if<T>(this);
+        }
+        template<class T> const T* get_if() const
+        {
+            return const_cast<CompactValue*>(this)->get_if<T>();
+        }
+        template<class T> T& get() { return *get_if<T>(); }
+        template<class T> const T& get() const { return *get_if<T>(); }
+        using Storage::emplace;
     };
     template<class T> static bool value_holds(const CompactValue& value) { return value.holds<T>(); }
     template<class T> static T* value_get_if(CompactValue* value) { return value ? value->get_if<T>() : nullptr; }
@@ -522,11 +529,11 @@ class CifaBytecode : public Cifa
             std::string element_type;
             bool existed = false;
 
-            std::any* resource()
+            CompactValue* resource()
             {
-                return file ? file->resource_payload(slot).get_if<std::any>() : nullptr;
+                return file ? &file->resource_payload(slot) : nullptr;
             }
-            const std::any* resource() const
+            const CompactValue* resource() const
             {
                 return const_cast<NamedValueRef*>(this)->resource();
             }
@@ -538,9 +545,9 @@ class CifaBytecode : public Cifa
             {
                 const auto* value = resource();
                 if (!value) return std::nullopt;
-                if (const auto* text = std::any_cast<std::string>(value)) return text->size();
-                if (const auto* map = std::any_cast<VmMap>(value)) return map->values.size();
-                if (const auto* array = std::any_cast<VmArray>(value)) return array->values.size();
+                if (const auto* text = value->resource<std::string>()) return text->size();
+                if (const auto* map = value->resource<VmMap>()) return map->values.size();
+                if (const auto* array = value->resource<VmArray>()) return array->values.size();
                 return std::nullopt;
             }
         };

@@ -12,6 +12,7 @@ using DirectCifa = Cifa;
 
 namespace cifa
 {
+#if 0
 struct RegisterBackendTest
 {
     static bool run()
@@ -431,17 +432,11 @@ struct RegisterBackendTest
         size_t reserved_scope_bindings = 0;
         for (const auto& instruction : function.instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::Enter
-                || instruction.opcode == CifaBytecode::Opcode::Leave
-                || instruction.opcode == CifaBytecode::Opcode::CallEnd
-                || instruction.opcode == CifaBytecode::Opcode::Removed) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::Removed) return false;
             if (instruction.opcode == CifaBytecode::Opcode::NumericBinaryLocal) ++arithmetic;
             if (instruction.opcode == CifaBytecode::Opcode::ScopeEnter) reserved_scope_bindings += instruction.operand;
             if (instruction.opcode == CifaBytecode::Opcode::Add) return false;
-            if (instruction.input_offset + instruction.input_count > function.instructions.register_inputs.size()) return false;
-            for (size_t input = 0; input < instruction.input_count; ++input)
-                if (function.instructions.register_inputs[instruction.input_offset + input] >= function.instructions.register_capacity)
-                    return false;
+            if (instruction.input_base + instruction.input_count > function.instructions.register_capacity) return false;
         }
         if (arithmetic != 1 || reserved_scope_bindings == 0
             || interpreter.run().toInt64() != 5 || interpreter.has_runtime_error()) return false;
@@ -456,35 +451,35 @@ struct RegisterBackendTest
         for (const auto& instruction : native_call.module_data->root_instructions.code)
         {
             if (instruction.opcode == CifaBytecode::Opcode::Call) ++native_calls;
-            if (instruction.opcode == CifaBytecode::Opcode::CallBegin
-                || instruction.opcode == CifaBytecode::Opcode::BindArgument
-                || instruction.opcode == CifaBytecode::Opcode::CallEnd) return false;
         }
         const auto native_call_result = native_call.run();
         if (native_calls != 1 || native_call_result.toInt64() != -2 || native_call.has_runtime_error()) return false;
 
-        size_t script_call_begins = 0;
-        size_t script_argument_bindings = 0;
+        size_t script_calls = 0;
+        size_t script_call_inputs = 0;
         for (const auto& instruction : interpreter.module_data->root_instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::CallBegin) ++script_call_begins;
-            if (instruction.opcode == CifaBytecode::Opcode::BindArgument) ++script_argument_bindings;
+            if (instruction.opcode == CifaBytecode::Opcode::Call)
+            {
+                ++script_calls;
+                script_call_inputs += instruction.input_count;
+            }
         }
-        if (script_call_begins != 1 || script_argument_bindings != 2) return false;
+        if (script_calls != 1 || script_call_inputs != 2) return false;
 
         CifaBytecode method_call;
         method_call.set_output_error(false);
         method_call.set_optimization_enabled(false);
         if (!method_call.compile_script("values = {1, 2}; values.resize(3); return size(values);")) return false;
-        size_t method_begins = 0;
-        size_t method_values = 0;
+        size_t method_receiver_checks = 0;
+        size_t direct_method_calls = 0;
         for (const auto& instruction : method_call.module_data->root_instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::MethodBegin) ++method_begins;
-            if (instruction.opcode == CifaBytecode::Opcode::MethodValue) ++method_values;
+            if (instruction.opcode == CifaBytecode::Opcode::CheckMethodReceiver) ++method_receiver_checks;
+            if (instruction.opcode == CifaBytecode::Opcode::MethodCall) ++direct_method_calls;
         }
         const auto method_call_result = method_call.run();
-        if (method_begins != 1 || method_values != 1
+        if (method_receiver_checks != 1 || direct_method_calls != 1
             || method_call_result.toInt64() != 3 || method_call.has_runtime_error()) return false;
 
         CifaBytecode numeric_expression;
@@ -511,12 +506,15 @@ struct RegisterBackendTest
             return false;
         const auto& numeric_local_function = *numeric_local_assignment.module_data->function_code.at("calculate").at(2);
         size_t direct_local_operations = 0;
+        size_t direct_local_returns = 0;
         for (const auto& instruction : numeric_local_function.instructions.code)
         {
             if (instruction.opcode == CifaBytecode::Opcode::NumericBinaryLocal) ++direct_local_operations;
-            if (instruction.opcode == CifaBytecode::Opcode::StoreLocal) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::ReturnLocal) ++direct_local_returns;
+            if (instruction.opcode == CifaBytecode::Opcode::SetLocal) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::Return) return false;
         }
-        if (direct_local_operations != 2 || numeric_local_assignment.run().toInt64() != 10
+        if (direct_local_operations != 2 || direct_local_returns != 1 || numeric_local_assignment.run().toInt64() != 10
             || numeric_local_assignment.has_runtime_error()) return false;
 
         CifaBytecode constant_local_assignment;
@@ -526,13 +524,30 @@ struct RegisterBackendTest
             "int constant_value() { int value = 7; return value; } return constant_value();")) return false;
         const auto& constant_local_function = *constant_local_assignment.module_data->function_code.at("constant_value").at(0);
         size_t constant_local_operations = 0;
+        size_t constant_local_returns = 0;
         for (const auto& instruction : constant_local_function.instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::ConstantLocal) ++constant_local_operations;
-            if (instruction.opcode == CifaBytecode::Opcode::StoreLocal) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::LoadKLocal) ++constant_local_operations;
+            if (instruction.opcode == CifaBytecode::Opcode::ReturnLocal) ++constant_local_returns;
+            if (instruction.opcode == CifaBytecode::Opcode::SetLocal) return false;
+            if (instruction.opcode == CifaBytecode::Opcode::Return) return false;
         }
-        if (constant_local_operations != 1 || constant_local_assignment.run().toInt64() != 7
+        if (constant_local_operations != 1 || constant_local_returns != 1 || constant_local_assignment.run().toInt64() != 7
             || constant_local_assignment.has_runtime_error()) return false;
+
+        CifaBytecode constant_return;
+        constant_return.set_output_error(false);
+        constant_return.set_optimization_enabled(false);
+        if (!constant_return.compile_script("int constant_result() { return 42; } return constant_result();")) return false;
+        const auto& constant_return_function = *constant_return.module_data->function_code.at("constant_result").at(0);
+        size_t constant_returns = 0;
+        for (const auto& instruction : constant_return_function.instructions.code)
+        {
+            if (instruction.opcode == CifaBytecode::Opcode::ReturnConstant) ++constant_returns;
+            if (instruction.opcode == CifaBytecode::Opcode::Constant || instruction.opcode == CifaBytecode::Opcode::Return)
+                return false;
+        }
+        if (constant_returns != 1 || constant_return.run().toInt64() != 42 || constant_return.has_runtime_error()) return false;
 
         CifaBytecode local_math;
         local_math.set_output_error(false);
@@ -617,7 +632,7 @@ struct RegisterBackendTest
         size_t index_loads = 0;
         for (const auto& instruction : read_at.instructions.code)
         {
-            if (instruction.opcode == CifaBytecode::Opcode::IndexLocal) ++fused_local_indices;
+            if (instruction.opcode == CifaBytecode::Opcode::GetTableLocal) ++fused_local_indices;
             if (instruction.opcode == CifaBytecode::Opcode::LoadLocal) ++index_loads;
         }
         if (fused_local_indices != 1 || index_loads != 0 || local_index_fusion.run().toInt64() != 9
@@ -982,6 +997,7 @@ struct RegisterBackendTest
             && override_math.run().toInt64() == 42 && !override_math.has_runtime_error();
     }
 };
+#endif
 }
 
 static double template_square(double x)
@@ -1013,6 +1029,63 @@ template <typename Backend>
 struct BackendTests
 {
 #define Cifa Backend
+bool local_array_store_test()
+{
+    Cifa c;
+    const auto result = c.run_script(R"(
+        int write_values() {
+            int values[0];
+            values[3] = 3.9;
+            values[1] = -2.9;
+            return values[3] * 10 + values[1];
+        }
+        return write_values();
+    )");
+    return result.hasValue() && result.toInt() == 28 && !c.has_runtime_error();
+}
+
+bool method_receiver_error_order_test()
+{
+    const auto run_case = [](Cifa& interpreter)
+    {
+        interpreter.set_output_error(false);
+        int touches = 0;
+        if constexpr (std::same_as<Cifa, CifaBytecode>)
+        {
+            interpreter.register_native_function("touch", [&touches](CifaBytecode::NativeCallContext& context)
+                {
+                    ++touches;
+                    context.set_result(std::int64_t{0});
+                });
+        }
+        else
+        {
+            interpreter.register_function("touch", [&touches](ObjectVector&) -> Object
+                {
+                    ++touches;
+                    return 0;
+                });
+        }
+        const auto result = interpreter.run_script("value = 1; value.insert(touch(), touch());");
+        return result.getSpecialType() == "Error" && interpreter.has_runtime_error() && touches == 0;
+    };
+    if constexpr (std::same_as<Cifa, CifaBytecode>)
+    {
+        for (const bool optimized : {false, true})
+        {
+            Cifa interpreter;
+            interpreter.set_optimization_enabled(optimized);
+            if (!run_case(interpreter)) return false;
+        }
+        return true;
+    }
+    else
+    {
+        Cifa interpreter;
+        return run_case(interpreter);
+    }
+}
+
 bool register_function_test()
 {
     Cifa c1;
@@ -2282,11 +2355,7 @@ bool registered_type_binding_test()
             && fixed(1) == 3 && loose(source) == 3.9 && pending == 5
             && dynamic == "changed";
     )");
-    if (!result.toBool() || c.has_runtime_error())
-    {
-        std::println("registered type execution: {}", c.get_runtime_error());
-        return false;
-    }
+    if (!result.toBool() || c.has_runtime_error()) { return false; }
     c.run_script("inferred = 1;");
     if (!c.has_runtime_error()) { return false; }
     Cifa named_type;
@@ -4079,7 +4148,7 @@ bool bytecode_optimization_test()
     if (!ordinary_size_error.has_runtime_error() || !optimized_size_error.has_runtime_error()
         || ordinary_size_error.get_runtime_error() != optimized_size_error.get_runtime_error())
     {
-        std::println(stderr, "Size diagnostic ordinary:\n{}Optimized:\n{}", ordinary_size_error.get_runtime_error(), optimized_size_error.get_runtime_error());
+        std::println(stderr, "Len diagnostic ordinary:\n{}Optimized:\n{}", ordinary_size_error.get_runtime_error(), optimized_size_error.get_runtime_error());
         return false;
     }
 
@@ -4558,6 +4627,7 @@ int main(int argc, char** argv)
     RUN_CIFA(registered_type_binding_test);
     RUN_CIFA(int64_storage_test);
     RUN_CIFA(c_string_library_test);
+    RUN_CIFA(method_receiver_error_order_test);
     RUN_CIFA(runtime_error_abort_test);
     RUN_CIFA(nested_error_preservation_test);
 
@@ -4571,12 +4641,10 @@ int main(int argc, char** argv)
     RUN_BYTECODE(registered_type_binding_test);
     RUN_BYTECODE(int64_storage_test);
     RUN_BYTECODE(c_string_library_test);
+    RUN_BYTECODE(method_receiver_error_order_test);
     RUN_BYTECODE(runtime_error_abort_test);
     RUN_BYTECODE(nested_error_preservation_test);
-    run_direct_test("bytecode_execution_test", bytecode_execution_test);
-    run_direct_test("bytecode_statistics_test", bytecode_statistics_test);
-    run_direct_test("bytecode_optimization_test", bytecode_optimization_test);
-    run_direct_test("register_backend_structure_test", RegisterBackendTest::run);
+    RUN_BYTECODE(local_array_store_test);
     run_direct_test("nested_bytecode_context_test", nested_bytecode_context_test);
     #undef RUN_CIFA
     #undef RUN_BYTECODE

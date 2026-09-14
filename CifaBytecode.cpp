@@ -150,8 +150,23 @@ CifaBytecode::VmArray::Values::Container::iterator CifaBytecode::VmArray::Values
     return values.erase(values.begin() + offset);
 }
 
+void CifaBytecode::VmArray::Values::push_back(CompactValue value)
+{
+    writable().push_back(std::move(value));
+}
+
+CifaBytecode::VmMap::VmMap(const ObjectMap& elements)
+{
+    for (const auto& [key, object] : elements) values[key] = CompactValue(object.value);
+}
+
+CifaBytecode::VmMap::VmMap(ObjectMap&& elements)
+{
+    for (auto& [key, object] : elements) values[key] = CompactValue(std::move(object.value));
+}
+
 CifaBytecode::CompactValue::CompactValue(std::any value)
-    : Object::Storage(import_resource(std::move(value)))
+    : Storage(import_resource(std::move(value)))
 {
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.resource_allocations;
@@ -169,7 +184,7 @@ CifaBytecode::CompactValue::CompactValue(const Object::Storage& value)
         ++value_profile.resource_allocations;
         if (std::any_cast<ObjectVector>(resource)) ++value_profile.array_import_const;
 #endif
-        emplace<std::any>(import_resource(*resource));
+        Storage::operator=(import_resource(*resource));
     }
 }
 
@@ -184,12 +199,12 @@ CifaBytecode::CompactValue::CompactValue(Object::Storage&& value)
         ++value_profile.resource_allocations;
         if (std::any_cast<ObjectVector>(resource)) ++value_profile.array_import_move;
 #endif
-        emplace<std::any>(import_resource(std::move(*resource)));
+        Storage::operator=(import_resource(std::move(*resource)));
     }
 }
 
 CifaBytecode::CompactValue::CompactValue(const CompactValue& other)
-    : Object::Storage(static_cast<const Object::Storage&>(other))
+    : Storage(static_cast<const Storage&>(other))
 {
 #ifdef CIFA_VALUE_PROFILE
     if (const auto* resource = std::get_if<std::any>(&other))
@@ -198,7 +213,7 @@ CifaBytecode::CompactValue::CompactValue(const CompactValue& other)
 }
 
 CifaBytecode::CompactValue::CompactValue(CompactValue&& other) noexcept
-    : Object::Storage(std::move(static_cast<Object::Storage&>(other))) { other.clear(); }
+    : Storage(std::move(static_cast<Storage&>(other))) { other.clear(); }
 
 CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(const CompactValue& other)
 {
@@ -207,19 +222,19 @@ CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(const CompactV
     if (const auto* resource = std::get_if<std::any>(&other))
         profile_resource_copy(*resource, static_cast<VmArray*>(nullptr), static_cast<VmMap*>(nullptr));
 #endif
-    Object::Storage::operator=(static_cast<const Object::Storage&>(other));
+    Storage::operator=(static_cast<const Storage&>(other));
     return *this;
 }
 
 CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(CompactValue&& other) noexcept
 {
     if (this == &other) return *this;
-    Object::Storage::operator=(std::move(static_cast<Object::Storage&>(other)));
+    Storage::operator=(std::move(static_cast<Storage&>(other)));
     other.clear();
     return *this;
 }
 
-std::any CifaBytecode::CompactValue::import_resource(const std::any& value)
+CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(const std::any& value)
 {
     const auto* objects = std::any_cast<ObjectVector>(&value);
     if (!objects)
@@ -237,7 +252,7 @@ std::any CifaBytecode::CompactValue::import_resource(const std::any& value)
     return VmArray(std::move(elements));
 }
 
-std::any CifaBytecode::CompactValue::import_resource(std::any&& value)
+CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(std::any&& value)
 {
     auto* objects = std::any_cast<ObjectVector>(&value);
     if (!objects)
@@ -255,14 +270,10 @@ std::any CifaBytecode::CompactValue::import_resource(std::any&& value)
     return VmArray(std::move(elements));
 }
 
-std::any CifaBytecode::CompactValue::export_resource(const std::any& value)
+Object::Storage CifaBytecode::CompactValue::export_storage() const
 {
-    const auto* array = std::any_cast<VmArray>(&value);
-    if (!array)
+    if (const auto* array = resource<VmArray>())
     {
-        if (const auto* map = std::any_cast<VmMap>(&value)) return map->values.readable();
-        return value;
-    }
 #ifdef CIFA_VALUE_PROFILE
     ++value_profile.array_exports;
     value_profile.array_export_elements += array->values.size();
@@ -271,37 +282,36 @@ std::any CifaBytecode::CompactValue::export_resource(const std::any& value)
     for (size_t index = 0; index < array->values.size(); ++index)
         objects[index].value = array->values[index].export_storage();
     return objects;
-}
-
-Object::Storage CifaBytecode::CompactValue::export_storage() const
-{
-    if (const auto* resource = std::get_if<std::any>(this))
-    {
-#ifdef CIFA_VALUE_PROFILE
-        if (std::any_cast<VmArray>(resource)) ++value_profile.array_export_copy;
-#endif
-        return export_resource(*resource);
     }
-    return static_cast<const Object::Storage&>(*this);
+    if (const auto* map = resource<VmMap>())
+    {
+        ObjectMap fields;
+        for (const auto& [key, value] : map->values.readable()) fields[key].value = value.export_storage();
+        return fields;
+    }
+    if (const auto* resource = std::get_if<std::any>(this)) return *resource;
+    if (const auto* integer = std::get_if<std::int64_t>(this)) return *integer;
+    if (const auto* floating = std::get_if<double>(this)) return *floating;
+    if (const auto* boolean = std::get_if<bool>(this)) return *boolean;
+    return {};
 }
 
 Object::Storage CifaBytecode::CompactValue::take_storage()
 {
-    if (auto* resource = std::get_if<std::any>(this))
+    if (resource<VmArray>() || resource<VmMap>())
     {
-        Object::Storage result;
-        if (std::any_cast<VmArray>(resource) || std::any_cast<VmMap>(resource))
-        {
 #ifdef CIFA_VALUE_PROFILE
-            ++value_profile.array_export_take;
+        ++value_profile.array_export_take;
 #endif
-            result = export_resource(*resource);
-        }
-        else result = std::move(*resource);
+        auto result = export_storage();
         clear();
         return result;
     }
-    Object::Storage result = std::move(static_cast<Object::Storage&>(*this));
+    Object::Storage result;
+    if (auto* resource = std::get_if<std::any>(this)) result = std::move(*resource);
+    else if (auto* integer = std::get_if<std::int64_t>(this)) result = *integer;
+    else if (auto* floating = std::get_if<double>(this)) result = *floating;
+    else if (auto* boolean = std::get_if<bool>(this)) result = *boolean;
     clear();
     return result;
 }
@@ -2060,7 +2070,6 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
                 }
             }
             else emit(argument, instructions);
-            instructions.push_back({Opcode::BindArgument, source_ref(&node), argument_index, index});
         }
         instructions.push_back({Opcode::Call, source_ref(&node), index});
         instructions.push_back({Opcode::CallEnd, source_ref(&node), index});
@@ -3886,13 +3895,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     std::optional<RangeBinding> range_binding;
     std::deque<RegisterSlots> local_windows;
     local_windows.emplace_back(registers, 0, 0);
-    struct PendingCall
-    {
-        RegisterSlots* parameters = nullptr;
-        size_t caller_top = 0;
-        size_t call_site = 0;
-    };
-    std::vector<PendingCall> pending_calls;
     struct Frame
     {
         const Instructions* instructions;
@@ -3916,7 +3918,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t register_base;
         size_t register_size;
         size_t register_top;
-        std::vector<PendingCall> pending_calls;
     };
     std::deque<Frame> frames;
     struct RestoreCaller
@@ -4114,7 +4115,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ranges = std::move(saved.ranges);
         method_arguments = std::move(saved.method_arguments);
         method_argument_top = saved.method_argument_top;
-        pending_calls = std::move(saved.pending_calls);
         active_owner = saved.owner;
         active_globals = &link_globals(active_owner);
         active_module = std::move(saved.module);
@@ -4350,7 +4350,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             else receiver = machine.named_value(active_owner->names[site.base_name_id]);
             auto* container = receiver.resource();
-            auto* array = receiver.file && container ? std::any_cast<VmArray>(container) : nullptr;
+            auto* array = receiver.file && container ? container->resource<VmArray>() : nullptr;
             const auto& location = active_owner->source(site.method_source);
 #ifdef CIFA_VM_PROFILE
             auto method_push_stage = std::chrono::steady_clock::now();
@@ -4471,8 +4471,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t argument = input_slot(instruction.input_count - 1);
             const size_t global_slot = linked_global(site.base_name_id);
             auto* container = global_slot != missing_global && machine.global_exists_at(global_slot)
-                ? machine.global_values.resource_payload(global_slot).get_if<std::any>() : nullptr;
-            auto* array = container ? std::any_cast<VmArray>(container) : nullptr;
+                ? &machine.global_values.resource_payload(global_slot) : nullptr;
+            auto* array = container ? container->resource<VmArray>() : nullptr;
             if (!array)
             {
                 registers.clear(argument);
@@ -4511,8 +4511,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t local_slot = instruction.auxiliary - 1;
             const size_t global_slot = linked_global(site.base_name_id);
             auto* container = global_slot != missing_global && machine.global_exists_at(global_slot)
-                ? machine.global_values.resource_payload(global_slot).get_if<std::any>() : nullptr;
-            auto* array = container ? std::any_cast<VmArray>(container) : nullptr;
+                ? &machine.global_values.resource_payload(global_slot) : nullptr;
+            auto* array = container ? container->resource<VmArray>() : nullptr;
             if (local_slot >= active_locals->size())
                 machine.set_error("bytecode local slot out of range");
             else if (!array)
@@ -4563,6 +4563,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 + active_instructions->range_count + 1, 0);
             if (!site.arguments.empty())
             {
+                if (!receiver.size())
+                {
+                    machine.set_error(method_name + "() requires an array or map",
+                        &active_owner->source(site.method_source));
+                    result = machine.error_result();
+                    return true;
+                }
                 const size_t count = method_name == "push_back" ? site.arguments.size()
                     : method_name == "insert" ? std::min<size_t>(2, site.arguments.size()) : 1;
                 method_arguments[instruction.operand] = MethodArguments{method_argument_top, count, 0};
@@ -4635,43 +4642,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             continue;
         }
         case Opcode::BindArgument:
-        {
-            const auto& call = active_owner->calls[instruction.auxiliary];
-            const auto& call_name = active_owner->names[call.name_id];
-            if (interpreter.native_functions.contains(call_name) && !pending_calls.empty()
-                && pending_calls.back().call_site == instruction.auxiliary)
-            {
-                pending_calls.back().parameters->move(instruction.operand, registers, input_slot(instruction.input_count - 1));
-                continue;
-            }
-            if (!interpreter.native_functions.contains(call_name))
-            {
-                std::shared_ptr<const Module> function_module;
-                const auto* function = machine.find_function(call_name, call.arguments.size(), function_module);
-                if (!function || instruction.operand >= function->parameters.size())
-                {
-                    machine.set_error("function changed while evaluating arguments");
-                    result = machine.error_result(); return true;
-                }
-                const auto& parameter = function->parameters[instruction.operand];
-                const size_t argument = input_slot(instruction.input_count - 1);
-                if (pending_calls.empty() || pending_calls.back().call_site != instruction.auxiliary)
-                {
-                    machine.set_error("bytecode argument window was not prepared");
-                    result = machine.error_result(); return true;
-                }
-                auto& parameters = *pending_calls.back().parameters;
-                if (parameter.type_name.empty() || parameter.type_name == "auto")
-                    parameters.move(instruction.operand, registers, argument);
-                else
-                {
-                    machine.convert_type(parameters, instruction.operand, registers, argument, parameter.type_name, call.arguments[instruction.operand]);
-                    registers.clear(argument);
-                }
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-            }
             continue;
-        }
         case Opcode::MethodNoArgs:
         {
             const auto& site = active_owner->calls[instruction.operand];
@@ -4710,8 +4681,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::RangeNext:
         {
             auto& state = ranges.at(instruction.operand);
-            auto* payload = value_get_if<std::any>(&registers.resource_payload(state.snapshot_slot));
-            auto* snapshot = payload ? std::any_cast<VmArray>(payload) : nullptr;
+            auto* snapshot = registers.resource_payload(state.snapshot_slot).resource<VmArray>();
             const bool available = snapshot && state.index < snapshot->values.size();
             if (available)
             {
@@ -4765,8 +4735,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             else receiver = machine.named_value(name);
             auto* container = receiver.resource();
-            auto* array = container ? std::any_cast<VmArray>(container) : nullptr;
-            const bool map_access = (container && std::any_cast<VmMap>(container)) || site.string_index;
+            auto* array = container ? container->resource<VmArray>() : nullptr;
+            const bool map_access = (container && container->resource<VmMap>()) || site.string_index;
             if (site.declaration)
             {
                 if (auto* binding = machine.find_slot(name))
@@ -4786,8 +4756,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     const size_t count = requested < 0 ? 0 : static_cast<size_t>(requested);
                     if (!array)
                     {
-                        file.write_payload(slot, std::any(VmArray(count)));
-                        array = std::any_cast<VmArray>(&value_get<std::any>(file.resource_payload(slot)));
+                        file.write_payload(slot, BytecodeValue::Storage(VmArray(count)));
+                        array = file.resource_payload(slot).resource<VmArray>();
                     }
                     else array->values.resize(count);
                     const auto& type = active_owner->names[site.type_id];
@@ -4893,7 +4863,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             else receiver = machine.named_value(name);
             auto* container = receiver.resource();
-            auto* array = container ? std::any_cast<VmArray>(container) : nullptr;
+            auto* array = container ? container->resource<VmArray>() : nullptr;
             if (array != nullptr)
             {
 #ifdef CIFA_VM_PROFILE
@@ -4928,7 +4898,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 auto element = machine.indexed(name, active_owner->names[site.type_id], 1, false,
                     false, false, registers, &index_slot);
                 machine.read_indexed(registers, output, element,
-                    (container && std::any_cast<VmMap>(container)) || site.string_index);
+                    (container && container->resource<VmMap>()) || site.string_index);
             }
             if (machine.exit_requested) { result = Object(); return true; }
             if (machine.should_stop()) { result = machine.error_result(); return true; }
@@ -4943,7 +4913,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 elements.values[index - 1] = std::move(registers.resource_payload(argument));
                 registers.clear(argument);
             }
-            registers.write_payload(output, std::any(std::move(elements)));
+            registers.write_payload(output, BytecodeValue::Storage(std::move(elements)));
             continue;
         }
         case Opcode::CallBegin:
@@ -4978,14 +4948,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     }
                 }
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
-                const size_t caller_base = registers.base();
-                const size_t caller_size = registers.size();
-                const size_t caller_top = registers.top();
-                registers.enter((std::max)(prepared_function->local_slot_count, call.arguments.size()));
-                local_windows.emplace_back(registers, registers.base(), registers.size());
-                pending_calls.push_back({&local_windows.back(), caller_top, instruction.operand});
-                registers.window_base = caller_base;
-                registers.window_size = caller_size;
             }
             continue;
         }
@@ -5001,31 +4963,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 ++profile.host_call_names[call_name];
                 const auto host_prepare_start = std::chrono::steady_clock::now();
 #endif
-                RegisterSlots* prepared_arguments = !pending_calls.empty() && pending_calls.back().call_site == instruction.operand
-                    ? pending_calls.back().parameters : nullptr;
                 const size_t* argument_slots = active_instructions->register_inputs.data()
                     + instruction.input_offset + instruction.input_count - call.arguments.size();
-                std::vector<size_t> prepared_slots;
-                if (prepared_arguments)
-                {
-                    prepared_slots.resize(call.arguments.size());
-                    for (size_t index = 0; index < prepared_slots.size(); ++index) prepared_slots[index] = index;
-                    argument_slots = prepared_slots.data();
-                }
                 if (machine.call_native_registers(call_name, registers, output,
-                    prepared_arguments ? *prepared_arguments : registers, argument_slots, call.arguments.size(), call.arguments))
+                    registers, argument_slots, call.arguments.size(), call.arguments))
                 {
-                    if (prepared_arguments)
-                    {
-                        registers.restore(registers.base(), registers.size(), pending_calls.back().caller_top);
-                        pending_calls.pop_back();
-                        local_windows.pop_back();
-                    }
-                    else
-                    {
-                        for (size_t index = 0; index < call.arguments.size(); ++index)
-                            if (argument_slots[index] != output) registers.clear(argument_slots[index]);
-                    }
+                    for (size_t index = 0; index < call.arguments.size(); ++index)
+                        if (argument_slots[index] != output) registers.clear(argument_slots[index]);
                     if (active_owner->host_function_version != 0
                         && active_owner->host_function_version != machine.host.native_function_version)
                         machine.set_error("native functions changed during optimized bytecode execution", &call_source);
@@ -5035,12 +4979,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if (machine.exit_requested) { result = Object(); return true; }
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     continue;
-                }
-                if (prepared_arguments)
-                {
-                    registers.restore(registers.base(), registers.size(), pending_calls.back().caller_top);
-                    pending_calls.pop_back();
-                    local_windows.pop_back();
                 }
 #ifdef CIFA_VM_PROFILE
                 profile.host_prepare_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -5073,37 +5011,30 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 ScopeStack locals(1);
                 const size_t caller_base = registers.base();
                 const size_t caller_size = registers.size();
-                if (pending_calls.empty() || pending_calls.back().call_site != instruction.operand)
-                {
-                    machine.set_error("bytecode call window was not prepared");
-                    result = machine.error_result(); return true;
-                }
-                const auto pending = pending_calls.back();
-                pending_calls.pop_back();
-                const size_t caller_top = pending.caller_top;
                 const size_t local_count = (std::max)(cached->local_slot_count, call.arguments.size());
-                auto* local_values = pending.parameters;
-                if (local_count > local_values->size())
-                {
-                    registers.enter(local_count - local_values->size());
-                    local_values->window_size = local_count;
-                    local_values->window_top = local_values->base() + local_count;
-                    registers.window_base = caller_base;
-                    registers.window_size = caller_size;
-                }
+                const size_t caller_top = registers.top();
+                RegisterSlots caller_values(registers, caller_base, caller_size);
+                registers.enter(local_count);
+                local_windows.emplace_back(registers, registers.base(), registers.size());
+                auto* local_values = &local_windows.back();
                 for (size_t index = 0; index < call.arguments.size(); ++index)
                 {
                     const auto& parameter = cached->parameters[index];
+                    const size_t argument = input_slot(instruction.input_count - call.arguments.size() + index);
+                    if (parameter.type_name.empty() || parameter.type_name == "auto")
+                        local_values->move(index, caller_values, argument);
+                    else
+                    {
+                        machine.convert_type(*local_values, index, caller_values, argument, parameter.type_name, call.arguments[index]);
+                        caller_values.clear(argument);
+                    }
                     if ((parameter.type_name == "int" || parameter.type_name == "double")
                         && local_values->payload(index).index() >= 1 && local_values->payload(index).index() <= 3)
                     {
                         local_values->bind_numeric(index, parameter.type_name == "int"
                             ? RegisterSlots::NumericBinding::Int : RegisterSlots::NumericBinding::Double);
-                        if (!local_values->has_name(index)) local_values->set_name(index, call.arguments[index].str);
-                        locals.back().bind(parameter.name, local_values, index);
-                        continue;
                     }
-                    machine.bind_type(*local_values, index, parameter.type_name, call.arguments[index]);
+                    else machine.bind_type(*local_values, index, parameter.type_name, call.arguments[index]);
                     if (!local_values->has_name(index)) local_values->set_name(index, call.arguments[index].str);
                     locals.back().bind(parameter.name, local_values, index);
                 }
@@ -5111,7 +5042,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 frames.push_back({active_instructions, active_node, pc, pc - 1, output,
                     active_locals, std::move(scopes), std::move(local_scope_bases), std::move(loop_states), std::move(switches), active_function, active_call,
                     std::move(ranges), std::move(method_arguments), method_argument_top, active_owner, std::move(active_module), std::move(active_aliases),
-                    caller_base, caller_size, caller_top, std::move(pending_calls)});
+                    caller_base, caller_size, caller_top});
                 active_function = cached;
                 active_call = &call_source;
                 active_node = &function_module->source(cached->body_source);
@@ -5132,7 +5063,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 ranges.clear();
                 method_arguments.clear();
                 method_argument_top = 0;
-                pending_calls.clear();
                 return_states.emplace_back();
                 return_states.back().return_type = cached->return_type;
                 pc = 0;
@@ -5768,6 +5698,57 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 }
             }
             Machine::IndexedValueRef target;
+            if (indexed && !increment && instruction.write == WriteOperation::Assign && site->dimensions == 1)
+            {
+                const auto& name = active_owner->names[site->name_id];
+                if (auto* binding = machine.find_slot(name))
+                {
+                    auto* resource = value_get_if<std::any>(&binding->file->resource_payload(binding->slot));
+                    auto* array = resource ? std::any_cast<VmArray>(resource) : nullptr;
+                    if (array != nullptr)
+                    {
+                        const size_t index_slot = input_slot(instruction.input_count - 2);
+                        std::int64_t offset = 0;
+                        if (!registers.integer(index_slot, offset))
+                            machine.conversion_error(registers, index_slot, "int", nullptr);
+                        if (offset < 0)
+                        {
+                            machine.set_error("array index is out of range");
+                            result = machine.error_result();
+                            return true;
+                        }
+                        const size_t index = static_cast<size_t>(offset);
+                        auto& values = array->values;
+                        if (index >= values.size()) values.resize(index + 1);
+                        const size_t argument = input_slot(instruction.input_count - 1);
+                        const size_t absolute = binding->file->base() + binding->slot;
+                        const auto& element_type = binding->file->type_pool[binding->file->slot_types[absolute]].element;
+                        if (element_type.empty())
+                        {
+                            values[index] = std::move(registers.resource_payload(argument));
+                            registers.clear(argument);
+                        }
+                        else
+                        {
+                            const size_t converted = registers.size() - 1;
+                            if (!machine.convert_type(registers, converted, registers, argument, element_type, source))
+                            {
+                                result = machine.error_result();
+                                return true;
+                            }
+                            registers.clear(argument);
+                            values[index] = std::move(registers.resource_payload(converted));
+                            registers.clear(converted);
+                        }
+                        registers.store_payload(output, values[index]);
+                        registers.set_name(output, name);
+#ifdef CIFA_VM_PROFILE
+                        ++profile.array_set_fast;
+#endif
+                        continue;
+                    }
+                }
+            }
             if (member)
                 target = machine.resolve_member(
                     active_owner->names[active_owner->member_sites[instruction.member_site - 1].first],
@@ -6409,14 +6390,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t argument = input_slot(instruction.input_count - 1);
             BytecodeValue::Storage numeric;
             const auto& input = registers.payload(argument, numeric);
-            const auto* container = value_get_if<std::any>(&input);
             std::optional<size_t> length;
-            if (container)
-            {
-                if (const auto* text = std::any_cast<std::string>(container)) length = text->size();
-                else if (const auto* array = std::any_cast<VmArray>(container)) length = array->values.size();
-                else if (const auto* map = std::any_cast<VmMap>(container)) length = map->values.size();
-            }
+            if (const auto* text = input.resource<std::string>()) length = text->size();
+            else if (const auto* array = input.resource<VmArray>()) length = array->values.size();
+            else if (const auto* map = input.resource<VmMap>()) length = map->values.size();
             registers.clear(argument);
             if (length) registers.write_payload(output, double(*length));
             else
@@ -6833,12 +6810,17 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::resolve_member(
     auto base = named_value(base_name);
     if (base.file)
     {
-        auto* resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
-        if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
+        auto& payload = base.file->resource_payload(base.slot);
+        if (auto* fields = payload.resource<VmMap>())
         {
             auto& element = fields->values[field_name];
-            element.name = base_name + "." + field_name;
-            return {nullptr, &element, element.name, element.element_type_name};
+            const size_t index = base.file->base() + base.slot;
+            const auto& structure_name = base.file->type_pool[base.file->slot_types[index]].declared;
+            std::string element_type;
+            if (const auto found = structures.find(structure_name); found != structures.end())
+                for (const auto& field : found->second)
+                    if (field.name == field_name) { element_type = field.type_name; break; }
+            return {&element, nullptr, base_name + "." + field_name, element_type};
         }
     }
     const auto fallback = assign_named(base_name + "::" + field_name, "", false, false, {});
@@ -6859,7 +6841,7 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
     BytecodeValue::Storage numeric;
     const auto& payload = source.payload(slot, numeric);
     const auto* resource = value_get_if<std::any>(&payload);
-    const auto identity = resource ? std::type_index(std::any_cast<VmMap>(resource) ? typeid(ObjectMap) : resource->type()) : value_holds<double>(payload)
+    const auto identity = payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
         ? std::type_index(typeid(double)) : value_holds<bool>(payload)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     const auto registered = host.registered_types.find(type_name);
@@ -6945,7 +6927,7 @@ bool CifaBytecode::Machine::bind_type(RegisterSlots& values, size_t slot, const 
         BytecodeValue::Storage numeric;
         const auto& payload = values.payload(slot, numeric);
         const auto* resource = value_get_if<std::any>(&payload);
-        descriptor.bound = resource ? std::type_index(std::any_cast<VmMap>(resource) ? typeid(ObjectMap) : resource->type()) : value_holds<double>(payload)
+        descriptor.bound = payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
             ? std::type_index(typeid(double)) : value_holds<bool>(payload)
             ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
         const auto name = host.type_names.find(descriptor.bound);
@@ -7030,7 +7012,7 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     }
     const auto& converted = source.payload(value_slot, numeric);
     const auto* converted_resource = value_get_if<std::any>(&converted);
-    const auto identity = converted_resource ? std::type_index(std::any_cast<VmMap>(converted_resource) ? typeid(ObjectMap) : converted_resource->type()) : value_holds<double>(converted)
+    const auto identity = converted.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : converted_resource ? std::type_index(converted_resource->type()) : value_holds<double>(converted)
         ? std::type_index(typeid(double)) : value_holds<bool>(converted)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     if (!no_value && type.declared == "auto" && !source.empty(value_slot))
@@ -7113,35 +7095,30 @@ void CifaBytecode::Machine::read_named(RegisterSlots& destination, size_t slot, 
         bool existing_map = false;
         if (existing_slot)
         {
-            auto* resource = value_get_if<std::any>(&existing_slot->file->resource_payload(existing_slot->slot));
-            existing_map = resource && std::any_cast<VmMap>(resource);
+            existing_map = existing_slot->file->resource_payload(existing_slot->slot).resource<VmMap>() != nullptr;
         }
         else if (global_slot != std::numeric_limits<size_t>::max() && global_exists_at(global_slot))
         {
-            auto* resource = value_get_if<std::any>(&global_values.resource_payload(global_slot));
-            existing_map = resource && std::any_cast<VmMap>(resource);
+            existing_map = global_values.resource_payload(global_slot).resource<VmMap>() != nullptr;
         }
         if (!existing_map)
         {
-            ObjectMap fields;
+            VmMap::Values::Container fields;
             for (const auto& field : structures.at(type_name))
             {
-                Object field_value;
-                bind_type(field_value, field.type_name, location);
-                field_value.name = name + "." + field.name;
-                fields.emplace(field.name, std::move(field_value));
+                fields.emplace(field.name, CompactValue{});
             }
             if (!scopes.empty())
             {
                 auto& binding = scopes.back().create(name);
-                binding.file->write_payload(binding.slot, std::any(VmMap(std::move(fields))));
+                binding.file->write_payload(binding.slot, BytecodeValue::Storage(VmMap(std::move(fields))));
                 binding.file->set_type(binding.slot, {typeid(ObjectMap), type_name, "", ""});
                 binding.file->set_name(binding.slot, name);
                 destination.copy(slot, *binding.file, binding.slot);
                 return;
             }
             const auto value = assign_named(name, type_name, true, true, location);
-            value.file->write_payload(value.slot, std::any(VmMap(std::move(fields))));
+            value.file->write_payload(value.slot, BytecodeValue::Storage(VmMap(std::move(fields))));
             value.file->set_type(value.slot, {typeid(ObjectMap), type_name, "", ""});
             value.file->set_name(value.slot, name);
             destination.copy(slot, *value.file, value.slot);
@@ -7262,15 +7239,15 @@ std::string CifaBytecode::Machine::string_value(RegisterSlots& source, size_t sl
 bool CifaBytecode::Machine::range(RegisterSlots& source, size_t slot, const SourceLocation& location,
     RegisterSlots& destination, size_t target)
 {
-    const auto* payload = value_get_if<std::any>(&source.resource_payload(slot));
-    if (const auto* no_value = payload ? std::any_cast<Object::NoValue>(payload) : nullptr)
+    const auto& payload = source.resource_payload(slot);
+    if (const auto* no_value = payload.resource<Object::NoValue>())
     {
         set_no_value_error(no_value, &location);
         return false;
     }
-    const auto* elements = payload ? std::any_cast<VmArray>(payload) : nullptr;
+    const auto* elements = payload.resource<VmArray>();
     if (!elements) { set_error("range for requires an array", &location); return false; }
-    destination.write_payload(target, std::any(*elements));
+    destination.write_payload(target, BytecodeValue::Storage(*elements));
     return true;
 }
 
@@ -7355,17 +7332,16 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         const auto* payload = value_get_if<std::any>(&indices.resource_payload(index_slots[dimension]));
         return payload != nullptr && std::any_cast<std::string>(payload) != nullptr;
     };
-    Object* current = nullptr;
     CompactValue* compact = nullptr;
     std::string compact_element_type;
     size_t first_dimension = 0;
     auto* binding = !is_decl_array && dimensions != 0 ? find_slot(name) : nullptr;
     if (binding && (!declare_current || (!scopes.empty() && scopes.back().find(name) == binding)))
     {
-        auto* resource = value_get_if<std::any>(&binding->file->resource_payload(binding->slot));
-        if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
-            current = &fields->values[string_value(indices, index_slots[0])];
-        else if (auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr)
+        auto& payload = binding->file->resource_payload(binding->slot);
+        if (auto* fields = payload.resource<VmMap>())
+            compact = &fields->values[string_value(indices, index_slots[0])];
+        else if (auto* elements = payload.resource<VmArray>())
         {
             const auto offset = integer_key(0);
             if (offset < 0) { set_error("array index is out of range"); return {}; }
@@ -7383,9 +7359,9 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
             }
             compact = &elements->values[index];
         }
-        if (current || compact) first_dimension = 1;
+        if (compact) first_dimension = 1;
     }
-    if (!current && !compact)
+    if (!compact)
     {
     if (binding && dimensions != 0)
     {
@@ -7393,26 +7369,25 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         const size_t slot = binding->slot;
         if (string_key(0))
         {
-            file.write_payload(slot, std::any(VmMap{}));
-            auto& values = std::any_cast<VmMap&>(value_get<std::any>(file.resource_payload(slot))).values;
-            current = &values[string_value(indices, index_slots[0])];
+            file.write_payload(slot, BytecodeValue::Storage(VmMap{}));
+            compact = &file.resource_payload(slot).resource<VmMap>()->values[string_value(indices, index_slots[0])];
         }
         else
         {
             const auto offset = integer_key(0);
             if (offset < 0) { set_error("array index is out of range"); return {}; }
-            file.write_payload(slot, std::any(VmArray(static_cast<size_t>(offset) + 1)));
-            auto& values = std::any_cast<VmArray&>(value_get<std::any>(file.resource_payload(slot))).values;
+            file.write_payload(slot, BytecodeValue::Storage(VmArray(static_cast<size_t>(offset) + 1)));
+            auto& values = file.resource_payload(slot).resource<VmArray>()->values;
             const size_t absolute = file.base() + slot;
             compact_element_type = file.type_pool[file.slot_types[absolute]].element;
             compact = &values[static_cast<size_t>(offset)];
         }
         first_dimension = 1;
     }
-    if (!current && !compact)
+    if (!compact)
     {
     const auto base = assign_named(name, "", false, false, {});
-    auto* resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
+    auto& resource = base.file->resource_payload(base.slot);
     if (is_decl_array)
     {
         BytecodeValue::Storage index_numeric;
@@ -7420,11 +7395,11 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
             || value_holds<std::monostate>(indices.payload(index_slots[0], index_numeric))
             ? 0 : integer_key(0);
         const size_t size = requested < 0 ? 0 : static_cast<size_t>(requested);
-        auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr;
+        auto* elements = resource.resource<VmArray>();
         if (!elements)
         {
-            base.file->write_payload(base.slot, std::any(VmArray(size)));
-            elements = std::any_cast<VmArray>(&value_get<std::any>(base.file->resource_payload(base.slot)));
+            base.file->write_payload(base.slot, BytecodeValue::Storage(VmArray(size)));
+            elements = base.file->resource_payload(base.slot).resource<VmArray>();
         }
         else if (!only_check) elements->values.resize(size);
         const size_t absolute = base.file->base() + base.slot;
@@ -7434,14 +7409,16 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         base.file->set_name(base.slot, name);
         return {nullptr, nullptr, name, type_name, base.file, base.slot};
     }
-    if (!(resource && (std::any_cast<VmArray>(resource) || std::any_cast<VmMap>(resource))))
+    if (!resource.resource<VmArray>() && !resource.resource<VmMap>())
     {
-        base.file->write_payload(base.slot, string_key(0) ? std::any(VmMap{}) : std::any(VmArray{}));
-        resource = value_get_if<std::any>(&base.file->resource_payload(base.slot));
+        base.file->write_payload(base.slot, string_key(0)
+            ? BytecodeValue::Storage(VmMap{})
+            : BytecodeValue::Storage(VmArray{}));
     }
-    if (auto* fields = resource ? std::any_cast<VmMap>(resource) : nullptr)
-        current = &fields->values[string_value(indices, index_slots[0])];
-    else if (auto* elements = resource ? std::any_cast<VmArray>(resource) : nullptr)
+    auto& updated = base.file->resource_payload(base.slot);
+    if (auto* fields = updated.resource<VmMap>())
+        compact = &fields->values[string_value(indices, index_slots[0])];
+    else if (auto* elements = updated.resource<VmArray>())
     {
         const auto offset = integer_key(0);
         if (offset < 0) { set_error("array index is out of range"); return {}; }
@@ -7459,7 +7436,7 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         auto* values = compact->resource<VmArray>();
         if (!values)
         {
-            *compact = CompactValue(std::any(VmArray{}));
+            *compact = CompactValue(std::any(ObjectVector{}));
             values = compact->resource<VmArray>();
         }
         const auto offset = integer_key(index);
@@ -7467,37 +7444,7 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         if (static_cast<size_t>(offset) >= values->values.size()) values->values.resize(static_cast<size_t>(offset) + 1);
         compact = &values->values[static_cast<size_t>(offset)];
     }
-    for (size_t index = first_dimension; !compact && index < dimensions; ++index)
-    {
-        if (!current->isType<ObjectVector>() && !current->isType<ObjectMap>())
-        {
-            const auto element_type = current->declared_type_name;
-            *current = string_key(index) ? Object(ObjectMap{}) : Object(ObjectVector{});
-            current->element_type_name = element_type;
-        }
-        if (current->isType<ObjectMap>())
-        {
-            const auto* payload = value_get_if<std::any>(&indices.resource_payload(index_slots[index]));
-            const auto* key = payload ? std::any_cast<std::string>(payload) : nullptr;
-            current = &current->ref<ObjectMap>()[key ? *key : string_value(indices, index_slots[index])];
-        }
-        else
-        {
-            const auto offset = integer_key(index);
-            if (offset < 0) { set_error("array index is out of range"); return {nullptr, current, name, type_name}; }
-            auto& values = current->ref<ObjectVector>();
-            if (static_cast<size_t>(offset) >= values.size())
-            {
-                const auto old_size = values.size();
-                values.resize(static_cast<size_t>(offset) + 1);
-                for (size_t item = old_size; item < values.size(); ++item)
-                    if (!current->element_type_name.empty()) bind_type(values[item], current->element_type_name, SourceLocation{});
-            }
-            current = &values[static_cast<size_t>(offset)];
-        }
-    }
-    if (current) current->name = name;
-    return {compact, current, name, compact_element_type.empty() ? type_name : compact_element_type};
+    return {compact, nullptr, name, compact_element_type.empty() ? type_name : compact_element_type};
 }
 
 Object CifaBytecode::Machine::make_no_value(const std::string& function_name, const SourceLocation& call_site) const
@@ -7719,7 +7666,7 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
             BytecodeValue::Storage numeric;
             const auto& value = values.payload(arguments[0], numeric);
             const auto* resource = value_get_if<std::any>(&value);
-            if (descriptor.special == "NoValue" || (resource && std::any_cast<Object::NoValue>(resource))) type = "NoValue";
+            if (descriptor.special == "NoValue" || value.resource<Object::NoValue>()) type = "NoValue";
             else if (descriptor.bound == typeid(std::int64_t)) type = "int";
             else if (descriptor.bound == typeid(double)) type = "double";
             else if (descriptor.bound == typeid(bool)) type = "bool";
@@ -7735,11 +7682,11 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
                 if (value_holds<std::int64_t>(value)) type = "int";
                 else if (value_holds<double>(value)) type = "double";
                 else if (value_holds<bool>(value)) type = "bool";
+                else if (value.resource<VmArray>()) type = "array";
+                else if (value.resource<VmMap>()) type = "map";
                 else if (const auto* resource = value_get_if<std::any>(&value))
                 {
                     if (std::any_cast<std::string>(resource)) type = "string";
-                    else if (std::any_cast<VmArray>(resource)) type = "array";
-                    else if (std::any_cast<VmMap>(resource)) type = "map";
                     else type = resource->type().name();
                 }
             }
@@ -7753,12 +7700,11 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
         if (count != 1) { set_error("function 'size' expects 0 or 1 arguments, got " + std::to_string(count)); return true; }
         BytecodeValue::Storage numeric;
         const auto& value = values.payload(arguments[0], numeric);
-        const auto* resource = value_get_if<std::any>(&value);
-        if (const auto* text = resource ? std::any_cast<std::string>(resource) : nullptr)
+        if (const auto* text = value.resource<std::string>())
             destination.write_payload(result, static_cast<std::int64_t>(text->size()));
-        else if (const auto* array = resource ? std::any_cast<VmArray>(resource) : nullptr)
+        else if (const auto* array = value.resource<VmArray>())
             destination.write_payload(result, static_cast<std::int64_t>(array->values.size()));
-        else if (const auto* map = resource ? std::any_cast<VmMap>(resource) : nullptr)
+        else if (const auto* map = value.resource<VmMap>())
             destination.write_payload(result, static_cast<std::int64_t>(map->values.size()));
         else conversion_error(values, arguments[0], "string, array, or map", nullptr);
         return true;
@@ -8013,7 +7959,7 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         return std::int64_t(0);
     };
     auto* container = receiver.resource();
-    if (auto* array = container ? std::any_cast<VmArray>(container) : nullptr)
+    if (auto* array = container ? container->resource<VmArray>() : nullptr)
     {
         auto& values = array->values;
         if (name == "push_back")
@@ -8108,7 +8054,7 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         else set_error(name + "() is not supported on arrays", &location);
         return;
     }
-    if (auto* map = container ? std::any_cast<VmMap>(container) : nullptr)
+    if (auto* map = container ? container->resource<VmMap>() : nullptr)
     {
         auto& values = map->values;
         if (name == "erase")

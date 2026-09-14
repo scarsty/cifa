@@ -4,19 +4,23 @@
 
 `CifaBytecode` 是独立的编译后 VM：执行时不回退到 AST 或直接解释器。运行时值存放在单一 `Object` 寄存器池中，局部槽、表达式暂存和调用窗口共享该池；脚本调用只保存并恢复调用者的窗口边界，不复制整套寄存器文件。
 
-验证器以控制流数据流维护每个 PC 的活动寄存器上界，并为每条指令写入显式的 `Instruction::input_offset`、`input_count` 和 `destination`。`Instructions::register_inputs` 是操作数池，按指令的 `input_offset/input_count` 提供实际输入槽位；执行器不通过寄存器尾部位置推导操作数。基本块合流必须拥有相同的保守连续寄存器布局；语句结果通过编译期 `discard_result` 生命周期标记回收，不生成运行期清理 opcode。
+验证器以控制流数据流维护每个 PC 的活动寄存器上界，并为每条指令写入显式的 `Instruction::input_base`、`input_count` 和 `destination`。输入是连续寄存器窗口 `R(input_base)..R(input_base + input_count - 1)`，不再使用操作数旁表。基本块合流必须拥有相同的保守连续寄存器布局；语句结果通过编译期 `discard_result` 生命周期标记回收，不生成运行期清理 opcode。
 
 已经完成的过渡：
 
-- `Enter`、`Leave` 只保留诊断边界语义；紧凑码会移除它们。不存在 `Drop` opcode、执行镜像或根/普通块的空值哨兵。
+- 诊断边界存放在冷的 `diagnostic_frames` 表；不存在 `Drop` opcode、执行镜像或根/普通块的空值哨兵。
 - 每个 `Instructions` 记录最大嵌套作用域数；执行和脚本调用入口预留 `ScopeStack` 容量。
 - 局部 `ObjectVector` 的一维读、写和 `push_back` 走直接 opcode 路径，同时保留元素类型转换、扩容和错误语义。
 - 保持原始内建身份的数值数学函数会生成 `MathUnary` / `MathBinary`。数值参数直接调用 `std::` 数学函数；非数值参数和被用户覆盖的内建仍走常规宿主调用。
 
 ### 寄存器约定
 
-- `input_offset` 与 `input_count` 选择 `register_inputs` 中的实际输入槽位；`destination` 描述其结果槽位。
+- 每条普通值指令都有显式结果槽 `A = destination`；`B = input_base` 与 `C = input_count` 描述连续输入窗口。文档使用 `R0`、`R1` 表示这些槽。
+- 二元指令在语义反汇编中写为 `OP R(A), R(B), R(C)`，一元指令写为 `OP R(A), R(B)`；常量写为 `LoadK R(A), K(Bx)`。这与 Lua 的 A/B/C 可读形式一致。
+- 实际热码还不是 Lua 5.4 的固定 32 位 `iABC`，但输入已经是 Lua 式连续寄存器窗口：`A = destination`、`B = input_base`、`C = input_count`。`Call`、`GetTable`、`NewTable` 可通过连续窗口携带超过两个输入，无需操作数旁表。
 - `register_capacity` 是模块所需的最大活动 `Object` 寄存器数，不是操作数栈容量。
+- Machine 在构造时直接物理 `resize` 256 槽，逻辑活动窗口仍从 `R0` 开始；超过 256 槽时再按需扩容。共享槽池记录物理槽总数、当前逻辑活动上界、高水位、扩容次数与已清理槽数，可由 `CIFA_VM_PROFILE` 输出验证常见工作负载是否发生扩容。
+- 所有容器方法先执行零输入、零输出的 `CheckMethodReceiver`，再按源序求值连续参数窗口并执行 `MethodCall R(A), R(B), C`（单参数 `push_back` 可走直接快路径）。这是 Cifa AST 的真实顺序：非法 receiver 或不支持的方法必须在任何参数副作用之前报错。`insert` 不再需要专用 opcode、暂存参数向量或额外寄存器窗口。
 - 条件、短路、循环、`switch` 和 `goto` 的所有跳转目标必须合并到相同的活动寄存器上界；语句上下文的分支值在编译期标记为不可见。
 - 当前分配器保守地使用连续槽位；跨基本块 phi 寄存器和非连续槽位复用仍是独立的后续优化，不影响执行器的显式操作数合同。
 
@@ -84,7 +88,7 @@ else
 
 ## 翻译示例
 
-下面的清单是便于阅读的语义化反汇编，不是当前对外 API：`#N` 表示 `Module::constants` 中的常量编号，`@N` 表示指令绝对 PC，`$N` 表示函数帧局部槽位。实际 `Instruction` 还保存 `SourceRef`、名称表/调用点编号和诊断帧，本文省略这些内部编号。
+下面的清单是便于阅读的语义化反汇编，不是当前对外 API：`K(N)` 表示 `Module::constants` 中的常量，`R(N)` 表示值寄存器，`L(N)` 表示函数帧局部槽位，`@N` 表示绝对 PC。它展示 `A, B, C` 风格的值流；实际 `Instruction` 还保存名称/调用点编号、变长输入切片和诊断帧。
 
 ### 1. 常量、算术与赋值
 
@@ -99,21 +103,21 @@ return total;
 字节码：
 
 ```text
-Constant       #0 (2)
-PrepareStore   total : int
-Store          total : int, Assign
+LoadK          R0, K0 (2)
+PrepareGlobalStore   total : int
+SetGlobal      total : int, R0, Assign
 
-Constant       #1 (3)
-Constant       #2 (4)
-Multiply
-PrepareStore   total : int
-Store          total : int, Add
+LoadK          R0, K1 (3)
+LoadK          R1, K2 (4)
+Multiply       R0, R0, R1
+PrepareGlobalStore   total : int
+SetGlobal      total : int, R0, Add
 
-Load           total
-Return
+GetGlobal      R0, total
+Return         R0
 ```
 
-`PrepareStore` 先建立带类型绑定的目标，再计算并写回 RHS；`Store` 的 `WriteOperation::Add` 等价于读取旧值、执行 `Add`、再依照目标类型写回。因此复合赋值不会重复求值左值。
+`PrepareGlobalStore`、`PrepareFieldStore` 和 `PrepareIndexStore` 会先冻结对应的全局、字段或索引左值，再计算并写回 RHS。`SetGlobal`、`SetField`、`SetIndex` 的 `WriteOperation::Add` 等价于读取旧值、执行 `Add`、再依照目标类型写回。因此复合赋值不会重复求值左值。
 
 ### 2. 条件与跳转
 
@@ -128,23 +132,22 @@ return 0;
 字节码：
 
 ```text
-Constant       #0 (7)
-PrepareStore   value : int
-Store          value : int, Assign
-Drop
+LoadK          R0, K0 (7)
+PrepareGlobalStore   value : int
+SetGlobal      value : int, R0, Assign
 
-Load           value
-Constant       #1 (3)
-Greater
-Branch         @12              ; 假时跳到下一条 return
-Constant       #2 (1)
-Return
+GetGlobal      R0, value
+LoadK          R1, K1 (3)
+Greater        R0, R0, R1
+Test           R0, @12          ; 假时跳到下一条 return
+LoadK          R0, K2 (1)
+Return         R0
 
-@12: Constant  #3 (0)
-Return
+@12: LoadK      R0, K3 (0)
+Return          R0
 ```
 
-`Branch` 同时带有条件表达式自己的 `SourceRef`，所以 `value > 3` 的运行时错误会定位到条件，而不是整个 `if`。真实指令流还会在表达式边界插入 `Enter` / `Leave`，用于建立诊断调用链。
+`Test` 同时带有条件表达式自己的 `SourceRef`，所以 `value > 3` 的运行时错误会定位到条件，而不是整个 `if`。表达式边界的诊断调用链由冷的 `diagnostic_frames` 表建立，不额外发射执行期边界 opcode。
 
 ### 3. 已编译脚本函数调用
 
@@ -158,24 +161,22 @@ return twice(21);
 函数 `twice/1` 的独立 `FunctionCode`：
 
 ```text
-LoadLocal      $0 (number)
-Constant       #0 (2)
-Multiply
-Return
+Move           R0, L0 (number)
+LoadK          R1, K0 (2)
+Multiply       R0, R0, R1
+Return         R0
 ```
 
 根指令流：
 
 ```text
-CallBegin      twice/1
-Constant       #1 (21)
-BindArgument   #0 -> twice/1.number
-Call           twice/1
-CallEnd        twice/1
-Return
+LoadK          R0, K1 (21)
+Cast           R0, R0, int
+Call           R0, twice/1, R0
+Return         R0
 ```
 
-`Call` 通过 Machine 的函数 Module 注册表查找 `(twice, 1)`，创建显式 Frame 和局部槽位 `$0`，然后切换到 `FunctionCode` 的指令流。它不会解释函数解析节点，也不会在调用时编译函数。
+`Call` 通过 Machine 的函数 Module 注册表查找 `(twice, 1)`，把 `R0` 作为实参输入与返回槽，创建显式 Frame 和局部槽位 `L0`，然后切换到 `FunctionCode` 的指令流。带具体类型的参数在 `Call` 前由 `Cast` 转换，因此失败会阻止后续实参求值。它不会解释函数解析节点，也不会在调用时编译函数。
 
 ### 4. 类型数组与方法实参
 
@@ -190,19 +191,18 @@ return values[0];
 字节码：
 
 ```text
-Empty
-Index          values : int[], declaration
+LoadNil        R0
+GetTable       R0, values : int[], declaration
 
-MethodBegin    values.push_back
-Constant       #0 (9)
-MethodValue    argument #0
+MethodCall     values.push_back, R0, 1
+LoadK          R0, K0 (9)
 
-Constant       #1 (0)
-Index          values[0]
-Return
+LoadK          R1, K1 (0)
+GetTable       R0, values, R1
+Return         R0
 ```
 
-声明中的 `Empty` 表示未指定数组长度，`Index(... declaration)` 将它规范化为长度 0 的 `ObjectVector`，并记录元素类型 `int`。`MethodValue` 先只计算一次 `9`，`call_method` 再按照数组元素类型转换并追加；索引扩容或方法重入不会保存数组元素的裸指针。
+声明中的 `LoadNil` 表示未指定数组长度，`GetTable(... declaration)` 将它规范化为长度 0 的 `ObjectVector`，并记录元素类型 `int`。参数 `9` 先写入连续输入窗口，`MethodCall` 再按照数组元素类型转换并追加；索引扩容或方法重入不会保存数组元素的裸指针。数组字面量使用 `NewTable`，局部索引快路使用 `GetTableLocal`。
 
 ## 执行能力
 
