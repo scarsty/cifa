@@ -13,6 +13,7 @@ auto big_add(a, b) {
     int len_b = size(b);
     int max_len = len_a;
     if (len_b > max_len) max_len = len_b;
+    res.reserve(max_len + 1);
 
     int carry = 0;
     for (int i = 0; i < max_len || carry > 0; i++) {
@@ -33,6 +34,7 @@ auto big_sub(a, b) {
     res = {};
     int len_a = size(a);
     int len_b = size(b);
+    res.reserve(len_a);
     int borrow = 0;
 
     for (int i = 0; i < len_a; i++) {
@@ -62,6 +64,7 @@ auto big_mul_int(a, factor) {
     res = {};
     int carry = 0;
     int len = size(a);
+    res.reserve(len + 1);
     for (int i = 0; i < len || carry > 0; i++) {
         double val = carry;
         if (i < len) val += a[i] * factor;
@@ -75,12 +78,14 @@ auto big_mul_int(a, factor) {
 auto big_div_int(a, divisor) {
     res = {};
     int len = size(a);
+    res.reserve(len);
     if (len == 0) {
         res.push_back(0);
         return res;
     }
     double rem = 0;
     tmp = {};
+    tmp.reserve(len);
     for (int i = len - 1; i >= 0; i--) {
         double cur = rem * 10000 + a[i];
         int q = floor(cur / divisor);
@@ -144,6 +149,7 @@ int target_digits = 500;
 int num_blocks = floor(target_digits / 4) + 3;
 
 base_val = {};
+base_val.reserve(num_blocks + 1);
 for (int i = 0; i < num_blocks; i++) {
     base_val.push_back(0);
 }

@@ -15,6 +15,15 @@
 # Precompiled Headers
 *.gch
 *.pch
+*.ipch
+
+# MSVC debug and incremental-link artifacts
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+*.exp
 
 # Compiled Dynamic libraries
 *.so

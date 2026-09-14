@@ -141,6 +141,7 @@ class CifaBytecode : public Cifa
             const_iterator begin() { return storage->begin(); }
             const_iterator end() { return storage->end(); }
             void resize(size_t size) { writable().resize(size); }
+            void reserve(size_t size) { writable().reserve(size); }
             void clear() { writable().clear(); }
             void push_back(CompactValue value);
             template<class... Arguments> void emplace_back(Arguments&&... arguments)
@@ -585,7 +586,7 @@ class CifaBytecode : public Cifa
             const SourceLocation& location);
         bool assign(Object& target, Object value, bool with_type, const std::string& type_name, const SourceLocation& location);
         bool assign(RegisterSlots& destination, size_t target, RegisterSlots& source, size_t slot,
-            size_t scratch, const SourceLocation& location);
+            size_t scratch, const SourceLocation& location, bool take_value = false);
         bool bind_type(Object& value, const std::string& type_name, const SourceLocation& location);
         bool bind_type(RegisterSlots& values, size_t slot, const std::string& type_name, const SourceLocation& location);
         Object convert_type(const Object& value, const std::string& type_name, const SourceLocation& location);

@@ -517,6 +517,40 @@ struct RegisterBackendTest
         if (direct_local_operations != 2 || direct_local_returns != 1 || numeric_local_assignment.run().toInt64() != 10
             || numeric_local_assignment.has_runtime_error()) return false;
 
+        CifaBytecode nested_numeric_expression;
+        nested_numeric_expression.set_output_error(false);
+        nested_numeric_expression.set_optimization_enabled(false);
+        if (!nested_numeric_expression.compile_script(
+            "int calculate(int a, int b, int c, int d, int e) { int value = (a + b) + (c + d) + e; return value; } return calculate(1, 2, 3, 4, 5);"))
+            return false;
+        const auto& nested_numeric_function = *nested_numeric_expression.module_data->function_code.at("calculate").at(5);
+        if (nested_numeric_function.instructions.temporary_count != 2 || nested_numeric_expression.run().toInt64() != 15
+            || nested_numeric_expression.has_runtime_error()) return false;
+
+        CifaBytecode double_local_assignment;
+        double_local_assignment.set_output_error(false);
+        double_local_assignment.set_optimization_enabled(false);
+        if (!double_local_assignment.compile_script(
+            "double calculate(int left, int right) { double value = left + right; return value; } return calculate(2, 3);"))
+            return false;
+        const auto& double_local_function = *double_local_assignment.module_data->function_code.at("calculate").at(2);
+        if (std::ranges::count(double_local_function.instructions.code, CifaBytecode::Opcode::NumericBinaryLocal,
+                &CifaBytecode::Instruction::opcode) != 1 || double_local_assignment.run().toDouble() != 5.0
+            || double_local_assignment.has_runtime_error()) return false;
+        CifaBytecode double_division_assignment;
+        double_division_assignment.set_output_error(false);
+        double_division_assignment.set_optimization_enabled(false);
+        if (!double_division_assignment.compile_script(
+            "double calculate() { double value = 3 / 2; return value; } return calculate();")) return false;
+        if (double_division_assignment.run().toDouble() != 1.0 || double_division_assignment.has_runtime_error()) return false;
+
+        CifaBytecode local_array_assignment;
+        local_array_assignment.set_output_error(false);
+        local_array_assignment.set_optimization_enabled(false);
+        if (!local_array_assignment.compile_script(
+            "int calculate() { values = {1}; copy = values; copy[0] = 2; return values[0] * 10 + copy[0]; } return calculate();")) return false;
+        if (local_array_assignment.run().toInt64() != 12 || local_array_assignment.has_runtime_error()) return false;
+
         CifaBytecode constant_local_assignment;
         constant_local_assignment.set_output_error(false);
         constant_local_assignment.set_optimization_enabled(false);
@@ -3073,6 +3107,22 @@ bool array_methods_test()
         if (!o.hasValue() || o.toInt() != 5)
         {
             std::println(stderr, "array resize: {}", c1.get_runtime_error());
+            return false;
+        }
+    }
+    // reserve does not change length and supports subsequent writes
+    {
+        Cifa c1;
+        auto o = c1.run_script(R"(
+            a = {};
+            int before = a.reserve(8);
+            a.push_back(12);
+            a.push_back(34);
+            return before * 100 + size(a) * 10 + a[0] + a[1];
+        )");
+        if (!o.hasValue() || o.toInt() != 66)
+        {
+            std::println(stderr, "array reserve: {}", c1.get_runtime_error());
             return false;
         }
     }

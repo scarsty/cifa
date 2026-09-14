@@ -1600,9 +1600,9 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInst
         size_t slot;
         bool constant;
         bool temporary;
+        size_t temporary_count;
     };
-    size_t temporary = 0;
-    const auto generate = [&](const auto& self, CalUnit& value, bool root) -> Operand
+    const auto generate = [&](const auto& self, CalUnit& value, bool root, size_t temporary_base) -> Operand
     {
         if (value.v.empty())
         {
@@ -1611,16 +1611,18 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInst
                 Object number;
                 if (!Cifa::parse_number_literal(value.str, number)) translation_error = "unsupported bytecode numeric literal";
                 constants.push_back(std::move(number));
-                return {constants.size() - 1, true, false};
+                return {constants.size() - 1, true, false, 0};
             }
-            return {*local_slot(value, false), false, false};
+            return {*local_slot(value, false), false, false, 0};
         }
         instructions.push_back({Opcode::Enter, source_ref(&value)});
-        const auto left = self(self, value.v[0], false);
-        const auto right = self(self, value.v[1], false);
+        const auto left = self(self, value.v[0], false, temporary_base);
+        const auto right = self(self, value.v[1], false, temporary_base + (left.temporary ? 1 : 0));
         Opcode opcode;
         operation(value, opcode);
-        const size_t destination = temporary++;
+        const size_t destination = left.temporary ? left.slot : right.temporary ? right.slot : temporary_base;
+        const size_t temporary_count = (std::max)({left.temporary_count, right.temporary_count,
+            root ? size_t(0) : destination + 1});
         RegisterBinarySite site{};
         site.code = {static_cast<std::uint16_t>(opcode), static_cast<std::uint16_t>(root ? 0 : 1), 0,
             static_cast<std::uint32_t>(left.slot), static_cast<std::uint32_t>(right.slot)};
@@ -1637,9 +1639,9 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInst
         instructions.push_back({Opcode::NumericBinary, source_ref(&value),
             module_data->register_binary_sites.size() - 1});
         instructions.push_back({Opcode::Leave, source_ref(&value)});
-        return {destination, false, true};
+        return {destination, false, true, temporary_count};
     };
-    generate(generate, node, true);
+    generate(generate, node, true, 0);
     return true;
 }
 
@@ -1755,7 +1757,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
     if (node.type == CalUnitType::Operator && node.str == "." && node.v.size() == 2
         && node.v[0].type == CalUnitType::Parameter && node.v[0].v.empty()
         && node.v[1].type == CalUnitType::Function
-        && (node.v[1].str == "push_back" || node.v[1].str == "resize" || node.v[1].str == "insert"
+        && (node.v[1].str == "push_back" || node.v[1].str == "resize" || node.v[1].str == "reserve" || node.v[1].str == "insert"
             || node.v[1].str == "erase" || node.v[1].str == "contains"))
     {
         const size_t site = calls.size();
@@ -2636,7 +2638,11 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                     || operation_opcode == Opcode::Modulo || operation_opcode == Opcode::BitAnd
                     || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor
                     || operation_opcode == Opcode::ShiftLeft || operation_opcode == Opcode::ShiftRight;
-                if ((!binding.with_type || binding.type_id == module_data->int_type_id) && integer_result)
+                const bool direct_integer = (!binding.with_type || binding.type_id == module_data->int_type_id) && integer_result;
+                const bool direct_double = binding.with_type && binding.type_id == module_data->double_type_id
+                    && (operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                        || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide);
+                if (direct_integer || direct_double)
                 {
                     instruction.opcode = Opcode::NumericBinaryLocal;
                     instruction.auxiliary = instructions.numeric_operations.size();
@@ -4368,55 +4374,26 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 auto& values = array->values;
                 if (receiver.element_type.empty())
                 {
-                    const size_t argument_index = registers.base() + argument;
-                    BytecodeValue::Storage numeric;
-                    const auto& payload = registers.payload(argument, numeric);
-                    if (registers.bindings[argument_index] == RegisterSlots::NumericBinding::None
-                        && registers.slot_types[argument_index] == 0 && registers.slot_names[argument_index] == 0
-                        && registers.origins[argument_index] == nullptr
-                        && (value_holds<std::int64_t>(payload)
-                            || value_holds<double>(payload) || value_holds<bool>(payload)))
-                    {
 #ifdef CIFA_VM_PROFILE
-                        const auto append_start = std::chrono::steady_clock::now();
-                        const bool grows = values.size() == values.capacity();
-                        profile.method_push_prepare_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            append_start - method_push_stage).count());
+                    const auto append_start = std::chrono::steady_clock::now();
+                    const bool grows = values.size() == values.capacity();
 #endif
-                        values.push_back(std::move(registers.resource_payload(argument)));
+                    values.push_back(std::move(registers.resource_payload(argument)));
 #ifdef CIFA_VM_PROFILE
-                        method_push_stage = std::chrono::steady_clock::now();
-                        const auto append_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            method_push_stage - append_start).count());
-                        profile.method_push_append_ns += append_ns;
-                        if (grows) { profile.method_push_grow_ns += append_ns; ++profile.method_push_grow_count; }
-                        else { profile.method_push_stable_ns += append_ns; ++profile.method_push_stable_count; }
+                    method_push_stage = std::chrono::steady_clock::now();
+                    const auto append_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        method_push_stage - append_start).count());
+                    profile.method_push_append_ns += append_ns;
+                    if (grows) { profile.method_push_grow_ns += append_ns; ++profile.method_push_grow_count; }
+                    else { profile.method_push_stable_ns += append_ns; ++profile.method_push_stable_count; }
 #endif
-                        registers.clear(argument);
-                    }
-                    else
-                    {
-#ifdef CIFA_VM_PROFILE
-                        const auto append_start = std::chrono::steady_clock::now();
-                        const bool grows = values.size() == values.capacity();
-#endif
-                        values.push_back(std::move(registers.resource_payload(argument)));
-#ifdef CIFA_VM_PROFILE
-                        method_push_stage = std::chrono::steady_clock::now();
-                        const auto append_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            method_push_stage - append_start).count());
-                        profile.method_push_append_ns += append_ns;
-                        if (grows) { profile.method_push_grow_ns += append_ns; ++profile.method_push_grow_count; }
-                        else { profile.method_push_stable_ns += append_ns; ++profile.method_push_stable_count; }
-#endif
-                        registers.clear(argument);
-                    }
+                    registers.clear(argument);
 #ifdef CIFA_VM_PROFILE
                     const auto result_start = std::chrono::steady_clock::now();
                     profile.method_push_prepare_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         result_start - method_push_stage).count());
 #endif
-                    registers.write_payload(output, double(values.size()));
+                    if (!instruction.discard_result) registers.write_payload(output, double(values.size()));
 #ifdef CIFA_VM_PROFILE
                     profile.method_push_result_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - result_start).count());
@@ -4449,7 +4426,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                         if (grows) { profile.method_push_grow_ns += append_ns; ++profile.method_push_grow_count; }
                         else { profile.method_push_stable_ns += append_ns; ++profile.method_push_stable_count; }
 #endif
-                        registers.write_payload(output, double(values.size()));
+                        if (!instruction.discard_result) registers.write_payload(output, double(values.size()));
 #ifdef CIFA_VM_PROFILE
                         profile.method_push_result_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - result_start).count());
@@ -5517,7 +5494,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 local_store_timer.select(6);
 #endif
                 const size_t argument = input_slot(instruction.input_count - 1);
-                machine.assign(*active_locals, instruction.operand, registers, argument, registers.size() - 2, source);
+                machine.assign(*active_locals, instruction.operand, registers, argument, registers.size() - 2, source,
+                    instruction.discard_result);
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 registers.clear(argument);
                 if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
@@ -5703,8 +5681,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 const auto& name = active_owner->names[site->name_id];
                 if (auto* binding = machine.find_slot(name))
                 {
-                    auto* resource = value_get_if<std::any>(&binding->file->resource_payload(binding->slot));
-                    auto* array = resource ? std::any_cast<VmArray>(resource) : nullptr;
+                    auto* array = binding->file->resource_payload(binding->slot).resource<VmArray>();
                     if (array != nullptr)
                     {
                         const size_t index_slot = input_slot(instruction.input_count - 2);
@@ -5968,34 +5945,39 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t slot = site.code.destination - 1;
             const auto& binding = active_owner->variable_sites[site.variable_site - 1];
             const auto* existing = scopes.empty() ? nullptr : scopes.back().find(active_owner->names[binding.name_id]);
-            const auto read_integer = [&](std::uint32_t operand, std::uint16_t constant_flag,
-                std::uint16_t temporary_flag, std::int64_t& integer)
+            const bool double_target = binding.with_type && binding.type_id == active_owner->double_type_id;
+            const auto read_number = [&](std::uint32_t operand, std::uint16_t constant_flag,
+                std::uint16_t temporary_flag, std::int64_t& integer, double& floating, bool& is_double)
             {
-                double floating = 0;
-                bool is_double = false;
                 bool valid = false;
                 if ((operation.flags & constant_flag) != 0)
                 {
                     const auto& value = active_owner->constants[operand].value;
                     if (const auto* number = value_get_if<std::int64_t>(&value)) { integer = *number; valid = true; }
                     else if (const auto* number = value_get_if<bool>(&value)) { integer = *number; valid = true; }
+                    else if (const auto* number = value_get_if<double>(&value)) { floating = *number; is_double = true; valid = true; }
                 }
                 else if ((operation.flags & temporary_flag) != 0)
                     valid = registers.number(active_instructions->register_capacity + operand, integer, floating, is_double);
                 else if (!active_aliases[operand]) valid = active_locals->number(operand, integer, floating, is_double);
-                return valid && !is_double;
+                return valid;
             };
             std::int64_t left = 0, right = 0;
+            double left_number = 0, right_number = 0;
+            bool left_double = false, right_double = false;
             if (slot < active_locals->size() && !active_aliases[slot]
                 && (!existing || (existing->file == active_locals && existing->slot == slot))
-                && read_integer(operation.left, 1, 2, left) && read_integer(operation.right, 4, 8, right)
+                && read_number(operation.left, 1, 2, left, left_number, left_double)
+                && read_number(operation.right, 4, 8, right, right_number, right_double)
                 && active_locals->binary_numbers(static_cast<Opcode>(operation.opcode), slot,
-                    left, 0, false, right, 0, false, machine, current_location(), !binding.with_type))
+                    left, left_number, left_double, right, right_number, right_double, machine, current_location(), !binding.with_type))
             {
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 if (binding.with_type)
                 {
-                    active_locals->bind_numeric(slot, RegisterSlots::NumericBinding::Int);
+                    if (double_target && !active_locals->cast_numeric(slot, *active_locals, slot,
+                        RegisterSlots::NumericBinding::Double)) goto register_binary;
+                    active_locals->bind_numeric(slot, double_target ? RegisterSlots::NumericBinding::Double : RegisterSlots::NumericBinding::Int);
                     if (!existing) scopes.back().bind(active_owner->names[binding.name_id], active_locals, slot);
                 }
                 active_aliases[slot] = false;
@@ -6985,7 +6967,7 @@ CifaBytecode::Machine::NamedValueRef CifaBytecode::Machine::assign_named(
 }
 
 bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, RegisterSlots& source, size_t slot,
-    size_t scratch, const SourceLocation& location)
+    size_t scratch, const SourceLocation& location, bool take_value)
 {
     const size_t index = destination.base() + target;
     auto type = destination.type_pool[destination.slot_types[index]];
@@ -7028,7 +7010,8 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
         set_error("cannot change the type of a static variable", &location);
         return false;
     }
-    destination.copy(target, source, value_slot);
+    if (take_value) destination.move(target, source, value_slot);
+    else destination.copy(target, source, value_slot);
     const size_t destination_index = destination.base() + target;
     auto assigned = destination.type_pool[destination.slot_types[destination_index]];
     assigned.bound = type.bound;
@@ -7992,6 +7975,12 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         if (name == "resize")
         {
             if (!locations.empty()) values.resize(static_cast<size_t>(integer_argument(0)));
+            destination.write_payload(slot, double(values.size()));
+            return;
+        }
+        if (name == "reserve")
+        {
+            if (!locations.empty()) values.reserve(static_cast<size_t>(integer_argument(0)));
             destination.write_payload(slot, double(values.size()));
             return;
         }

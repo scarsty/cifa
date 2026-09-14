@@ -866,6 +866,11 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
             }
             return Object(double(arr.size()));
         }
+        if (method_name == "reserve")
+        {
+            if (!args.empty()) { arr.reserve(size_t(eval_scoped(args[0], scopes).toInt())); }
+            return Object(double(arr.size()));
+        }
         if (method_name == "insert")
         {
             if (args.size() >= 2)
@@ -960,7 +965,7 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
             return Object(std::move(keys));
         }
         if (method_name == "push_back" || method_name == "pop_back"
-            || method_name == "resize" || method_name == "insert")
+            || method_name == "resize" || method_name == "reserve" || method_name == "insert")
         {
             set_runtime_error(method_name + "() is not supported on maps", nullptr, &method);
             return Object();
@@ -1064,7 +1069,7 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                 {
                     //内置的数组/map方法：需要引用修改原始对象
                     auto& method_name = c.v[1].str;
-                    if (method_name == "push_back" || method_name == "pop_back" || method_name == "resize"
+                    if (method_name == "push_back" || method_name == "pop_back" || method_name == "resize" || method_name == "reserve"
                         || method_name == "clear" || method_name == "insert" || method_name == "erase"
                         || method_name == "contains" || method_name == "keys")
                     {
