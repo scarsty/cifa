@@ -1,3 +1,6 @@
+// Keep base-10000 blocks and remainders integer, matching the Lua benchmark.
+// Use a double operand for division: Lua / produces a float even for integers.
+// All modulo operands here are nonnegative, so Cifa % matches Lua %.
 // 判断大数数组是否为 0
 int big_is_zero(a) {
     int len = size(a);
@@ -16,15 +19,19 @@ auto big_add(a, b) {
     res.reserve(max_len + 1);
 
     int carry = 0;
-    for (int i = 0; i < max_len || carry > 0; i++) {
+    for (int i = 0; i < max_len; i++) {
         int val_a = 0;
         int val_b = 0;
         if (i < len_a) val_a = a[i];
         if (i < len_b) val_b = b[i];
 
         int sum = val_a + val_b + carry;
-        res.push_back(floor(fmod(sum, 10000)));
-        carry = floor(sum / 10000);
+        res.push_back(sum % 10000);
+        carry = floor(sum / 10000.0);
+    }
+    while (carry > 0) {
+        res.push_back(carry % 10000);
+        carry = floor(carry / 10000.0);
     }
     return res;
 }
@@ -65,11 +72,14 @@ auto big_mul_int(a, factor) {
     int carry = 0;
     int len = size(a);
     res.reserve(len + 1);
-    for (int i = 0; i < len || carry > 0; i++) {
-        double val = carry;
-        if (i < len) val += a[i] * factor;
-        res.push_back(floor(fmod(val, 10000)));
-        carry = floor(val / 10000);
+    for (int i = 0; i < len; i++) {
+        int val = carry + a[i] * factor;
+        res.push_back(val % 10000);
+        carry = floor(val / 10000.0);
+    }
+    while (carry > 0) {
+        res.push_back(carry % 10000);
+        carry = floor(carry / 10000.0);
     }
     return res;
 }
@@ -83,13 +93,13 @@ auto big_div_int(a, divisor) {
         res.push_back(0);
         return res;
     }
-    double rem = 0;
+    int rem = 0;
     tmp = {};
     tmp.reserve(len);
     for (int i = len - 1; i >= 0; i--) {
-        double cur = rem * 10000 + a[i];
-        int q = floor(cur / divisor);
-        rem = fmod(cur, divisor);
+        int cur = rem * 10000 + a[i];
+        int q = floor((double)cur / divisor);
+        rem = cur % divisor;
         tmp.push_back(q);
     }
     int tmp_len = size(tmp);
@@ -116,7 +126,7 @@ auto calc_arctan(x, base_val, max_iters) {
         int divisor = 2 * k + 1;
         term_div = big_div_int(term, divisor);
 
-        if (floor(fmod(k, 2)) == 1) {
+        if (k % 2 == 1) {
             sum_val = big_sub(sum_val, term_div);
         } else {
             sum_val = big_add(sum_val, term_div);
@@ -146,7 +156,7 @@ string format_pi(pi_arr, target_digits) {
 
 int target_digits = 500;
 // 125 (500/4) + 3 (缓冲区) = 128 个 0 块
-int num_blocks = floor(target_digits / 4) + 3;
+int num_blocks = floor(target_digits / 4.0) + 3;
 
 base_val = {};
 base_val.reserve(num_blocks + 1);

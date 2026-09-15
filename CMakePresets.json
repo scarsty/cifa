@@ -1,0 +1,14 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {"name": "windows", "displayName": "MSVC x64", "generator": "Visual Studio 18 2026", "architecture": "x64", "binaryDir": "${sourceDir}/build/cmake"}
+  ],
+  "buildPresets": [
+    {"name": "release", "configurePreset": "windows", "configuration": "Release"},
+    {"name": "debug", "configurePreset": "windows", "configuration": "Debug"}
+  ],
+  "testPresets": [
+    {"name": "release", "configurePreset": "windows", "configuration": "Release", "output": {"outputOnFailure": true}},
+    {"name": "debug", "configurePreset": "windows", "configuration": "Debug", "output": {"outputOnFailure": true}}
+  ]
+}

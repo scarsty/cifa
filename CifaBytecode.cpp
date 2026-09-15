@@ -1,4 +1,4 @@
-﻿#include "CifaBytecode.h"
+#include "CifaBytecode.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -8,49 +8,49 @@
 
 namespace cifa
 {
-CifaBytecode::VmArray::Values::Values() : storage(std::make_shared<Container>()) {}
+CifaBytecode::VmArray::Values::Values(const memory::Resource& resource) : storage(std::make_shared<Storage>(resource)) {}
 
-CifaBytecode::VmArray::Values::Values(size_t size) : storage(std::make_shared<Container>(size)) {}
+CifaBytecode::VmArray::Values::Values(size_t size, const memory::Resource& resource) : Values(resource) { storage->elements.resize(size); }
 
-CifaBytecode::VmArray::Values::Values(Container elements)
-    : storage(std::make_shared<Container>(std::move(elements))) {}
+CifaBytecode::VmArray::Values::Values(Container elements, const memory::Resource& resource)
+    : storage(std::make_shared<Storage>(resource, std::move(elements))) {}
 
 CifaBytecode::VmArray::Values::Container& CifaBytecode::VmArray::Values::writable()
 {
     // 仅写入时分离，读取必须继续共享按值语义的底层存储。
     if (storage.use_count() != 1)
     {
-        storage = std::make_shared<Container>(*storage);
+        storage = std::make_shared<Storage>(storage->resource, storage->elements);
     }
-    return *storage;
+    return storage->elements;
 }
 
-CifaBytecode::VmMap::Values::Values() : storage(std::make_shared<Container>()) {}
+CifaBytecode::VmMap::Values::Values(const memory::Resource& resource) : storage(std::make_shared<Storage>(resource)) {}
 
-CifaBytecode::VmMap::Values::Values(Container elements)
-    : storage(std::make_shared<Container>(std::move(elements))) {}
+CifaBytecode::VmMap::Values::Values(Container elements, const memory::Resource& resource)
+    : storage(std::make_shared<Storage>(resource, std::move(elements))) {}
 
 CifaBytecode::VmMap::Values::Container& CifaBytecode::VmMap::Values::writable()
 {
     if (storage.use_count() != 1)
     {
-        storage = std::make_shared<Container>(*storage);
+        storage = std::make_shared<Storage>(storage->resource, storage->elements);
     }
-    return *storage;
+    return storage->elements;
 }
 
 CifaBytecode::VmArray::Values::Container::iterator CifaBytecode::VmArray::Values::insert(
     const_iterator position, CompactValue value)
 {
     // 写时分离可能使迭代器失效，先保存相对偏移。
-    const auto offset = position - storage->begin();
+    const auto offset = position - storage->elements.begin();
     auto& values = writable();
     return values.insert(values.begin() + offset, std::move(value));
 }
 
 CifaBytecode::VmArray::Values::Container::iterator CifaBytecode::VmArray::Values::erase(const_iterator position)
 {
-    const auto offset = position - storage->begin();
+    const auto offset = position - storage->elements.begin();
     auto& values = writable();
     return values.erase(values.begin() + offset);
 }
@@ -60,40 +60,40 @@ void CifaBytecode::VmArray::Values::push_back(CompactValue value)
     writable().push_back(std::move(value));
 }
 
-CifaBytecode::VmMap::VmMap(const ObjectMap& elements)
+CifaBytecode::VmMap::VmMap(const ObjectMap& elements, const memory::Resource& allocation) : values(allocation)
 {
-    for (const auto& [key, object] : elements) values[key] = CompactValue(object.value);
+    for (const auto& [key, object] : elements) values[key] = CompactValue(object.value, allocation);
 }
 
-CifaBytecode::VmMap::VmMap(ObjectMap&& elements)
+CifaBytecode::VmMap::VmMap(ObjectMap&& elements, const memory::Resource& allocation) : values(allocation)
 {
-    for (auto& [key, object] : elements) values[key] = CompactValue(std::move(object.value));
+    for (auto& [key, object] : elements) values[key] = CompactValue(std::move(object.value), allocation);
 }
 
-CifaBytecode::CompactValue::CompactValue(std::any value)
-    : Storage(import_resource(std::move(value)))
+CifaBytecode::CompactValue::CompactValue(std::any value, const memory::Resource& allocation)
+    : Storage(import_resource(std::move(value), allocation))
 {
 }
 
-CifaBytecode::CompactValue::CompactValue(const Object::Storage& value)
+CifaBytecode::CompactValue::CompactValue(const Object::Storage& value, const memory::Resource& allocation)
 {
     if (const auto* integer = value_get_if<std::int64_t>(&value)) emplace<std::int64_t>(*integer);
     else if (const auto* floating = value_get_if<double>(&value)) emplace<double>(*floating);
     else if (const auto* boolean = value_get_if<bool>(&value)) emplace<bool>(*boolean);
     else if (const auto* resource = value_get_if<std::any>(&value))
     {
-        Storage::operator=(import_resource(*resource));
+        Storage::operator=(import_resource(*resource, allocation));
     }
 }
 
-CifaBytecode::CompactValue::CompactValue(Object::Storage&& value)
+CifaBytecode::CompactValue::CompactValue(Object::Storage&& value, const memory::Resource& allocation)
 {
     if (auto* integer = value_get_if<std::int64_t>(&value)) emplace<std::int64_t>(*integer);
     else if (auto* floating = value_get_if<double>(&value)) emplace<double>(*floating);
     else if (auto* boolean = value_get_if<bool>(&value)) emplace<bool>(*boolean);
     else if (auto* resource = value_get_if<std::any>(&value))
     {
-        Storage::operator=(import_resource(std::move(*resource)));
+        Storage::operator=(import_resource(std::move(*resource), allocation));
     }
 }
 
@@ -120,32 +120,34 @@ CifaBytecode::CompactValue& CifaBytecode::CompactValue::operator=(CompactValue&&
     return *this;
 }
 
-CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(const std::any& value)
+CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(const std::any& value, const memory::Resource& allocation)
 {
+    if (const auto* text = std::any_cast<std::string>(&value)) return VmString(*text, allocation);
     const auto* objects = std::any_cast<ObjectVector>(&value);
     if (!objects)
     {
-        if (const auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(*map);
+        if (const auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(*map, allocation);
         return value;
     }
-    std::vector<CompactValue> elements;
+    std::pmr::vector<CompactValue> elements(allocation.get());
     elements.reserve(objects->size());
-    for (const auto& object : *objects) elements.emplace_back(object.value);
-    return VmArray(std::move(elements));
+    for (const auto& object : *objects) elements.emplace_back(object.value, allocation);
+    return VmArray(std::move(elements), allocation);
 }
 
-CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(std::any&& value)
+CifaBytecode::CompactValue::Storage CifaBytecode::CompactValue::import_resource(std::any&& value, const memory::Resource& allocation)
 {
+    if (auto* text = std::any_cast<std::string>(&value)) return VmString(*text, allocation);
     auto* objects = std::any_cast<ObjectVector>(&value);
     if (!objects)
     {
-        if (auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(std::move(*map));
+        if (auto* map = std::any_cast<ObjectMap>(&value)) return VmMap(std::move(*map), allocation);
         return std::move(value);
     }
-    std::vector<CompactValue> elements;
+    std::pmr::vector<CompactValue> elements(allocation.get());
     elements.reserve(objects->size());
-    for (auto& object : *objects) elements.emplace_back(std::move(object.value));
-    return VmArray(std::move(elements));
+    for (auto& object : *objects) elements.emplace_back(std::move(object.value), allocation);
+    return VmArray(std::move(elements), allocation);
 }
 
 Object::Storage CifaBytecode::CompactValue::export_storage() const
@@ -160,9 +162,10 @@ Object::Storage CifaBytecode::CompactValue::export_storage() const
     if (const auto* map = resource<VmMap>())
     {
         ObjectMap fields;
-        for (const auto& [key, value] : map->values.readable()) fields[key].value = value.export_storage();
+        for (const auto& [key, value] : map->values.readable()) fields[std::string(key)].value = value.export_storage();
         return fields;
     }
+    if (const auto* text = resource<std::pmr::string>()) return std::any(std::string(*text));
     if (const auto* resource = std::get_if<std::any>(this)) return *resource;
     if (const auto* integer = std::get_if<std::int64_t>(this)) return *integer;
     if (const auto* floating = std::get_if<double>(this)) return *floating;
@@ -172,7 +175,7 @@ Object::Storage CifaBytecode::CompactValue::export_storage() const
 
 Object::Storage CifaBytecode::CompactValue::take_storage()
 {
-    if (resource<VmArray>() || resource<VmMap>())
+    if (resource<VmArray>() || resource<VmMap>() || resource<std::pmr::string>())
     {
         // 消费当前句柄不能连带消费另一个 VM 值仍共享的元素。
         auto result = export_storage();
@@ -188,19 +191,19 @@ Object::Storage CifaBytecode::CompactValue::take_storage()
     return result;
 }
 
-CifaBytecode::Scope::Binding* CifaBytecode::Scope::find(const std::string& name)
+CifaBytecode::Scope::Binding* CifaBytecode::Scope::find(std::string_view name)
 {
     for (auto& binding : bindings)
-        if (binding.name == name) return &binding;
+        if (std::string_view(binding.name) == name) return &binding;
     return nullptr;
 }
 
 CifaBytecode::Scope::Binding& CifaBytecode::Scope::create(const std::string& name)
 {
     if (auto* existing = find(name)) return *existing;
-    if (!dynamic_registers) dynamic_registers = std::make_unique<RegisterSlots>();
+    if (!dynamic_registers) dynamic_registers = std::make_unique<RegisterSlots>(0, *value_resource);
     const size_t slot = dynamic_registers->append();
-    bindings.push_back({name, dynamic_registers.get(), slot});
+    bindings.push_back({std::pmr::string(name, bindings.get_allocator().resource()), dynamic_registers.get(), slot});
     return bindings.back();
 }
 
@@ -211,7 +214,7 @@ void CifaBytecode::Scope::bind(const std::string& name, RegisterSlots* file, siz
         existing->file = file;
         existing->slot = slot;
     }
-    else bindings.push_back({name, file, slot});
+    else bindings.push_back({std::pmr::string(name, bindings.get_allocator().resource()), file, slot});
 }
 
 void CifaBytecode::RegisterSlots::grow(size_t required)
@@ -311,15 +314,18 @@ void CifaBytecode::RegisterSlots::import_object(size_t slot, const Object& value
     import_value(slot, value);
 }
 
-void CifaBytecode::RegisterSlots::set_name(size_t slot, const std::string& name)
+void CifaBytecode::RegisterSlots::set_name(size_t slot, std::string_view name)
 {
     const size_t index = window_base + slot;
     if (name.empty()) slot_names[index] = 0;
     else
     {
-        const auto [entry, inserted] = name_ids.try_emplace(name, name_pool.size());
-        if (inserted) name_pool.push_back(name);
-        slot_names[index] = entry->second;
+        const auto found = name_ids.find(name);
+        if(found != name_ids.end()) { slot_names[index] = found->second; return; }
+        const size_t id = name_pool.size();
+        name_pool.emplace_back(name);
+        name_ids.emplace(name_pool.back(), id);
+        slot_names[index] = id;
     }
 }
 
@@ -412,12 +418,12 @@ void CifaBytecode::RegisterSlots::store_payload(size_t slot, BytecodeValue::Stor
 
 void CifaBytecode::RegisterSlots::store_payload(size_t slot, const Object::Storage& value)
 {
-    values[window_base + slot].value = CompactValue(value);
+    values[window_base + slot].value = CompactValue(value, owner.resource);
 }
 
 void CifaBytecode::RegisterSlots::store_payload(size_t slot, Object::Storage&& value)
 {
-    values[window_base + slot].value = CompactValue(std::move(value));
+    values[window_base + slot].value = CompactValue(std::move(value), owner.resource);
 }
 
 void CifaBytecode::RegisterSlots::write_payload(size_t slot, BytecodeValue::Storage value)
@@ -434,7 +440,7 @@ void CifaBytecode::RegisterSlots::write_payload(size_t slot, BytecodeValue::Stor
 
 void CifaBytecode::RegisterSlots::write_payload(size_t slot, std::any value)
 {
-    write_payload(slot, CompactValue(std::move(value)));
+    write_payload(slot, CompactValue(std::move(value), owner.resource));
 }
 
 void CifaBytecode::RegisterSlots::write_payload(size_t slot, std::int64_t value)
@@ -699,13 +705,18 @@ bool CifaBytecode::RegisterSlots::binary_payloads(Opcode opcode, size_t destinat
         clear(destination);
         return true;
     }
-    const auto* left_text = left_resource ? std::any_cast<std::string>(left_resource) : nullptr;
-    const auto* right_text = right_resource ? std::any_cast<std::string>(right_resource) : nullptr;
+    const auto* left_text = left_payload.resource<std::pmr::string>();
+    const auto* right_text = right_payload.resource<std::pmr::string>();
     if (left_text && right_text)
     {
         switch (opcode)
         {
-        case Opcode::Add: write_payload(destination, std::any(*left_text + *right_text)); return true;
+        case Opcode::Add: {
+            VmString result(*left_text, owner.resource);
+            result.text += *right_text;
+            write_payload(destination, CompactValue(std::move(result)));
+            return true;
+        }
         case Opcode::Less: write_number(destination, *left_text < *right_text); return true;
         case Opcode::Greater: write_number(destination, *left_text > *right_text); return true;
         case Opcode::LessEqual: write_number(destination, *left_text <= *right_text); return true;
@@ -816,15 +827,17 @@ bool CifaBytecode::RegisterSlots::binary_numbers(Opcode opcode, size_t destinati
 
 std::string CifaBytecode::Machine::format_frame(const SourceLocation& location)
 {
-    const std::string filename = location.filename.empty() ? "<script>" : location.filename;
-    const std::string text = location.text.empty() ? location.str : location.text;
-    const std::string header = filename + ":" + std::to_string(location.line) + ", col " + std::to_string(location.col) + ": ";
+    const std::string_view filename = location.filename.empty() ? std::string_view("<script>") : std::string_view(location.filename);
+    const std::string_view text = location.text.empty() ? std::string_view(location.str) : std::string_view(location.text);
+    const std::string header = std::string(filename) + ":" + std::to_string(location.line) + ", col " + std::to_string(location.col) + ": ";
     std::string caret(header.size(), ' ');
     const size_t column = location.col == 0 ? 0 : location.col - 1;
     const size_t prefix = (std::min)(column, text.size());
     for (size_t index = 0; index < prefix; ++index) caret += text[index] == '\t' ? '\t' : ' ';
     if (column > prefix) caret.append(column - prefix, ' ');
-    return header + text + "\n" + caret + "^";
+    std::string result = header;
+    result += text;
+    return result + "\n" + caret + "^";
 }
 
 CifaBytecode::SourceLocation::SourceLocation(const CalUnit& node)
@@ -898,7 +911,7 @@ CifaBytecode::SourceRef CifaBytecode::source_ref(const CalUnit* node)
     return node == nullptr ? SourceRef{} : SourceRef(source_id(*node));
 }
 
-CifaBytecode::InstructionDiagnostic& CifaBytecode::pending_diagnostic(std::vector<BuildInstruction>& instructions)
+CifaBytecode::InstructionDiagnostic& CifaBytecode::pending_diagnostic(std::pmr::vector<BuildInstruction>& instructions)
 {
     auto& diagnostics = pending_diagnostics[&instructions];
     diagnostics.resize(instructions.size());
@@ -985,7 +998,7 @@ void CifaBytecode::seal_calls()
     }
 }
 
-std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
+std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
 {
     const auto compact_only = [](Opcode opcode)
     {
@@ -993,7 +1006,7 @@ std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
             || opcode == Opcode::Removed;
     };
     const size_t original_size = instructions.code.size();
-    std::vector<size_t> remap(original_size + 1);
+    std::pmr::vector<size_t> remap(original_size + 1, instructions.resource);
     size_t compact_size = 0;
     for (size_t index = 0; index < original_size; ++index)
         if (!compact_only(instructions.code[index].opcode))
@@ -1004,9 +1017,9 @@ std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
         const size_t current = index - 1;
         remap[current] = compact_only(instructions.code[current].opcode) ? remap[current + 1] : --compact_size;
     }
-    std::vector<Instruction> code;
-    std::vector<InstructionDiagnostic> diagnostics;
-    std::vector<std::vector<std::pair<size_t, bool>>> diagnostic_frames;
+    std::pmr::vector<Instruction> code(instructions.resource);
+    std::pmr::vector<InstructionDiagnostic> diagnostics(instructions.resource);
+    std::pmr::vector<std::pmr::vector<std::pair<size_t, bool>>> diagnostic_frames(instructions.resource);
     code.reserve(remap.back());
     diagnostics.reserve(remap.back());
     diagnostic_frames.reserve(remap.back());
@@ -1041,7 +1054,7 @@ std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     instructions.code = std::move(code);
     instructions.diagnostics = std::move(diagnostics);
     instructions.diagnostic_frames = std::move(diagnostic_frames);
-    std::vector<size_t> loop_ids(instructions.code.size(), std::numeric_limits<size_t>::max());
+    std::pmr::vector<size_t> loop_ids(instructions.code.size(), std::numeric_limits<size_t>::max(), instructions.resource);
     for (size_t pc = 0; pc < instructions.code.size(); ++pc)
         if (instructions.code[pc].opcode == Opcode::LoopMark)
         {
@@ -1062,6 +1075,31 @@ std::vector<size_t> CifaBytecode::compact(Instructions& instructions)
         if (operation.destination != 0 || opcode < Opcode::Less || opcode > Opcode::NotEqual) continue;
         instruction.opcode = Opcode::NumericCompareBranch;
         instruction.member_site = next.operand;
+    }
+    // Resolve the loop pattern once, after jump remapping and compare fusion.
+    // Other conditions (including side effects and mutable bounds) retain the
+    // ordinary update followed by full condition evaluation.
+    instructions.integer_loops.clear();
+    for (auto& instruction : instructions.code)
+    {
+        if (instruction.opcode == Opcode::IncrementLocal || instruction.opcode == Opcode::NumericForNext)
+            instruction.plain_increment = !variable_sites[instruction.variable_site - 1].with_type;
+        if (instruction.opcode != Opcode::NumericForNext) continue;
+        instruction.member_site = 0;
+        const size_t condition = instruction.auxiliary;
+        if (condition + 1 >= instructions.code.size()) continue;
+        const auto& compare = instructions.code[condition];
+        if (compare.opcode != Opcode::NumericCompareBranch
+            || instructions.code[condition + 1].opcode != Opcode::Branch) continue;
+        const auto& operation = instructions.numeric_operations[compare.auxiliary];
+        // A local integer compared with an integer literal using '<'. The local
+        // may be changed by the body; its current value/type is checked at runtime.
+        if (operation.flags != 4 || operation.left != instruction.operand
+            || static_cast<Opcode>(operation.opcode) != Opcode::Less) continue;
+        const auto* limit = constants[operation.right].value.get_if<std::int64_t>();
+        if (!limit) continue;
+        instructions.integer_loops.push_back({*limit, condition + 2, compare.member_site});
+        instruction.member_site = instructions.integer_loops.size();
     }
     return remap;
 }
@@ -1088,6 +1126,200 @@ std::optional<size_t> CifaBytecode::local_slot(const CalUnit& node, bool declare
     for (auto scope = compile_local_scopes.rbegin(); scope != compile_local_scopes.rend(); ++scope)
         if (const auto found = scope->find(node.str); found != scope->end()) return found->second;
     return {};
+}
+
+bool CifaBytecode::block_needs_runtime_scope(const CalUnit& node)
+{
+    const auto found = compile_scope_effects.find(&node);
+    return found == compile_scope_effects.end() || found->second;
+}
+
+void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conversions)
+{
+    // Lexical binding facts are independent of runtime scope and local-slot
+    // allocation. The bool additionally proves a built-in numeric binding.
+    using Frame = std::pmr::unordered_map<std::string, bool>;
+    using State = std::pmr::vector<Frame>;
+    auto* resource = allocation_resource.get();
+    State scopes(resource);
+    scopes.emplace_back();
+    const auto numeric_type = [](const std::string& type)
+        { return type == "int" || type == "double" || type == "float"; };
+    if (compiling_function)
+        for (const auto& parameter : compiling_function->parameters)
+            scopes.back()[parameter.name] = numeric_type(parameter.type_name);
+    const auto copy = [&]() { return State(scopes, resource); };
+    const auto invalidate = [&]() { for (auto& frame : scopes) frame.clear(); };
+    const auto lookup = [&](const std::string& name) -> bool*
+    {
+        for (auto frame = scopes.rbegin(); frame != scopes.rend(); ++frame)
+            if (auto found = frame->find(name); found != frame->end()) return &found->second;
+        return nullptr;
+    };
+    const auto intersect = [](State& left, const State& right)
+    {
+        for (size_t i = 0; i < left.size(); ++i)
+        {
+            std::erase_if(left[i], [&](const auto& entry) { return !right[i].contains(entry.first); });
+            for (auto& [name, numeric] : left[i]) numeric = numeric && right[i].at(name);
+        }
+    };
+    struct Effect { bool scope = false; bool numeric = false; };
+    const auto analyze = [&](auto&& self, const CalUnit& node) -> Effect
+    {
+        if (node.type == CalUnitType::Constant) return {false, true};
+        if (node.type == CalUnitType::String || node.type == CalUnitType::Split) return {};
+        if (node.type == CalUnitType::Label || node.type == CalUnitType::Goto)
+        {
+            invalidate();
+            return {true, false};
+        }
+        if (node.type == CalUnitType::Parameter && node.v.empty())
+        {
+            if (node.with_type)
+            {
+                const bool numeric = numeric_type(node.type_name);
+                scopes.back()[node.str] = numeric;
+                return {true, numeric};
+            }
+            const auto* binding = lookup(node.str);
+            return {!binding, binding && *binding};
+        }
+        const bool statement_block = node.type == CalUnitType::Union && node.str == "{}"
+            && std::any_of(node.v.begin(), node.v.end(), [](const CalUnit& child)
+                { return child.is_statement() || child.type == CalUnitType::Label; });
+        if (node.type == CalUnitType::Union && (statement_block || node.str == "()"))
+        {
+            const bool block = statement_block;
+            if (block) scopes.emplace_back();
+            Effect result;
+            for (const auto& child : node.v)
+            {
+                const auto effect = self(self, child);
+                result.scope |= effect.scope;
+                result.numeric = effect.numeric;
+            }
+            if (block)
+            {
+                scopes.pop_back();
+                // A later loop iteration may require a more conservative decision.
+                compile_scope_effects[&node] |= result.scope;
+                // Effects owned by a nested block are contained by that block's
+                // own scope; they do not force its parent to allocate another.
+                result.scope = false;
+                result.numeric = false;
+            }
+            return result;
+        }
+        if ((node.type == CalUnitType::Key && node.str == "if")
+            || (node.type == CalUnitType::Operator && node.str == "?"))
+        {
+            auto condition = self(self, node.v[0]);
+            if (!condition.numeric) { invalidate(); condition.scope = true; }
+            auto incoming = copy();
+            const bool ternary = node.type == CalUnitType::Operator;
+            const auto yes = self(self, ternary ? node.v[1].v[0] : node.v[1]);
+            auto yes_state = copy();
+            scopes = std::move(incoming);
+            const auto no = ternary ? self(self, node.v[1].v[1])
+                : node.v.size() > 2 ? self(self, node.v[2]) : Effect{};
+            intersect(scopes, yes_state);
+            return {condition.scope || yes.scope || no.scope, yes.numeric && no.numeric};
+        }
+        const bool ordinary_for = node.type == CalUnitType::Key && node.str == "for"
+            && node.v.size() == 2 && node.v[0].v.size() == 3;
+        if (node.type == CalUnitType::Key && (ordinary_for || node.str == "while" || node.str == "do"))
+        {
+            Effect result;
+            if (ordinary_for) result = self(self, node.v[0].v[0]);
+            // Include entry for zero-trip loops, then intersect backedges until
+            // no definite binding/type fact changes. Do-loops use the same safe
+            // lower bound; they do not export first-iteration-only bindings.
+            auto entry = copy();
+            for (;;)
+            {
+                auto previous = copy();
+                if (node.str != "do")
+                {
+                    const auto condition = self(self, ordinary_for ? node.v[0].v[1] : node.v[0]);
+                    result.scope |= condition.scope || !condition.numeric;
+                    if (!condition.numeric) invalidate();
+                }
+                result.scope |= self(self, node.v[node.str == "do" ? 0 : 1]).scope;
+                if (ordinary_for) result.scope |= self(self, node.v[0].v[2]).scope;
+                if (node.str == "do")
+                {
+                    const auto condition = self(self, node.v[1].v[0]);
+                    result.scope |= condition.scope || !condition.numeric;
+                    if (!condition.numeric) invalidate();
+                }
+                intersect(scopes, entry);
+                intersect(scopes, previous);
+                if (scopes == previous) break;
+            }
+            result.numeric = false;
+            return result;
+        }
+        if (node.type == CalUnitType::Key && (node.str == "true" || node.str == "false"))
+            return {false, true};
+        if (node.type == CalUnitType::Key && (node.str == "return" || node.str == "break" || node.str == "continue"))
+        {
+            Effect result;
+            for (const auto& child : node.v) result.scope |= self(self, child).scope;
+            invalidate(); // Exited paths contribute no fallthrough facts.
+            return result;
+        }
+        if (node.type == CalUnitType::Operator && node.str == "=" && node.v.size() == 2
+            && node.v[0].type == CalUnitType::Parameter && node.v[0].v.empty())
+        {
+            const auto& target = node.v[0];
+            const bool existing = lookup(target.str) != nullptr;
+            const bool known_numeric = existing && *lookup(target.str);
+            const auto value = self(self, node.v[1]);
+            // A store through an unresolved/static host type can run a registered
+            // conversion. It must not preserve facts about other bindings.
+            const bool conversion = custom_conversions
+                && !(target.with_type ? numeric_type(target.type_name) : known_numeric);
+            if (conversion) invalidate();
+            bool* binding = target.with_type ? nullptr : lookup(target.str);
+            // Untyped names may resolve to host bindings, so literal assignment
+            // establishes existence without assuming their declared type.
+            const bool numeric = target.with_type ? numeric_type(target.type_name)
+                || (target.type_name == "auto" && value.numeric) : binding && *binding;
+            if (binding) *binding = numeric;
+            else scopes.back()[target.str] = numeric;
+            return {target.with_type || !existing || value.scope || conversion, value.numeric && numeric};
+        }
+        if (node.type == CalUnitType::Operator)
+        {
+            Opcode opcode;
+            const bool increment = node.str == "++" || node.str == "--" || node.str == "()++" || node.str == "()--";
+            if (operation(node, opcode) || increment || node.str == ",")
+            {
+                Effect result{false, true};
+                const bool conditional = node.str == "&&" || node.str == "||";
+                State skipped(resource);
+                for (size_t i = 0; i < node.v.size(); ++i)
+                {
+                    const auto child = self(self, node.v[i]);
+                    result.scope |= child.scope;
+                    result.numeric &= child.numeric;
+                    if (!child.numeric && node.str != ",") { invalidate(); result.scope = true; }
+                    if (conditional && i == 0) skipped = copy();
+                }
+                if (conditional) intersect(scopes, skipped);
+                return result;
+            }
+        }
+        // Calls, casts, containers, switch and range constructs can invoke host
+        // code or establish special bindings. Do not let child states leak into
+        // sibling alternatives or subsequent statements.
+        invalidate();
+        for (const auto& child : node.v) { self(self, child); invalidate(); }
+        return {true, false};
+    };
+    if (compiling_function) analyze(analyze, root);
+    else for (const auto& child : root.v) analyze(analyze, child);
 }
 
 bool CifaBytecode::operation(const CalUnit& node, Opcode& opcode)
@@ -1132,7 +1364,7 @@ bool CifaBytecode::operation(const CalUnit& node, Opcode& opcode)
 }
 
 bool CifaBytecode::try_fold_constant(const CalUnit& node, Object& value,
-    const std::unordered_map<std::string, Object>* parameters, std::unordered_set<std::string>* active_functions) const
+    const std::pmr::unordered_map<std::string, Object>* parameters, std::pmr::unordered_set<std::string>* active_functions) const
 {
     if (node.type == CalUnitType::Constant) return Cifa::parse_number_literal(node.str, value);
     if (node.type == CalUnitType::Parameter && node.v.empty() && parameters != nullptr)
@@ -1246,13 +1478,13 @@ bool CifaBytecode::try_fold_constant(const CalUnit& node, Object& value,
                     && definition->second.body.v.size() == 1 && definition->second.body.v[0].type == CalUnitType::Key
                     && definition->second.body.v[0].str == "return" && definition->second.body.v[0].v.size() == 1)
                 {
-                    std::unordered_map<std::string, Object> function_parameters;
+                    std::pmr::unordered_map<std::string, Object> function_parameters(allocation_resource.get());
                     for (size_t index = 0; index < arguments.size(); ++index)
                     {
                         if (!definition->second.arguments[index].type_name.empty()) return false;
                         function_parameters.emplace(definition->second.arguments[index].name, arguments[index]);
                     }
-                    std::unordered_set<std::string> local_active;
+                    std::pmr::unordered_set<std::string> local_active(allocation_resource.get());
                     auto& active = active_functions == nullptr ? local_active : *active_functions;
                     const std::string key = node.str + "/" + std::to_string(arguments.size());
                     if (!active.insert(key).second) return false;
@@ -1411,7 +1643,7 @@ size_t CifaBytecode::next_local_slot() const
     return next;
 }
 
-bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInstruction>& instructions)
+bool CifaBytecode::emit_register_expression(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions)
 {
     const auto eligible = [&](const auto& self, const CalUnit& value) -> bool
     {
@@ -1439,7 +1671,7 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInst
             {
                 Object number;
                 if (!Cifa::parse_number_literal(value.str, number)) translation_error = "unsupported bytecode numeric literal";
-                constants.push_back(std::move(number));
+                constants.emplace_back(std::move(number), allocation_resource);
                 return {constants.size() - 1, true, false, 0};
             }
             return {*local_slot(value, false), false, false, 0};
@@ -1474,7 +1706,7 @@ bool CifaBytecode::emit_register_expression(CalUnit& node, std::vector<BuildInst
     return true;
 }
 
-size_t CifaBytecode::emit_statement(CalUnit& node, std::vector<BuildInstruction>& instructions)
+size_t CifaBytecode::emit_statement(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions)
 {
     const size_t begin = instructions.size();
     auto* saved_statement_node = active_statement_node;
@@ -1512,7 +1744,7 @@ size_t CifaBytecode::emit_statement(CalUnit& node, std::vector<BuildInstruction>
     return begin;
 }
 
-void CifaBytecode::discard_statement_result(std::vector<BuildInstruction>& instructions, size_t begin,
+void CifaBytecode::discard_statement_result(std::pmr::vector<BuildInstruction>& instructions, size_t begin,
     std::optional<size_t> end)
 {
     for (size_t index = end.value_or(instructions.size()); index > begin; --index)
@@ -1528,7 +1760,7 @@ void CifaBytecode::discard_statement_result(std::vector<BuildInstruction>& instr
     }
 }
 
-void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructions)
+void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions)
 {
     if (optimization_enabled)
     {
@@ -1536,7 +1768,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         if (try_fold_constant(node, value))
         {
             instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
-            constants.push_back(std::move(value));
+            constants.emplace_back(std::move(value), allocation_resource);
             return;
         }
     }
@@ -1577,12 +1809,12 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             || node.v[1].str == "erase" || node.v[1].str == "contains"))
     {
         const size_t site = calls.size();
-        calls.push_back({source_ref(&node), {}});
+        calls.emplace_back(source_ref(&node), allocation_resource.get());
         auto& call = calls.back();
         if (const auto slot = local_slot(node.v[0], false)) call.local_slot = *slot + 1;
         call.global_receiver = compiling_function == nullptr
             || (call.local_slot == 0 && !compile_array_locals.contains(node.v[0].str));
-        std::vector<CalUnit*> argument_nodes;
+        std::pmr::vector<CalUnit*> argument_nodes(allocation_resource.get());
         std::function<void(CalUnit&)> flatten = [&](CalUnit& child)
         {
             if (child.str == ",") for (auto& item : child.v) flatten(item);
@@ -1634,7 +1866,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         && (node.v[1].str == "pop_back" || node.v[1].str == "clear" || node.v[1].str == "keys"))
     {
         const size_t site = calls.size();
-        calls.push_back({source_ref(&node), {}});
+        calls.emplace_back(source_ref(&node), allocation_resource.get());
         instructions.push_back({Opcode::Enter, source_ref(&node)});
         instructions.push_back({Opcode::MethodNoArgs, source_ref(&node), site});
         if (const auto slot = local_slot(node.v[0], false)) instructions.back().auxiliary = *slot + 1;
@@ -1688,7 +1920,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             return value.type == CalUnitType::Union && value.str == "()" && value.v.size() == 1 && self(self, value.v[0]);
         };
         const auto is_inline_expression = [](const auto& self, const CalUnit& value,
-            const std::unordered_set<std::string>& parameters) -> bool
+            const std::pmr::unordered_set<std::string>& parameters) -> bool
         {
             if (value.type == CalUnitType::Constant || value.type == CalUnitType::String
                 || (value.type == CalUnitType::Key && (value.str == "true" || value.str == "false"))) return true;
@@ -1703,7 +1935,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         };
         if (optimization_enabled && module_data->freeze_script_functions && compile_script_functions != nullptr)
         {
-            std::vector<CalUnit*> arguments;
+            std::pmr::vector<CalUnit*> arguments(allocation_resource.get());
             std::function<bool(CalUnit&)> flatten = [&](CalUnit& item)
             {
                 if (item.str == ",")
@@ -1727,7 +1959,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
                     && definition->second.body.v.size() == 1 && definition->second.body.v[0].type == CalUnitType::Key
                     && definition->second.body.v[0].str == "return" && definition->second.body.v[0].v.size() == 1)
                 {
-                    std::unordered_set<std::string> parameters;
+                    std::pmr::unordered_set<std::string> parameters(allocation_resource.get());
                     bool eligible = true;
                     for (size_t index = 0; index < arguments.size(); ++index)
                     {
@@ -1749,7 +1981,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
                         && is_inline_expression(is_inline_expression, definition->second.body.v[0].v[0], parameters);
                     if (eligible)
                     {
-                        std::unordered_map<std::string, const CalUnit*> replacements;
+                        std::pmr::unordered_map<std::string, const CalUnit*> replacements(allocation_resource.get());
                         for (size_t index = 0; index < arguments.size(); ++index)
                             replacements.emplace(definition->second.arguments[index].name, arguments[index]);
                         const auto substitute = [&](const auto& self, const CalUnit& source) -> CalUnit
@@ -1824,7 +2056,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             && native_math != native_functions.end() && native_math->second.builtin;
         if (original_math)
         {
-            std::vector<CalUnit*> arguments;
+            std::pmr::vector<CalUnit*> arguments(allocation_resource.get());
             std::function<void(CalUnit&)> flatten = [&](CalUnit& item)
             {
                 if (item.str == ",") for (auto& child : item.v) flatten(child);
@@ -1834,7 +2066,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             if (arguments.size() == direct_math_arity)
             {
                 const size_t site = calls.size();
-                calls.push_back({source_ref(&node), {}});
+                calls.emplace_back(source_ref(&node), allocation_resource.get());
                 calls.back().name_id = intern_name(node.str);
                 calls.back().math_kind = direct_math_kind;
                 if (direct_math_arity == 2)
@@ -1860,9 +2092,9 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             }
         }
         const size_t index = calls.size();
-        calls.push_back({source_ref(&node), {}});
+        calls.emplace_back(source_ref(&node), allocation_resource.get());
         auto& call = calls.back();
-        std::vector<CalUnit*> argument_nodes;
+        std::pmr::vector<CalUnit*> argument_nodes(allocation_resource.get());
         std::function<void(CalUnit&)> flatten = [&](CalUnit& item)
         {
             if (item.str == ",") for (auto& child : item.v) flatten(child);
@@ -1931,7 +2163,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         instructions.push_back({Opcode::Enter, source_ref(&node)});
         const size_t mark = instructions.size();
         instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_loops.push_back({compile_scopes, mark, {}, {}, true});
+        compile_loops.emplace_back(compile_scopes, mark, allocation_resource.get(), true);
         emit(node.v[0], instructions);
         instructions.push_back({Opcode::SwitchMark, source_ref(&node), mark});
         const size_t scope_enter = instructions.size();
@@ -1943,7 +2175,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             instructions.back().auxiliary = compile_local_scope_bases.back() + 1;
             compile_local_scopes.emplace_back();
         }
-        std::vector<size_t> pending_cases;
+        std::pmr::vector<size_t> pending_cases(allocation_resource.get());
         for (auto& child : node.v[1].v)
         {
             if (child.str == "case" || child.str == "default")
@@ -2012,7 +2244,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             instructions.push_back({Opcode::RangeBegin, source_ref(clause), mark});
             const size_t loop_mark = instructions.size();
             instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-            compile_loops.push_back({compile_scopes, loop_mark, {}, {}});
+            compile_loops.emplace_back(compile_scopes, loop_mark, allocation_resource.get());
             const size_t next = instructions.size();
             instructions.push_back({Opcode::RangeNext, source_ref(clause), mark});
             variable_sites.push_back({intern_name(clause->v[0].str), intern_name(clause->v[0].type_name), clause->v[0].with_type});
@@ -2059,7 +2291,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         instructions.push_back({Opcode::Enter, source_ref(&node)});
         const size_t mark = instructions.size();
         instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_loops.push_back({compile_scopes, mark, {}, {}});
+        compile_loops.emplace_back(compile_scopes, mark, allocation_resource.get());
         if (ordinary_for)
         {
             discard_statement_result(instructions, emit_statement(node.v[0].v[0], instructions));
@@ -2182,7 +2414,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             if (empty_array)
             {
                 instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
-                constants.emplace_back(std::vector<Object>{});
+                constants.emplace_back(ObjectVector{}, allocation_resource);
             }
             else emit(node.v[1], instructions);
             instructions.push_back({Opcode::Store, source_ref(&node), indexed_site});
@@ -2240,7 +2472,12 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
     if (node.type == CalUnitType::Union && !node.v.empty()
         && std::any_of(node.v.begin(), node.v.end(), [](CalUnit& child) { return child.is_statement() || child.type == CalUnitType::Label; }))
     {
-        const bool scope = node.str == "{}";
+        // Keep the function/root binding frame. For nested blocks, elide only
+        // scopes proven to have no binding effects. Block/label bookkeeping
+        // remains below, so goto visibility and unwind targets are unchanged.
+        const bool scope = node.str == "{}" && (!optimization_enabled
+            || (compiling_function != nullptr && compile_local_scopes.size() <= 1)
+            || block_needs_runtime_scope(node));
         size_t scope_enter = 0;
         if (scope)
         {
@@ -2259,7 +2496,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         if (!has_child) instructions.push_back({Opcode::Empty, source_ref(&node)});
         const size_t block_mark = instructions.size();
         instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_blocks.push_back({block_mark, {}, {}});
+        compile_blocks.emplace_back(block_mark, allocation_resource.get());
         for (const auto& child : node.v)
             if (child.type == CalUnitType::Label) compile_blocks.back().targets[child.str] = 0;
         for (auto& child : node.v)
@@ -2275,6 +2512,10 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         }
         for (const auto& jump : compile_blocks.back().jumps)
             instructions[jump.first].operand = compile_blocks.back().targets.at(jump.second);
+        // With no runtime scope and no labels, this block has no unwind target
+        // to snapshot. Retain the compile-time block boundary for goto checks.
+        if (!scope && node.str == "{}" && compile_blocks.back().targets.empty())
+            instructions[block_mark].opcode = Opcode::Removed;
         compile_blocks.pop_back();
         if (scope)
         {
@@ -2335,7 +2576,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             if (Cifa::parse_number_literal(node.str, value))
             {
                 instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
-                constants.push_back(std::move(value));
+                constants.emplace_back(std::move(value), allocation_resource);
             }
             else translation_error = "unsupported bytecode numeric literal";
         }
@@ -2356,7 +2597,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
         else if (node.type == CalUnitType::String)
         {
             instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
-            constants.emplace_back(node.str);
+            constants.emplace_back(node.str, allocation_resource);
         }
         else translation_error = "unsupported bytecode node: " + node.str;
         return;
@@ -2375,7 +2616,7 @@ void CifaBytecode::emit(CalUnit& node, std::vector<BuildInstruction>& instructio
             if (value.type != CalUnitType::Constant) return local_slot(value, false);
             Object number;
             if (!Cifa::parse_number_literal(value.str, number)) return {};
-            constants.push_back(std::move(number));
+            constants.emplace_back(std::move(number), allocation_resource);
             return constants.size() - 1;
         };
         const auto left = operand(node.v[0]);
@@ -2529,26 +2770,35 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             instructions.diagnostics[pc + 1].condition_source = instructions.diagnostics[pc].source;
             load.opcode = Opcode::Removed;
         }
+    alignas(std::max_align_t) std::byte verify_buffer[8192];
+    std::pmr::monotonic_buffer_resource verify_scratch(verify_buffer, sizeof(verify_buffer), instructions.resource);
     struct State
     {
+        explicit State(std::pmr::memory_resource* resource)
+            : frames(resource), diagnostics(resource), local_scope_bases(resource), calls(resource),
+              methods(resource), ranges(resource), switches(resource) {}
+        State(const State& other) : State(other.frames.get_allocator().resource()) { *this=other; }
+        State& operator=(const State&) = default;
         size_t register_top = 0;
-        std::vector<size_t> frames;
-        std::vector<std::pair<size_t, bool>> diagnostics;
+        std::pmr::vector<size_t> frames;
+        std::pmr::vector<std::pair<size_t, bool>> diagnostics;
         size_t scopes = 0;
-        std::vector<size_t> local_scope_bases;
-        std::vector<std::pair<size_t, bool>> calls;
-        std::vector<std::pair<size_t, size_t>> methods;
-        std::vector<size_t> ranges;
-        std::vector<size_t> switches;
+        std::pmr::vector<size_t> local_scope_bases;
+        std::pmr::vector<std::pair<size_t, bool>> calls;
+        std::pmr::vector<std::pair<size_t, size_t>> methods;
+        std::pmr::vector<size_t> ranges;
+        std::pmr::vector<size_t> switches;
         bool visited = false;
     };
-    std::vector<State> states(instructions.code.size() + 1);
-    instructions.diagnostic_frames.assign(instructions.code.size(), {});
+    std::pmr::vector<State> states(instructions.code.size() + 1, State(&verify_scratch), &verify_scratch);
+    instructions.diagnostic_frames.clear();
+    instructions.diagnostic_frames.resize(instructions.code.size());
     if (instructions.diagnostics.size() != instructions.code.size())
     { translation_error = "bytecode diagnostic table size mismatch"; return false; }
     instructions.register_inputs.clear();
     instructions.register_capacity = 0;
-    std::vector<size_t> pending{0};
+    std::pmr::vector<size_t> pending(&verify_scratch);
+    pending.push_back(0);
     states[0].visited = true;
     if (&instructions == &root_instructions)
     {
@@ -3197,7 +3447,11 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     return true;
 }
 
-CifaBytecode::CifaBytecode() : session(std::make_unique<Session>(*this))
+CifaBytecode::CifaBytecode()
+    : CifaBytecode(memory::default_resource()) {}
+
+CifaBytecode::CifaBytecode(memory::Resource resource)
+    : allocation_resource(resource ? std::move(resource) : memory::default_resource()), session(std::make_unique<Session>(*this))
 {
     for (const auto* name : {"print", "println", "to_string", "to_number", "type", "size", "sprintf", "format", "run_string", "run_file",
         "exit", "max", "min", "ifv", "ifvalue",
@@ -3212,7 +3466,7 @@ CifaBytecode::~CifaBytecode() = default;
 
 CifaBytecode::NativeCallContext::NativeCallContext(Machine& value_machine, RegisterSlots& value_destination,
     size_t value_result_slot, RegisterSlots& value_arguments, const size_t* value_argument_slots,
-    size_t value_argument_count, const std::vector<SourceLocation>& value_locations)
+    size_t value_argument_count, const std::pmr::vector<SourceLocation>& value_locations)
     : machine(value_machine), destination(value_destination), arguments(value_arguments),
       argument_slots(value_argument_slots), locations(value_locations), result_slot(value_result_slot),
       argument_count_value(value_argument_count) {}
@@ -3248,7 +3502,7 @@ bool CifaBytecode::NativeCallContext::is_string(size_t index) const
     if (index >= argument_count_value) return false;
     const auto& value = arguments.payload(argument_slots[index]);
     const auto* resource = value_get_if<std::any>(&value);
-    return resource && std::any_cast<std::string>(resource) != nullptr;
+    return value.resource<std::pmr::string>() != nullptr;
 }
 
 std::int64_t CifaBytecode::NativeCallContext::to_integer(size_t index) const
@@ -3289,7 +3543,7 @@ std::string CifaBytecode::NativeCallContext::to_string(size_t index) const
     if (index >= argument_count_value) { const_cast<NativeCallContext*>(this)->report_error("native argument is missing"); return {}; }
     const auto& value = arguments.payload(argument_slots[index]);
     const auto* resource = value_get_if<std::any>(&value);
-    if (const auto* text = resource ? std::any_cast<std::string>(resource) : nullptr) return *text;
+    if (const auto* text = value.resource<std::pmr::string>()) return std::string(*text);
     machine.conversion_error(arguments, argument_slots[index], "string", locations.empty() ? nullptr : &locations[index]);
     return {};
 }
@@ -3297,7 +3551,7 @@ std::string CifaBytecode::NativeCallContext::to_string(size_t index) const
 void CifaBytecode::NativeCallContext::set_result(std::int64_t value) { destination.write_payload(result_slot, value); result_written = true; }
 void CifaBytecode::NativeCallContext::set_result(double value) { destination.write_payload(result_slot, value); result_written = true; }
 void CifaBytecode::NativeCallContext::set_result(bool value) { destination.write_payload(result_slot, value); result_written = true; }
-void CifaBytecode::NativeCallContext::set_result(std::string value) { destination.write_payload(result_slot, std::any(std::move(value))); result_written = true; }
+void CifaBytecode::NativeCallContext::set_result(std::string value) { destination.write_text(result_slot, std::string_view(value)); result_written = true; }
 void CifaBytecode::NativeCallContext::set_empty_result() { destination.clear(result_slot); result_written = true; }
 void CifaBytecode::NativeCallContext::report_error(const std::string& message)
 {
@@ -3323,6 +3577,7 @@ bool CifaBytecode::register_native_function(const std::string& name, native_func
 
 void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, size_t host_native_function_version)
 {
+    compile_scope_effects.clear();
     module_data->int_type_id = intern_name("int");
     module_data->double_type_id = intern_name("double");
     source_lines.reserve(compiler.compilation_source_line_infos.size());
@@ -3335,11 +3590,19 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
     module_data->freeze_script_functions = optimization_enabled;
     if (compiled_valid)
     {
+        const bool custom_conversions = std::any_of(compiler.registered_types.begin(), compiler.registered_types.end(),
+            [](const auto& entry)
+            {
+                const auto& name = entry.first;
+                return name != "int" && name != "double" && name != "bool"
+                    && name != "string" && name != "float" && name != "char";
+            });
         compile_script_functions = &compiler.compilation_functions;
         compile_allows_script_constant_folding = optimization_enabled;
+        analyze_binding_scopes(compiler.compilation_root, custom_conversions);
         const size_t mark = root_instructions.code.size();
         root_instructions.build_code.push_back({Opcode::LoopMark, source_ref(&compiler.compilation_root)});
-        compile_blocks.push_back({mark, {}, {}});
+        compile_blocks.emplace_back(mark, allocation_resource.get());
         for (const auto& child : compiler.compilation_root.v)
             if (child.type == CalUnitType::Label) compile_blocks.back().targets[child.str] = 0;
         bool has_root_statement = false;
@@ -3371,7 +3634,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         {
             for (const auto& [arity, definition] : overloads)
             {
-                auto compiled = std::make_shared<FunctionCode>();
+                auto compiled = std::make_shared<FunctionCode>(allocation_resource.get());
                 compiled->name = name;
                 for (const auto& parameter : definition.arguments)
                     compiled->parameters.push_back({parameter.name, parameter.type_name});
@@ -3388,6 +3651,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                     const size_t slot = compiled->local_slot_count++;
                     compile_local_scopes.back().emplace(parameter.name, slot);
                 }
+                analyze_binding_scopes(definition.body, custom_conversions);
                 emit(const_cast<CalUnit&>(definition.body), compiled->instructions.build_code);
                 seal(compiled->instructions);
                 seal_calls();
@@ -3401,6 +3665,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             }
         }
         compile_script_functions = nullptr;
+        compile_scope_effects.clear();
         compile_allows_script_constant_folding = false;
     }
     source_ids.clear();
@@ -3410,6 +3675,9 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
 bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
     Object& result, size_t start)
 {
+    auto* persistent = machine.host.allocation_resource.get();
+    alignas(std::max_align_t) std::byte execution_buffer[8192];
+    std::pmr::monotonic_buffer_resource execution_scratch(execution_buffer, sizeof(execution_buffer), persistent);
     auto& interpreter = machine.host;
     auto& scopes = machine.scopes;
     scopes.reserve(scopes.size() + instructions.scope_capacity);
@@ -3434,7 +3702,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t size;
         ~RestoreScopes() { scopes.resize(size); }
     } restore_scopes{scopes, scope_base};
-    std::vector<Scope> reusable_scopes;
+    std::pmr::vector<Scope> reusable_scopes(&execution_scratch);
     auto release_scope = [&]()
     {
         if (!scopes.back().dynamic_registers)
@@ -3448,20 +3716,30 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     {
         while (scopes.size() > size) release_scope();
     };
-    struct LoopState { size_t scopes; size_t local_scope_bases; std::vector<size_t> ranges; std::vector<size_t> switches; };
-    std::vector<std::optional<LoopState>> loop_states(instructions.loop_state_count);
-    std::vector<size_t> local_scope_bases;
-    if (start != 0 && !loop_states.empty()) loop_states[0] = LoopState{scopes.size(), local_scope_bases.size()};
+    struct LoopState {
+        size_t scopes; size_t local_scope_bases;
+        std::pmr::vector<size_t> ranges; std::pmr::vector<size_t> switches;
+        LoopState(size_t s, size_t l, std::pmr::memory_resource* r) : scopes(s), local_scope_bases(l), ranges(r), switches(r) {}
+        LoopState(const LoopState& other) : LoopState(other.scopes,other.local_scope_bases,other.ranges.get_allocator().resource()) {
+            ranges=other.ranges; switches=other.switches;
+        }
+        LoopState(LoopState&&) = default;
+        LoopState& operator=(LoopState&&) = default;
+        LoopState& operator=(const LoopState&) = default;
+    };
+    std::pmr::vector<std::optional<LoopState>> loop_states(instructions.loop_state_count, persistent);
+    std::pmr::vector<size_t> local_scope_bases(persistent);
+    if (start != 0 && !loop_states.empty()) loop_states[0] = LoopState{scopes.size(), local_scope_bases.size(), persistent};
     struct SwitchState { size_t condition_slot = 0; bool active = false; };
-    std::unordered_map<size_t, SwitchState> switches;
+    std::pmr::unordered_map<size_t, SwitchState> switches(persistent);
     struct RangeState { size_t snapshot_slot = 0; size_t index = 0; };
-    std::unordered_map<size_t, RangeState> ranges;
+    std::pmr::unordered_map<size_t, RangeState> ranges(persistent);
     struct MethodArguments { size_t base = 0; size_t count = 0; size_t received = 0; };
-    std::unordered_map<size_t, MethodArguments> method_arguments;
+    std::pmr::unordered_map<size_t, MethodArguments> method_arguments(persistent);
     size_t method_argument_top = 0;
     struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
     std::optional<RangeBinding> range_binding;
-    std::deque<RegisterSlots> local_windows;
+    std::pmr::deque<RegisterSlots> local_windows(persistent);
     local_windows.emplace_back(registers, 0, 0);
     struct Frame
     {
@@ -3472,25 +3750,25 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t return_register;
         RegisterSlots* locals;
         ScopeStack scopes;
-        std::vector<size_t> local_scope_bases;
-        std::vector<std::optional<LoopState>> loops;
-        std::unordered_map<size_t, SwitchState> switches;
+        std::pmr::vector<size_t> local_scope_bases;
+        std::pmr::vector<std::optional<LoopState>> loops;
+        std::pmr::unordered_map<size_t, SwitchState> switches;
         const FunctionCode* function;
         const SourceLocation* call;
-        std::unordered_map<size_t, RangeState> ranges;
-        std::unordered_map<size_t, MethodArguments> method_arguments;
+        std::pmr::unordered_map<size_t, RangeState> ranges;
+        std::pmr::unordered_map<size_t, MethodArguments> method_arguments;
         size_t method_argument_top;
         const Module* owner;
         std::shared_ptr<const Module> module;
-        std::vector<bool> aliases;
+        std::pmr::vector<unsigned char> aliases;
         size_t register_base;
         size_t register_size;
         size_t register_top;
     };
-    std::deque<Frame> frames;
+    std::pmr::deque<Frame> frames(persistent);
     struct RestoreCaller
     {
-        std::deque<Frame>& frames;
+        std::pmr::deque<Frame>& frames;
         ScopeStack& scopes;
         ~RestoreCaller()
         {
@@ -3499,8 +3777,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     } restore_caller{frames, scopes};
     const Module* active_owner = &module;
     const size_t missing_global = std::numeric_limits<size_t>::max();
-    std::unordered_map<const Module*, std::vector<size_t>> global_links;
-    auto link_globals = [&](const Module* owner) -> std::vector<size_t>&
+    std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>> global_links(&execution_scratch);
+    auto link_globals = [&](const Module* owner) -> std::pmr::vector<size_t>&
     {
         auto [entry, inserted] = global_links.try_emplace(owner);
         if (inserted) entry->second.resize(owner->names.size(), missing_global);
@@ -3555,7 +3833,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     size_t error_pc = start;
     size_t pc = start;
     SourceRef register_assignment_source;
-    auto append_diagnostic_frames = [&](std::vector<std::pair<const SourceLocation*, bool>>& destination)
+    auto append_diagnostic_frames = [&](std::pmr::vector<std::pair<const SourceLocation*, bool>>& destination)
     {
         auto append = [&](const Module* owner, const Instructions* code, size_t instruction_pc, const SourceLocation* node)
         {
@@ -3599,7 +3877,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ~RestoreObjectReporter() { Object::clear_runtime_error_reporter(); }
     } restore_object_reporter;
     auto* active_locals = &local_windows.front();
-    std::vector<bool> active_aliases;
+    std::pmr::vector<unsigned char> active_aliases(persistent);
     auto bind_local_storage = [&](const std::string& name, size_t slot, bool current_only)
     {
         active_aliases[slot] = true;
@@ -3794,7 +4072,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::ScopeEnter:
         {
-            if (reusable_scopes.empty()) scopes.emplace_back();
+            if (reusable_scopes.empty()) scopes.emplace_back(machine.host.allocation_resource);
             else
             {
                 scopes.push_back(std::move(reusable_scopes.back()));
@@ -3830,7 +4108,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::LoopMark:
         {
             auto& state = loop_states[instruction.auxiliary];
-            state = LoopState{scopes.size(), local_scope_bases.size()};
+            state = LoopState{scopes.size(), local_scope_bases.size(), persistent};
             for (const auto& entry : ranges) state->ranges.push_back(entry.first);
             for (const auto& entry : switches) state->switches.push_back(entry.first);
             continue;
@@ -3979,7 +4257,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const auto& site = active_owner->calls[instruction.operand];
             const auto& method_name = active_owner->names[site.name_id];
             auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-            std::vector<SourceLocation> arguments;
+            alignas(std::max_align_t) std::byte argument_buffer[2048];
+            std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
+            std::pmr::vector<SourceLocation> arguments(&argument_scratch);
             RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
                 + active_instructions->temporary_count + active_instructions->switch_count
                 + active_instructions->range_count + 1, 0);
@@ -4019,7 +4299,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const auto& site = active_owner->calls[instruction.operand];
             const auto& method_name = active_owner->names[site.name_id];
             auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-            std::vector<SourceLocation> arguments;
+            alignas(std::max_align_t) std::byte argument_buffer[2048];
+            std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
+            std::pmr::vector<SourceLocation> arguments(&argument_scratch);
             RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
                 + active_instructions->temporary_count + active_instructions->switch_count
                 + active_instructions->range_count + 1, 0);
@@ -4069,7 +4351,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         {
             const auto& site = active_owner->calls[instruction.operand];
             auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-            std::vector<SourceLocation> arguments;
+            alignas(std::max_align_t) std::byte argument_buffer[2048];
+            std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
+            std::pmr::vector<SourceLocation> arguments(&argument_scratch);
             RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
                 + active_instructions->temporary_count + active_instructions->switch_count
                 + active_instructions->range_count + 1, 0);
@@ -4178,7 +4462,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     const size_t count = requested < 0 ? 0 : static_cast<size_t>(requested);
                     if (!array)
                     {
-                        file.write_payload(slot, BytecodeValue::Storage(VmArray(count)));
+                        file.write_payload(slot, BytecodeValue::Storage(VmArray(count, machine.host.allocation_resource)));
                         array = file.resource_payload(slot).resource<VmArray>();
                     }
                     else array->values.resize(count);
@@ -4320,7 +4604,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Array:
         {
-            VmArray elements(instruction.operand);
+            VmArray elements(instruction.operand, machine.host.allocation_resource);
             for (size_t index = elements.values.size(); index > 0; --index)
             {
                 const size_t argument = input_slot(instruction.input_count - elements.values.size() + index - 1);
@@ -4344,7 +4628,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if (known == machine.functions.end()) machine.set_error("function '" + call_name + "' is not defined");
                     else
                     {
-                        std::vector<size_t> arities;
+                        std::pmr::vector<size_t> arities(&execution_scratch);
                         for (const auto& entry : known->second) arities.push_back(entry.first);
                         std::sort(arities.begin(), arities.end());
                         std::string available;
@@ -4406,7 +4690,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     result = machine.error_result();
                     return true;
                 }
-                ScopeStack locals(1);
+                ScopeStack locals(scopes.get_allocator());
+                locals.emplace_back(machine.host.allocation_resource);
                 const size_t caller_base = registers.base();
                 const size_t caller_size = registers.size();
                 const size_t local_count = (std::max)(cached->local_slot_count, call.arguments.size());
@@ -4575,7 +4860,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     auto& binding = scopes.back().create(name);
                     if (!value_holds<std::any>(binding.file->resource_payload(binding.slot))
                         || !std::any_cast<VmArray>(&value_get<std::any>(binding.file->resource_payload(binding.slot))))
-                        binding.file->write_payload(binding.slot, std::any(VmArray{}));
+                        binding.file->write_payload(binding.slot, std::any(VmArray(0, machine.host.allocation_resource)));
                     const size_t absolute = binding.file->base() + binding.slot;
                     auto descriptor = binding.file->type_pool[binding.file->slot_types[absolute]];
                     descriptor.element = active_owner->names[site.type_id];
@@ -4609,26 +4894,34 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::NumericForNext:
         {
-            std::int64_t integer = 0;
-            double floating = 0;
-            bool is_double = false;
-            const auto& binding = active_owner->variable_sites[instruction.variable_site - 1];
-            if (instruction.operand < active_locals->size() && !active_aliases[instruction.operand]
-                && !binding.with_type
-                && active_locals->number(instruction.operand, integer, floating, is_double)
-                && !is_double && value_holds<std::int64_t>(active_locals->payload(instruction.operand)))
-            {
-                const auto before = static_cast<std::uint64_t>(integer);
-                const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
-                active_locals->write_number(instruction.operand,
-                    std::bit_cast<std::int64_t>(add ? before + 1 : before - 1), true);
-                pc = instruction.auxiliary;
-                continue;
-            }
+            // Keep the integer payload in place: no numeric conversion, result
+            // copy, or diagnostic lookup is needed on this path.
+            const auto slot = instruction.operand;
+            if (instruction.plain_increment && slot < active_locals->size() && !active_aliases[slot])
+                if (auto* integer = active_locals->resource_payload(slot).get_if<std::int64_t>()) {
+                    const auto before = static_cast<std::uint64_t>(*integer);
+                    const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
+                    *integer = std::bit_cast<std::int64_t>(add ? before + 1 : before - 1);
+                    if (instruction.member_site != 0) {
+                        const auto& loop = active_instructions->integer_loops[instruction.member_site - 1];
+                        pc = *integer < loop.limit ? loop.body : loop.exit;
+                    }
+                    else pc = instruction.auxiliary;
+                    continue;
+                }
             [[fallthrough]];
         }
         case Opcode::IncrementLocal:
         {
+            const auto slot = instruction.operand;
+            if (instruction.plain_increment && instruction.discard_result
+                && slot < active_locals->size() && !active_aliases[slot])
+                if (auto* integer = active_locals->resource_payload(slot).get_if<std::int64_t>()) {
+                    const auto before = static_cast<std::uint64_t>(*integer);
+                    const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
+                    *integer = std::bit_cast<std::int64_t>(add ? before + 1 : before - 1);
+                    continue;
+                }
             const auto& source = current_location();
             if (instruction.operand >= active_locals->size())
             {
@@ -5580,7 +5873,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t argument = input_slot(instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             std::optional<size_t> length;
-            if (const auto* text = input.resource<std::string>()) length = text->size();
+            if (const auto* text = input.resource<std::pmr::string>()) length = text->size();
             else if (const auto* array = input.resource<VmArray>()) length = array->values.size();
             else if (const auto* map = input.resource<VmMap>()) length = map->values.size();
             registers.clear(argument);
@@ -5943,9 +6236,9 @@ void CifaBytecode::Machine::set_error(std::string message, const SourceLocation*
 {
     if (!error.empty()) return;
     error = "Runtime Error: " + std::move(message) + "\n";
-    std::vector<const SourceLocation*> frames;
-    std::vector<bool> function_frames;
-    auto diagnostic_frames = call_stack;
+    std::pmr::vector<const SourceLocation*> frames(host.allocation_resource.get());
+    std::pmr::vector<bool> function_frames(host.allocation_resource.get());
+    decltype(call_stack) diagnostic_frames(call_stack, host.allocation_resource.get());
     if (append_diagnostic_frames) append_diagnostic_frames(diagnostic_frames);
     for (const auto& frame : diagnostic_frames)
     {
@@ -6023,7 +6316,7 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
     if (destination.cast_numeric(target, source, slot, type_name)) return true;
     const auto& payload = source.payload(slot);
     const auto* resource = value_get_if<std::any>(&payload);
-    const auto identity = payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
+    const auto identity = payload.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
         ? std::type_index(typeid(double)) : value_holds<bool>(payload)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     const auto registered = host.registered_types.find(type_name);
@@ -6108,7 +6401,7 @@ bool CifaBytecode::Machine::bind_type(RegisterSlots& values, size_t slot, const 
     {
         const auto& payload = values.payload(slot);
         const auto* resource = value_get_if<std::any>(&payload);
-        descriptor.bound = payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
+        descriptor.bound = payload.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
             ? std::type_index(typeid(double)) : value_holds<bool>(payload)
             ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
         const auto name = host.type_names.find(descriptor.bound);
@@ -6176,7 +6469,9 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
         type.bound = integer ? typeid(std::int64_t) : typeid(double);
         type.declared = integer ? "int" : "double";
     }
-    const std::string name = destination.name_pool[destination.slot_names[index]];
+    // Name IDs belong to the destination storage and survive payload replacement.
+    // Keep the ID instead of copying and re-interning the same diagnostic name.
+    const size_t name_id = destination.slot_names[index];
     const auto& payload = source.payload(slot);
     const auto* resource = value_get_if<std::any>(&payload);
     const bool no_value = resource && std::any_cast<Object::NoValue>(resource);
@@ -6192,7 +6487,7 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     }
     const auto& converted = source.payload(value_slot);
     const auto* converted_resource = value_get_if<std::any>(&converted);
-    const auto identity = converted.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : converted_resource ? std::type_index(converted_resource->type()) : value_holds<double>(converted)
+    const auto identity = converted.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : converted.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : converted_resource ? std::type_index(converted_resource->type()) : value_holds<double>(converted)
         ? std::type_index(typeid(double)) : value_holds<bool>(converted)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
     if (!no_value && type.declared == "auto" && !source.empty(value_slot))
@@ -6215,7 +6510,7 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     assigned.bound = type.bound;
     assigned.declared = type.declared;
     destination.set_type(target, assigned);
-    destination.set_name(target, name);
+    destination.slot_names[destination_index] = name_id;
     if (value_slot != slot) source.clear(value_slot);
     return true;
 }
@@ -6284,22 +6579,22 @@ void CifaBytecode::Machine::read_named(RegisterSlots& destination, size_t slot, 
         }
         if (!existing_map)
         {
-            VmMap::Values::Container fields;
+            VmMap::Values::Container fields(host.allocation_resource.get());
             for (const auto& field : structures.at(type_name))
             {
-                fields.emplace(field.name, CompactValue{});
+                fields.emplace(std::pmr::string(field.name, host.allocation_resource.get()), CompactValue{});
             }
             if (!scopes.empty())
             {
                 auto& binding = scopes.back().create(name);
-                binding.file->write_payload(binding.slot, BytecodeValue::Storage(VmMap(std::move(fields))));
+                binding.file->write_payload(binding.slot, BytecodeValue::Storage(VmMap(std::move(fields), host.allocation_resource)));
                 binding.file->set_type(binding.slot, {typeid(ObjectMap), type_name, "", ""});
                 binding.file->set_name(binding.slot, name);
                 destination.copy(slot, *binding.file, binding.slot);
                 return;
             }
             const auto value = assign_named(name, type_name, true, true, location);
-            value.file->write_payload(value.slot, BytecodeValue::Storage(VmMap(std::move(fields))));
+            value.file->write_payload(value.slot, BytecodeValue::Storage(VmMap(std::move(fields), host.allocation_resource)));
             value.file->set_type(value.slot, {typeid(ObjectMap), type_name, "", ""});
             value.file->set_name(value.slot, name);
             destination.copy(slot, *value.file, value.slot);
@@ -6346,7 +6641,7 @@ void CifaBytecode::Machine::set_no_value_error(const Object::NoValue* no_value, 
     const std::string name = no_value == nullptr ? "<unknown>" : no_value->function_name;
     const std::string origin = no_value == nullptr ? "" : no_value->call_frame;
     error = "Runtime Error: function '" + name + "' has no return value\nNo return value originated at:\n" + origin;
-    std::vector<std::pair<const SourceLocation*, bool>> frames = call_stack;
+    std::pmr::vector<std::pair<const SourceLocation*, bool>> frames(call_stack, host.allocation_resource.get());
     if (append_diagnostic_frames) append_diagnostic_frames(frames);
     if (location != nullptr && format_frame(*location) != origin
         && (frames.empty() || frames.back().first != location)) frames.emplace_back(location, false);
@@ -6391,7 +6686,7 @@ bool CifaBytecode::Machine::condition(RegisterSlots& source, size_t slot, const 
 void CifaBytecode::Machine::conversion_error(RegisterSlots& source, size_t slot, const std::string& target, const SourceLocation* location)
 {
     const size_t index = source.base() + slot;
-    const auto& name = source.name_pool[source.slot_names[index]];
+    const std::string name(source.name_pool[source.slot_names[index]]);
     const auto& value = source.payload(slot);
     const auto* resource = value_get_if<std::any>(&value);
     if (const auto* no_value = resource ? std::any_cast<Object::NoValue>(resource) : nullptr)
@@ -6399,18 +6694,18 @@ void CifaBytecode::Machine::conversion_error(RegisterSlots& source, size_t slot,
         set_no_value_error(no_value, location);
         return;
     }
-    const std::string type = source.empty(slot) ? "<empty>" : resource ? resource->type().name()
+    const std::string type = source.empty(slot) ? "<empty>" : value.resource<std::pmr::string>() ? typeid(std::string).name() : resource ? resource->type().name()
         : value_holds<double>(value) ? typeid(double).name()
         : value_holds<bool>(value) ? typeid(bool).name() : typeid(std::int64_t).name();
     set_error("type conversion failed: variable '" + (name.empty() ? std::string("<temporary>") : name)
         + "' from " + type + " to " + target, location);
 }
 
-std::string CifaBytecode::Machine::string_value(RegisterSlots& source, size_t slot)
+std::string_view CifaBytecode::Machine::string_value(RegisterSlots& source, size_t slot)
 {
     const auto& value = source.payload(slot);
     const auto* resource = value_get_if<std::any>(&value);
-    if (const auto* text = resource ? std::any_cast<std::string>(resource) : nullptr) return *text;
+    if (const auto* text = value.resource<std::pmr::string>()) return *text;
     conversion_error(source, slot, "string", nullptr);
     return {};
 }
@@ -6476,7 +6771,7 @@ bool CifaBytecode::Machine::assign_indexed(const IndexedValueRef& target, Object
 {
     if (target.file)
     {
-        RegisterSlots boundary(2);
+        RegisterSlots boundary(2, host.allocation_resource);
         boundary.import_object(0, std::move(value));
         if (with_type && !bind_type(*target.file, target.slot, type_name, location)) return false;
         return assign(*target.file, target.slot, boundary, 0, 1, location);
@@ -6488,9 +6783,9 @@ bool CifaBytecode::Machine::assign_indexed(const IndexedValueRef& target, Object
     {
         Object converted;
         if (!assign(converted, std::move(value), true, target_type, location)) return false;
-        *target.compact = CompactValue(std::move(converted.value));
+        *target.compact = CompactValue(std::move(converted.value), host.allocation_resource);
     }
-    else *target.compact = CompactValue(std::move(value.value));
+    else *target.compact = CompactValue(std::move(value.value), host.allocation_resource);
     return true;
 }
 
@@ -6509,7 +6804,7 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
     {
         if (dimension >= dimensions) return false;
         const auto* payload = value_get_if<std::any>(&indices.resource_payload(index_slots[dimension]));
-        return payload != nullptr && std::any_cast<std::string>(payload) != nullptr;
+        return indices.resource_payload(index_slots[dimension]).resource<std::pmr::string>() != nullptr;
     };
     CompactValue* compact = nullptr;
     std::string compact_element_type;
@@ -6548,14 +6843,14 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         const size_t slot = binding->slot;
         if (string_key(0))
         {
-            file.write_payload(slot, BytecodeValue::Storage(VmMap{}));
+            file.write_payload(slot, BytecodeValue::Storage(VmMap(host.allocation_resource)));
             compact = &file.resource_payload(slot).resource<VmMap>()->values[string_value(indices, index_slots[0])];
         }
         else
         {
             const auto offset = integer_key(0);
             if (offset < 0) { set_error("array index is out of range"); return {}; }
-            file.write_payload(slot, BytecodeValue::Storage(VmArray(static_cast<size_t>(offset) + 1)));
+            file.write_payload(slot, BytecodeValue::Storage(VmArray(static_cast<size_t>(offset) + 1, host.allocation_resource)));
             auto& values = file.resource_payload(slot).resource<VmArray>()->values;
             const size_t absolute = file.base() + slot;
             compact_element_type = file.type_pool[file.slot_types[absolute]].element;
@@ -6576,7 +6871,7 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         auto* elements = resource.resource<VmArray>();
         if (!elements)
         {
-            base.file->write_payload(base.slot, BytecodeValue::Storage(VmArray(size)));
+            base.file->write_payload(base.slot, BytecodeValue::Storage(VmArray(size, host.allocation_resource)));
             elements = base.file->resource_payload(base.slot).resource<VmArray>();
         }
         else if (!only_check) elements->values.resize(size);
@@ -6590,8 +6885,8 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
     if (!resource.resource<VmArray>() && !resource.resource<VmMap>())
     {
         base.file->write_payload(base.slot, string_key(0)
-            ? BytecodeValue::Storage(VmMap{})
-            : BytecodeValue::Storage(VmArray{}));
+            ? BytecodeValue::Storage(VmMap(host.allocation_resource))
+            : BytecodeValue::Storage(VmArray(0, host.allocation_resource)));
     }
     auto& updated = base.file->resource_payload(base.slot);
     if (auto* fields = updated.resource<VmMap>())
@@ -6614,7 +6909,7 @@ CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::indexed(const std:
         auto* values = compact->resource<VmArray>();
         if (!values)
         {
-            *compact = CompactValue(std::any(ObjectVector{}));
+            *compact = CompactValue(std::any(ObjectVector{}), host.allocation_resource);
             values = compact->resource<VmArray>();
         }
         const auto offset = integer_key(index);
@@ -6631,7 +6926,7 @@ Object CifaBytecode::Machine::make_no_value(const std::string& function_name, co
 }
 
 Object CifaBytecode::Machine::call_host(const std::string& name, ObjectVector& arguments,
-    const std::vector<SourceLocation>& locations)
+    const std::pmr::vector<SourceLocation>& locations)
 {
     if (name == "exit")
     {
@@ -6680,7 +6975,7 @@ Object CifaBytecode::Machine::call_host(const std::string& name, ObjectVector& a
 }
 
 bool CifaBytecode::Machine::call_native_registers(const std::string& name, RegisterSlots& destination, size_t result,
-    RegisterSlots& values, const size_t* arguments, size_t count, const std::vector<SourceLocation>& locations)
+    RegisterSlots& values, const size_t* arguments, size_t count, const std::pmr::vector<SourceLocation>& locations)
 {
     const auto found = host.native_functions.find(name);
     if (found == host.native_functions.end()) return false;
@@ -6698,7 +6993,7 @@ bool CifaBytecode::Machine::call_native_registers(const std::string& name, Regis
             set_error("function '" + name + "' expects 1 argument, got " + std::to_string(count));
             return true;
         }
-        const auto source = string_value(values, arguments[0]);
+        const std::string source(string_value(values, arguments[0])); // 嵌套执行可能替换寄存器，必须持有副本。
         if (should_stop()) return true;
         auto nested_result = name == "run_string" ? host.run_script(source) : host.run_file(source);
         if (host.has_runtime_error())
@@ -6718,48 +7013,51 @@ bool CifaBytecode::Machine::call_native_registers(const std::string& name, Regis
 bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, RegisterSlots& destination, size_t result,
     RegisterSlots& values, const size_t* arguments, size_t count)
 {
-    const auto text_argument = [&](size_t index, std::string& text) -> bool
+    const auto text_argument = [&](size_t index, std::string_view& text) -> bool
     {
         if (index >= count) return false;
         const auto& value = values.payload(arguments[index]);
         const auto* resource = value_get_if<std::any>(&value);
-        const auto* string = resource ? std::any_cast<std::string>(resource) : nullptr;
+        const auto* string = value.resource<std::pmr::string>();
         if (!string) return false;
         text = *string;
         return true;
     };
-    const auto format_argument = [&](size_t index, const std::string& specification, std::string& text) -> bool
+    const auto format_argument = [&](size_t index, std::string_view specification, std::pmr::string& text) -> bool
     {
         if (index >= count) return false;
         const auto& value = values.payload(arguments[index]);
         try
         {
+            const auto append_formatted = [&](const auto& argument) {
+                text.clear();
+                if (specification.empty()) std::format_to(std::back_inserter(text), "{}", argument);
+                else {
+                    std::pmr::string pattern("{:", host.allocation_resource.get());
+                    pattern += specification;
+                    pattern += '}';
+                    std::vformat_to(std::back_inserter(text), pattern, std::make_format_args(argument));
+                }
+            };
             if (const auto* integer = value_get_if<std::int64_t>(&value))
             {
-                text = specification.empty() ? std::format("{}", *integer)
-                    : std::vformat("{:" + specification + "}", std::make_format_args(*integer));
+                append_formatted(*integer);
                 return true;
             }
             if (const auto* floating = value_get_if<double>(&value))
             {
-                text = specification.empty() ? std::format("{}", *floating)
-                    : std::vformat("{:" + specification + "}", std::make_format_args(*floating));
+                append_formatted(*floating);
                 return true;
             }
             if (const auto* boolean = value_get_if<bool>(&value))
             {
-                text = specification.empty() ? (*boolean ? "true" : "false")
-                    : std::vformat("{:" + specification + "}", std::make_format_args(*boolean));
+                append_formatted(*boolean);
                 return true;
             }
-            if (const auto* resource = value_get_if<std::any>(&value))
-            {
-                if (const auto* string = std::any_cast<std::string>(resource))
-                {
-                    text = specification.empty() ? *string
-                        : std::vformat("{:" + specification + "}", std::make_format_args(*string));
-                    return true;
-                }
+            if (const auto* string = value.resource<std::pmr::string>()) {
+                if (specification.empty()) text = *string;
+                else append_formatted(*string);
+                return true;
             }
         }
         catch (const std::format_error&)
@@ -6782,12 +7080,12 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
             if (const auto* integer = value_get_if<std::int64_t>(&value)) std::cout << *integer;
             else if (const auto* floating = value_get_if<double>(&value)) std::cout << *floating;
             else if (const auto* boolean = value_get_if<bool>(&value)) std::cout << (*boolean ? 1 : 0);
-            else if (const auto* resource = value_get_if<std::any>(&value))
+            else if (const auto* text = value.resource<std::pmr::string>())
             {
-                const auto* text = std::any_cast<std::string>(resource);
                 if (!text) { conversion_error(values, arguments[index], "string", nullptr); return true; }
                 std::cout << *text;
             }
+            else if (value_holds<std::any>(value)) { conversion_error(values, arguments[index], "string", nullptr); return true; }
             else { set_error("output requires a value"); return true; }
         }
         if (name == "println") std::cout << '\n';
@@ -6796,21 +7094,20 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
     }
     if (name == "to_string")
     {
-        std::string text;
+        std::pmr::string text(host.allocation_resource.get());
         if (count != 0)
         {
             const auto& argument = values.payload(arguments[0]);
-            if (const auto* integer = value_get_if<std::int64_t>(&argument)) text = std::format("{}", *integer);
-            else if (const auto* floating = value_get_if<double>(&argument)) text = std::format("{}", *floating);
-            else if (const auto* resource = value_get_if<std::any>(&argument))
+            if (const auto* integer = value_get_if<std::int64_t>(&argument)) std::format_to(std::back_inserter(text), "{}", *integer);
+            else if (const auto* floating = value_get_if<double>(&argument)) std::format_to(std::back_inserter(text), "{}", *floating);
+            else if (const auto* string = argument.resource<std::pmr::string>())
             {
-                const auto* string = std::any_cast<std::string>(resource);
                 if (!string) return false;
                 text = *string;
             }
             else return false;
         }
-        destination.write_payload(result, std::any(std::move(text)));
+        destination.write_text(result, std::move(text));
         return true;
     }
     if (name == "to_number")
@@ -6820,12 +7117,12 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
         if (const auto* integer = value_get_if<std::int64_t>(&value)) destination.write_payload(result, *integer);
         else if (const auto* floating = value_get_if<double>(&value)) destination.write_payload(result, *floating);
         else if (const auto* boolean = value_get_if<bool>(&value)) destination.write_payload(result, std::int64_t(*boolean));
-        else if (const auto* resource = value_get_if<std::any>(&value))
+        else if (const auto* text = value.resource<std::pmr::string>())
         {
-            const auto* text = std::any_cast<std::string>(resource);
             if (!text) { conversion_error(values, arguments[0], "number", nullptr); return true; }
             destination.write_payload(result, std::atof(text->c_str()));
         }
+        else if (value_holds<std::any>(value)) conversion_error(values, arguments[0], "number", nullptr);
         else destination.clear(result);
         return true;
     }
@@ -6856,14 +7153,11 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
                 else if (value_holds<bool>(value)) type = "bool";
                 else if (value.resource<VmArray>()) type = "array";
                 else if (value.resource<VmMap>()) type = "map";
-                else if (const auto* resource = value_get_if<std::any>(&value))
-                {
-                    if (std::any_cast<std::string>(resource)) type = "string";
-                    else type = resource->type().name();
-                }
+                else if (value.resource<std::pmr::string>()) type = "string";
+                else if (const auto* resource = value_get_if<std::any>(&value)) type = resource->type().name();
             }
         }
-        destination.write_payload(result, std::any(std::move(type)));
+        destination.write_text(result, std::string_view(type));
         return true;
     }
     if (name == "size")
@@ -6871,7 +7165,7 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
         if (count == 0) { destination.write_payload(result, std::int64_t{0}); return true; }
         if (count != 1) { set_error("function 'size' expects 0 or 1 arguments, got " + std::to_string(count)); return true; }
         const auto& value = values.payload(arguments[0]);
-        if (const auto* text = value.resource<std::string>())
+        if (const auto* text = value.resource<std::pmr::string>())
             destination.write_payload(result, static_cast<std::int64_t>(text->size()));
         else if (const auto* array = value.resource<VmArray>())
             destination.write_payload(result, static_cast<std::int64_t>(array->values.size()));
@@ -6882,10 +7176,10 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
     }
     if (name == "sprintf")
     {
-        std::string format;
-        if (count == 0) { destination.write_payload(result, std::any(format)); return true; }
+        std::string_view format; // 解析结束前不修改参数寄存器，也不调用宿主。
+        if (count == 0) { destination.write_text(result, format); return true; }
         if (!text_argument(0, format)) { conversion_error(values, arguments[0], "string", nullptr); return true; }
-        std::string output;
+        std::pmr::string output(host.allocation_resource.get());
         size_t argument_index = 1;
         for (size_t index = 0; index < format.size();)
         {
@@ -6911,7 +7205,7 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
             if (conversion == 's')
             {
                 const auto* resource = value_get_if<std::any>(&value);
-                const auto* string = resource ? std::any_cast<std::string>(resource) : nullptr;
+                const auto* string = value.resource<std::pmr::string>();
                 if (!string) { conversion_error(values, arguments[argument_index - 1], "string", nullptr); return true; }
                 std::snprintf(buffer, sizeof(buffer), (base + 's').c_str(), string->c_str());
             }
@@ -6933,15 +7227,15 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
             }
             output += buffer;
         }
-        destination.write_payload(result, std::any(std::move(output)));
+        destination.write_text(result, std::move(output));
         return true;
     }
     if (name == "format")
     {
-        std::string format;
-        if (count == 0) { destination.write_payload(result, std::any(format)); return true; }
+        std::string_view format; // 解析结束前不修改参数寄存器，也不调用宿主。
+        if (count == 0) { destination.write_text(result, format); return true; }
         if (!text_argument(0, format)) { conversion_error(values, arguments[0], "string", nullptr); return true; }
-        std::string output;
+        std::pmr::string output(host.allocation_resource.get());
         size_t automatic_index = 0;
         for (size_t index = 0; index < format.size();)
         {
@@ -6950,22 +7244,22 @@ bool CifaBytecode::Machine::call_builtin_registers(const std::string& name, Regi
             if (format[index] != '{') { output += format[index++]; continue; }
             const size_t end = format.find('}', index + 1);
             if (end == std::string::npos) { output += format[index++]; continue; }
-            const std::string inner = format.substr(index + 1, end - index - 1);
+            const std::string_view inner = format.substr(index + 1, end - index - 1);
             const size_t colon = inner.find(':');
-            const std::string index_text = inner.substr(0, colon);
-            const std::string specification = colon == std::string::npos ? std::string{} : inner.substr(colon + 1);
+            const std::string_view index_text = inner.substr(0, colon);
+            const std::string_view specification = colon == std::string::npos ? std::string_view{} : inner.substr(colon + 1);
             size_t value_index = automatic_index++;
             if (!index_text.empty())
             {
                 if (!std::all_of(index_text.begin(), index_text.end(), [](unsigned char character) { return std::isdigit(character) != 0; }))
                 { output += format[index++]; continue; }
-                value_index = static_cast<size_t>(std::stoull(index_text));
+                value_index = static_cast<size_t>(std::stoull(std::string(index_text)));
             }
-            std::string formatted;
+            std::pmr::string formatted(host.allocation_resource.get());
             if (value_index + 1 < count && format_argument(value_index + 1, specification, formatted)) output += formatted;
             index = end + 1;
         }
-        destination.write_payload(result, std::any(std::move(output)));
+        destination.write_text(result, std::move(output));
         return true;
     }
     if (name == "ifv" || name == "ifvalue")
@@ -7118,7 +7412,7 @@ CifaBytecode::Machine::NamedValueRef CifaBytecode::Machine::named_value(const st
 }
 
 void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot, const std::string& name, const SourceLocation& location,
-    NamedValueRef& receiver, const std::vector<SourceLocation>& locations, RegisterSlots& arguments)
+    NamedValueRef& receiver, const std::pmr::vector<SourceLocation>& locations, RegisterSlots& arguments)
 {
     destination.clear(slot);
     const auto integer_argument = [&](size_t index)
@@ -7247,7 +7541,7 @@ void CifaBytecode::Machine::call_method(RegisterSlots& destination, size_t slot,
         if (name == "keys")
         {
             ObjectVector keys;
-            for (const auto& [key, value] : values) keys.emplace_back(key);
+            for (const auto& [key, value] : values) keys.emplace_back(std::string(key));
             destination.write_payload(slot, std::any(std::move(keys)));
             return;
         }
@@ -7271,8 +7565,9 @@ Object CifaBytecode::run_module(Machine& machine, const Module& module)
     return !machine.error.empty() ? machine.error_result() : result;
 }
 
-CifaBytecode::Session::Session(CifaBytecode& interpreter) : machine(std::make_unique<Machine>(interpreter))
+CifaBytecode::Session::Session(CifaBytecode& interpreter)
 {
+    machine = std::make_unique<Machine>(interpreter);
 }
 
 CifaBytecode::Session::~Session() = default;
@@ -7293,12 +7588,12 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
     auto saved_call_stack = std::move(vm.call_stack);
     auto saved_append_diagnostic_frames = std::move(vm.append_diagnostic_frames);
     auto saved_error = std::move(vm.error);
-    RegisterSlots saved_registers;
+    RegisterSlots saved_registers(0, vm.host.allocation_resource);
     const bool saved_exit_requested = vm.exit_requested;
     if (nested)
     {
         saved_registers = std::move(vm.registers);
-        vm.registers = RegisterSlots{};
+        vm.registers = RegisterSlots(0, vm.host.allocation_resource);
     }
     vm.scopes.clear();
     vm.returns.clear();
@@ -7313,9 +7608,9 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
         Machine& machine;
         bool nested;
         ScopeStack scopes;
-        std::vector<Machine::ReturnState> returns;
-        std::vector<std::pair<const SourceLocation*, bool>> call_stack;
-        std::function<void(std::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
+        std::pmr::vector<Machine::ReturnState> returns;
+        std::pmr::vector<std::pair<const SourceLocation*, bool>> call_stack;
+        std::function<void(std::pmr::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
         std::string error;
         RegisterSlots registers;
         bool exit_requested;
@@ -7458,6 +7753,7 @@ CifaBytecode::BytecodeStatistics CifaBytecode::bytecode_statistics() const
     statistics.constant_count = module_data->constants.size();
     statistics.call_site_count = module_data->calls.size();
     statistics.total_instruction_count = statistics.root_instruction_count;
+    statistics.integer_loop_count = module_data->root_instructions.integer_loops.size();
     statistics.total_operand_count = statistics.root_operand_count;
     for (const auto& [name, overloads] : module_data->function_code)
     {
@@ -7466,6 +7762,7 @@ CifaBytecode::BytecodeStatistics CifaBytecode::bytecode_statistics() const
             statistics.functions.push_back({name, arity, function->instructions.code.size(),
                 function->instructions.register_inputs.size(), function->instructions.register_capacity});
             statistics.total_instruction_count += function->instructions.code.size();
+            statistics.integer_loop_count += function->instructions.integer_loops.size();
             statistics.total_operand_count += function->instructions.register_inputs.size();
         }
     }
@@ -7492,7 +7789,7 @@ Object CifaBytecode::run_script(std::string script)
         if (!compile_script(std::move(script))) return Object("", "Error");
         return run();
     }
-    auto nested = std::make_unique<CifaBytecode>();
+    auto nested = std::make_unique<CifaBytecode>(allocation_resource);
     nested->set_output_error(false);
     nested->set_optimization_enabled(optimization_enabled);
     session->sync_globals_to_host();
@@ -7526,7 +7823,7 @@ Object CifaBytecode::run_file(const std::string& filename)
         if (!compile_file(filename)) return Object("", "Error");
         return run();
     }
-    auto nested = std::make_unique<CifaBytecode>();
+    auto nested = std::make_unique<CifaBytecode>(allocation_resource);
     nested->set_output_error(false);
     nested->set_optimization_enabled(optimization_enabled);
     session->sync_globals_to_host();
@@ -7567,4 +7864,3 @@ void CifaBytecode::clear_compile_visibility()
     compile_visible_host_functions = nullptr;
 }
 }
-

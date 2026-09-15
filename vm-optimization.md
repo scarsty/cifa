@@ -1465,3 +1465,90 @@ A/B/B/A/A/B 交错执行。
 
 结论：两次 A 的波动超过 A/B 差异，不能宣称 PI 加速；保留为受限所有权转移。该路径只覆盖无显式类型、非 alias、普通局部赋值且结果被丢弃的已物化 RHS，不能机械扩展到类型转换、复合赋值、全局、成员或索引存储。
 
+
+
+## 2026-09-15：标准 PMR、作用域临时存储与性能分析
+
+本轮保留赋值路径的诊断名称 ID 复用，避免复制并重新驻留名称字符串；随后将 VM 内部容器迁移为标准 PMR，显式传递资源，并为生命周期明确的临时数据使用栈缓冲区。资源接口及边界见 [cifabytecode.md](cifabytecode.md)。早期自定义分配器和缓冲池实现已由标准实现替换。
+
+### 测量方法与结果
+
+机器为 Ryzen 7 9800X3D，Windows，MSVC x64 Release。PI 使用 `cifa/calc-pi.c` 的 500 位计算，移除输出语句；调用负载执行 20,000 次脚本函数调用。编译单独计时，预热一次后记录执行时间，每次检查结果。普通模式还与 AST 解释器比较结果；其解析加执行时间不能直接视为 VM 的纯执行时间。
+
+```powershell
+./tools/build.ps1
+./build/cmake/Release/cifa_benchmark.exe 15 pi
+./build/cmake/Release/cifa_benchmark.exe 15 calls
+./build/cmake/Release/cifa_benchmark.exe 15 pi --vm-only --pool
+./build/cmake/Release/cifa_benchmark.exe 3 calls --vm-only --pool --allocations
+```
+
+`--vm-only` 跳过 AST 对照，仍检查结果；`--pool` 使用标准内存池；`--allocations` 开启资源计数，会引入额外开销，不应用于耗时比较。运行基准时不要同时编译或采样。比较改动前后的版本时，应先保存基线可执行文件及匹配 PDB，再交错运行；`tools/compare.ps1 -Baseline <基线程序路径>` 提供 A/B/B/A/A/B 测量。
+
+本轮按旧池/直接分配/标准池/标准池/直接分配/旧池顺序运行六批，每批每种负载记录 15 次执行，关闭计数器：
+
+| 实现 | PI 两批中位数（ms） | 20,000 次调用两批中位数（ms） |
+| --- | ---: | ---: |
+| 上一版自定义分配器与缓冲池 | 43.3925 / 43.6902 | 24.5329 / 24.4580 |
+| 标准 PMR，直接分配 | 42.9401 / 42.5020 | 28.7914 / 28.6217 |
+| 标准 PMR、标准池与作用域临时存储 | 41.1391 / 40.9433 | 22.5563 / 22.6015 |
+
+两批中位数取平均，标准池版为 PI 41.0412 ms、调用 22.5789 ms；上一版为 43.5414 ms、24.4955 ms，耗时分别减少约 5.7% 和 7.8%。这是整个迁移的对比，不能单独归因于栈缓冲区。默认仍为直接分配，内存池需要显式启用。
+
+另行开启计数器，预热后三次执行的结果：
+
+| 负载 | VM 资源请求 | 直接分配的上游请求 | 标准池的上游请求 | 标准池生命周期上游峰值 |
+| --- | ---: | ---: | ---: | ---: |
+| PI | 165,312 | 165,312 | 0 | 1,748,640 字节 |
+| 20,000 次调用 | 1,500,078 | 1,500,078 | 0 | 324,104 字节 |
+
+预热后上游请求为零只说明池满足了这些请求，不表示进程没有其他堆分配。峰值包含编译阶段；标准池在 PI 上保留的内存高于上一版约 1.07 MiB 的上游峰值。
+
+Release 和 Debug 均通过直接分配回归、池分配回归及分配器测试。测试覆盖资源存活期、COW 隔离、嵌套回调、错误恢复、导出结果、释放大小/对齐、构造失败清理和重复执行后的内存稳定性。测试期间拒绝意外的全局默认 PMR 分配，库本身不修改全局默认资源。MSVC Debug 的部分哈希容器在 `noexcept` 构造中分配迭代器代理，故 Debug 仅对最初两次分配注入失败，Release 另测更深路径。测试及基准程序将 CRT/Windows 错误写入 stderr，并用终止处理器输出堆栈，避免失败时弹出模态窗口。
+
+原始样本在 `build/results/standard-pmr-*.txt`，分配计数在 `build/results/standard-counts-*.txt`，对应可执行文件和 PDB 保存在 `build/standard-pmr`。这些是本机生成、被 Git 忽略的产物，不随仓库分发。
+
+### Visual Studio CPU 采样
+
+```powershell
+./tools/profile.ps1 -Workload pi -Samples 200 -Pool -Output build/results/vm.diagsession
+```
+
+脚本使用已安装的 Visual Studio `VSDiagnostics` 命令行收集器，仅附加到本次启动的基准进程，不启动提权跟踪助手。程序先等待五秒供收集器附加，退出后保存报告；脚本使用会话 42，不要并发运行多个采样。采样时的耗时不作为性能比较数据。
+
+在 Visual Studio 中通过“文件 → 打开 → 文件”加载 `.diagsession`，打开 CPU Usage 详情，再选择 Flame Graph 或 Call Tree。关闭 Just My Code 可查看 STL 和分配器成本，选择稳定执行区间以排除启动和编译。保留采样所用的可执行文件及匹配 PDB。本轮报告为 `build/results/standard-pmr.diagsession`；收集报告无需 UI 自动化。
+
+## 2026-09-15：VM 字符串与安全的 string_view
+
+脚本字符串已从 `std::any` 移入 variant 的 `VmString`，由 `std::pmr::string` 和资源所有权组成；VM map 的键同时改为 PMR 字符串。复制显式使用原资源，移动转移所有权，宿主接口仍接收/返回普通 `std::string`。拼接、格式化和 native 返回直接构造 PMR 字符串，格式化写入 PMR 输出缓冲区。
+
+`string_view` 只用于当前操作中的查找和解析：map/作用域查找、诊断源文本、格式串及其子串。解析完成前不替换源寄存器。嵌套执行前保留脚本文本副本，避免重入使视图失效。公开返回值不借用 VM 字符串。未知宿主载荷仍保留 `std::any` 兼容路径；独立 `PmrAny` 暂未接入此路径。
+
+Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 字节字符串、长 map 键、数组/map 的 COW 隔离、格式结果覆盖原格式变量、嵌套 native 回调、类型推导及 VM 销毁后的结果读取。原有 NoValue 错误语义保持不变。
+
+### 同批 A/B/B/A/A/B
+
+基线为本轮修改前保存的 `build/before-pmr-strings/cifa_benchmark.exe`，候选保存在 `build/pmr-strings`。每种模式、每种负载各三批，每批预热后记录 15 次执行，未开启分配计数。下表为三批中位数的中位数：
+
+| 模式 | 负载 | 修改前（ms） | 修改后（ms） |
+| --- | --- | ---: | ---: |
+| 直接分配 | PI | 42.5363 | 42.0766 |
+| 直接分配 | 20,000 次调用 | 28.5994 | 28.2734 |
+| 标准池 | PI | 40.7282 | 40.6594 |
+| 标准池 | 20,000 次调用 | 22.4901 | 22.3494 |
+
+变化约为 0.2%–1.1%，不据此宣称有明确的整体提速。原始数据为 `build/results/strings-ab-*.txt`。
+
+新增 `strings` 负载执行 10,000 次长字符串函数返回、拼接、格式化和长度累加，初始字符串为 128 字节，结果必须为 `1388890`，并与 AST 后端对照：
+
+```powershell
+./build/cmake/Release/cifa_benchmark.exe 15 strings
+./build/cmake/Release/cifa_benchmark.exe 15 strings --pool
+./build/cmake/Release/cifa_benchmark.exe 3 strings --vm-only --pool --allocations
+```
+
+本机 15 次执行中位数为直接分配 `18.6295 ms`、标准池 `15.1187 ms`。这是当前版本的分配模式对比；旧二进制没有该负载，不作为字符串迁移的前后收益证据。原始数据为 `build/results/strings-workload-*.txt`。
+
+另外三次计数运行中，字符串负载共请求 VM 资源 `870,090` 次；直接分配同样到达上游 `870,090` 次，预热后的标准池上游请求为零，池生命周期上游峰值为 `328,200` 字节。PI 的 VM 资源请求从先前的 `165,312` 增至 `166,521`，因为字符串缓冲区现在计入 PMR 统计；统计覆盖范围变化不能直接解释为总堆分配变多。原始计数为 `build/results/strings-counts-*.txt`。
+
+本轮 Visual Studio CPU 报告为 `build/results/pmr-strings.diagsession`，匹配程序/PDB 在 `build/pmr-strings`。这些文件均为本机生成的 Git 忽略产物。采样命令仍使用 Visual Studio 收集器，不需要 UI 自动化或提权。
