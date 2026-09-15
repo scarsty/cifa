@@ -29,9 +29,9 @@
 | `42.48 ms` | `ConstantLocal` 直接写目标局部槽 | A/B/B/A/A/B：`43.51` -> `42.48 ms`，约快 `2.37%` |
 | `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A：`41.442` -> `39.216/39.330 ms`，约快 `5.3%` |
 
-注：2026-09-15 的分派器 handler 拆分序列在另一台 CPU 上测量，且基线已包含 `2ab6301`（allocator 与 scoped
-guard elision）等内容，不与上表跨机比较；独立图表见文末
-`## 2026-09-15：clang-cl 内联预算探针与分派器 handler 拆分（独立测机）`。
+注：2026-09-15 的 dispatcher handler 拆分是在另一台 CPU 上测量的，而且基线已经包含 `2ab6301`（allocator
+和省掉不必要的 scoped guard）等改动。因此，不能把这组结果和上表的数字跨机器直接相减；独立结果见文末
+`## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）`。
 
 未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用、
 冷热诊断分离。它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
@@ -1557,58 +1557,64 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 
 本轮 Visual Studio CPU 报告为 `build/results/pmr-strings.diagsession`，匹配程序/PDB 在 `build/pmr-strings`。这些文件均为本机生成的 Git 忽略产物。采样命令仍使用 Visual Studio 收集器，不需要 UI 自动化或提权。
 
-## 2026-09-15：编译器内联预算探针与 InterpState handler 拆分
-## 2026-09-15：clang-cl 内联预算探针与分派器 handler 拆分（独立测机）
+## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）
 
-本节序列在另一台 CPU 上测得；基线提交 `524f810` 已包含 `2ab6301` 的 allocator 与 scoped guard elision，
-只度量其后的 handler 形状改动，不与上方主表跨机相减。`84176aa` 只改测试源文件，不设点。
+这组实验是在另一台 CPU 上完成的。基线提交 `524f810` 已经包含 `2ab6301` 的 allocator 和 scoped guard 优化，
+所以这里只比较后续的 handler 结构改动，不能把结果和上面的主表跨机器相减。`84176aa` 只改了测试源码，
+没有改变 VM 二进制，因此不单独列入测量。
 
-### clang-cl 三方探针（重构前）
+### clang-cl 三组编译配置（拆分前）
 
-新增 `build/clangcl`（`-T ClangCL`，clang 22.1.3）与 `build/clangcl-big`（附加
-`-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`），三方交错轮转（3 轮 × 15 样本）：
+为了确认问题是否来自编译器的 inline budget，我们用同一份源码测试三种配置：MSVC、默认的 clang-cl，
+以及把 inline threshold 调高的 clang-cl。对应的构建目录是 `build/clangcl`（`-T ClangCL`，clang 22.1.3）
+和 `build/clangcl-big`（额外加入 `-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`）。
+三种配置交错运行，每种配置做 3 轮、每轮 15 次采样：
 
-| 负载 | MSVC | clang 默认 | clang 大阈值 |
+| 负载 | MSVC | clang-cl 默认 | clang-cl（高 inline threshold） |
 | --- | ---: | ---: | ---: |
 | PI | 39.30 | 29.50 | 22.20 |
 | 20,000 次调用 | 22.81 | 17.64 | 15.50 |
 | increment | 5.96 | 6.60 | 6.62 |
 
-同编译器仅提高内联阈值 PI 即 `-24.7%`，确认巨型 switch 耗尽内联预算；MSVC 无等价旋钮。increment 上
-MSVC 反而快约 11% 且阈值无效：小热 handler 没有预算问题，病灶在巨型 handler 体。Lua 参照为本地 MSVC
-构建（switch 分派），与 PI 对比同口径。
+在 clang-cl 的两个配置之间，只提高 inline threshold 就让 PI 快了 `24.7%`，这表明巨大的 `switch` 已经用完了
+inline budget；MSVC 没有对应的开关。在 `increment` 负载上，MSVC 反而快约 11%，调高 clang-cl 的 threshold
+也没有帮助。这说明小而常用的 handler 并不受 inline budget 影响，真正的问题在巨大的 handler 本身。Lua 的
+参考结果来自本机的 MSVC 构建，并且同样使用 `switch` dispatcher，所以这个比较是可比的。
 
-### handler 拆分（两批提交）
+### 拆分 handler（两批提交）
 
-新增 `CifaBytecode::InterpState`：执行循环状态的引用束，循环 lambda 改为成员函数，头文件只加一行前置
-声明；`NumericBinary`/`NumericBinaryLocal` 的 `register_binary` 回退改为直接调用。分两批把 22 个冷/巨型
-handler 拆为 `CIFA_NOINLINE` 成员函数；`IncrementLocal`、`ArrayPushGlobal`、`StoreLocal` 经 A/B 后保持
-内联。同会话逐提交交错测量（3 轮 × 15 样本）：
+我们新增了 `CifaBytecode::InterpState`，把执行循环需要的可变状态集中到一个状态对象中；原来写在循环里的
+lambda 辅助函数改成了成员函数，头文件只增加一行前置声明。`NumericBinary` 和 `NumericBinaryLocal` 的
+`register_binary` fallback 路径也改成直接调用。之后分两批把 22 个大型或低频的 handler 移到
+`CIFA_NOINLINE` 成员函数，让 dispatcher 主循环更小。根据 A/B 结果，`IncrementLocal`、`ArrayPushGlobal` 和
+`StoreLocal` 仍保留在 inline 路径中。每个提交都在同一次测试会话中重建并交错运行，每轮 15 次，共 3 轮：
 
 | 提交 | PI | calls | increment | incrementf |
 | --- | ---: | ---: | ---: | ---: |
 | `524f810` 基线 | 38.40 | 21.99 | 5.96 | 185.7 |
-| `033101d` 六个巨型 handler | 33.48 | 20.97 | 5.79 | 182.3 |
-| `0159b4a` 十六个冷 handler | 31.83 | 20.90 | 5.76 | 176.7 |
+| `033101d` 六个大型 handler | 33.48 | 20.97 | 5.79 | 182.3 |
+| `0159b4a` 十六个低频 handler | 31.83 | 20.90 | 5.76 | 176.7 |
 
-同会话累计：PI 约 `-17.1%`、calls 约 `-5.0%`、increment 约 `-3.4%`、incrementf 约 `-4.9%`。
-`StoreLocal` 快路/冷尾拆分试过后撤回：PI 差值跨会话翻转（一会话 `-3.4%`、另一会话 `+3.3%`），未达稳定
-收益标准。全部批次 Debug 回归 90/90。
+相对基线，这次会话中的累计变化是：PI 约 `-17.1%`、calls 约 `-5.0%`、increment 约 `-3.4%`、incrementf
+约 `-4.9%`。我们也试过把 `StoreLocal` 的低频路径拆出去，但结果在不同会话中方向相反：一次快 `3.4%`，
+另一次慢 `3.3%`。因此这项改动不够稳定，最终撤回。所有批次的 Debug 回归测试都通过了（90/90）。
 
-### clang-cl 复测（重构后）
+### clang-cl 复测（拆分后）
 
-| 负载 | MSVC | clang 默认 | clang 大阈值 |
+| 负载 | MSVC | clang-cl 默认 | clang-cl（高 inline threshold） |
 | --- | ---: | ---: | ---: |
 | PI | 32.83 | 27.94 | 21.88 |
 | 20,000 次调用 | 20.64 | 17.91 | 15.60 |
 | increment | 5.76 | 6.64 | 6.61 |
 
-MSVC 对 clang 默认的 PI 差距从约 `25%` 缩到约 `15%`，对大阈值 clang 从约 `43%` 缩到约 `33%`；clang
-默认自身也变快，说明结构收缩对两者都有利。大阈值相对默认仍余约 `-22%`：剩余热核心（LoadLocal/Peek、
-NumericCompareBranch、Branch 族、IncrementLocal 等）仍受默认内联预算，只能按"快路内联、冷尾 noinline"
-逐个拆分并 A/B。increment 的 MSVC 优势与分派结构无关。
+拆分后，MSVC 与默认 clang-cl 的 PI 差距从约 `25%` 缩小到约 `15%`；与高 inline threshold 的 clang-cl 的
+差距则从约 `43%` 缩小到约 `33%`。默认 clang-cl 自己也变快了，说明缩小 handler 体积对两种编译器都有帮助。
+即使把 threshold 调高，PI 仍比默认配置快约 `22%`，说明剩下的热点部分（`LoadLocal`/`Peek`、
+`NumericCompareBranch`、`Branch` handlers、`IncrementLocal` 等）仍受到默认 inline budget 的限制。后续应
+一次只拆一个 handler，把 fast path 留在 inline 路径，把低频 tail path 设为 `noinline`，并用 A/B 测试逐项确认。
+`increment` 上 MSVC 的优势来自生成的循环代码，与 dispatcher 的结构无关。
 
-复现配置：
+构建配置：
 
 ```powershell
 cmake -S . -B build/clangcl -G "Visual Studio 18 2026" -A x64 -T ClangCL
