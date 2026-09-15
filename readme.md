@@ -20,6 +20,8 @@ ps：目前经实测，Cifa已经能在一定程度上替换Lua。
 
 Cifa曾经单独开发，后来为方便改成了mlcc的一部分，目前因为AI的发展，可以迅速为其添加功能，逐渐可以实用化，因此再次转为独立的项目。
 
+独立编译字节码后端的用法及高性能宿主函数接口见 [cifabytecode.md](cifabytecode.md)。优化内容及前后实测时间见 [vm-optimization.md](vm-optimization.md)。
+
 ## 使用方法
 
 ### 基本用法

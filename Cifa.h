@@ -14,7 +14,6 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <type_traits>
 #include <typeindex>
 #include <unordered_map>

@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
-#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -273,49 +272,32 @@ Cifa::Cifa()
     register_function("ifv", ifv);
     register_function("ifvalue", ifv);
 
-    register_function("max", [](ObjectVector& x) -> Object
+    const auto extremum = []<bool maximum>(ObjectVector& arguments) -> Object
         {
-            if (x.size() == 0) { return cifa::Object(); }
-            if (x.size() == 1)
-            {
-                return x[0];
-            }
-            if (!x[0].isNumber()) { return x[0].to<double>(); }
-            bool floating = x[0].isType<double>();
+            if (arguments.empty()) return Object();
+            if (arguments.size() == 1) return arguments[0];
+            if (!arguments[0].isNumber()) return arguments[0].to<double>();
+            bool floating = arguments[0].isType<double>();
             size_t best = 0;
-            for (size_t i = 1; i < x.size(); i++)
+            for (size_t index = 1; index < arguments.size(); ++index)
             {
-                if (!x[i].isNumber()) { return x[i].to<double>(); }
-                floating = floating || x[i].isType<double>();
-                if (numeric_less(x[best], x[i]))
+                if (!arguments[index].isNumber()) return arguments[index].to<double>();
+                floating = floating || arguments[index].isType<double>();
+                if constexpr (maximum)
                 {
-                    best = i;
+                    if (numeric_less(arguments[best], arguments[index])) best = index;
+                }
+                else
+                {
+                    if (numeric_less(arguments[index], arguments[best])) best = index;
                 }
             }
-            return floating ? Object(x[best].toDouble()) : Object(x[best].toInt64());
-        });
-
-    register_function("min", [](ObjectVector& x) -> Object
-        {
-            if (x.size() == 0) { return cifa::Object(); }
-            if (x.size() == 1)
-            {
-                return x[0];
-            }
-            if (!x[0].isNumber()) { return x[0].to<double>(); }
-            bool floating = x[0].isType<double>();
-            size_t best = 0;
-            for (size_t i = 1; i < x.size(); i++)
-            {
-                if (!x[i].isNumber()) { return x[i].to<double>(); }
-                floating = floating || x[i].isType<double>();
-                if (numeric_less(x[i], x[best]))
-                {
-                    best = i;
-                }
-            }
-            return floating ? Object(x[best].toDouble()) : Object(x[best].toInt64());
-        });
+            return floating ? Object(arguments[best].toDouble()) : Object(arguments[best].toInt64());
+        };
+    register_function("max", [extremum](ObjectVector& arguments)
+        { return extremum.operator()<true>(arguments); });
+    register_function("min", [extremum](ObjectVector& arguments)
+        { return extremum.operator()<false>(arguments); });
     register_function("random", [this](ObjectVector& x) -> Object
         {
             if (x.size() == 0) { return Object(double(rand()) / RAND_MAX); }

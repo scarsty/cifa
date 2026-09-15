@@ -1,14 +1,13 @@
-#pragma once
+﻿#pragma once
 #include "Cifa.h"
 #include <optional>
-#include <memory_resource>
 
 namespace cifa
 {
 class CifaBytecode : public Cifa
 {
     friend class Cifa;
-    friend struct RegisterBackendTest;
+    // 最终执行流的操作码；构建期标记会在 compact() 中移出执行流。
     enum class Opcode { Constant, ConstantLocal, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Enter, Leave, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
         LessEqual, GreaterEqual, Equal, NotEqual, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight,
         Positive, Negative, LogicalNot, BitNot, Cast, Size, MathUnary, MathBinary, Empty, Jump, Branch,
@@ -17,12 +16,14 @@ class CifaBytecode : public Cifa
         CallBegin, Call, CallEnd, Peek, Array, Index, IndexLocal, RangeBegin, RangeNext, RangeEnd, MethodNoArgs, BindArgument,
         MethodBegin, MethodValue, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
         NumericCompareBranch, NumericForNext, RegisterBinary, RegisterSnapshot, Exit, Removed };
+    // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {
         size_t id = 0;
         SourceRef() = default;
         explicit SourceRef(size_t value) : id(value) {}
     };
+    // 诊断所需的源码片段；不放入热 Instruction，避免每次取指搬运字符串。
     struct SourceLocation
     {
         std::string str;
@@ -35,6 +36,7 @@ class CifaBytecode : public Cifa
         explicit SourceLocation(const CalUnit& node);
     };
     struct RegisterSlots;
+    // 一个词法作用域的名称绑定；动态创建的变量单独使用动态槽窗口。
     struct Scope
     {
         struct Binding
@@ -54,6 +56,7 @@ class CifaBytecode : public Cifa
     enum class WriteOperation { Assign, Add, Subtract, Multiply, Divide, Modulo, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight, PostAdd, PostSubtract, Invalid };
     static WriteOperation write_operation(const std::string& symbol);
     static std::optional<Opcode> write_opcode(WriteOperation operation);
+    // 密封后的热执行指令，只保存运行时必需的操作数和控制信息。
     struct Instruction
     {
         Opcode opcode;
@@ -67,6 +70,7 @@ class CifaBytecode : public Cifa
         size_t input_count = 0;
         bool discard_result = false;
     };
+    // 编译期指令，额外携带 SourceRef，seal() 后投影为热 Instruction。
     struct BuildInstruction
     {
         Opcode opcode;
@@ -83,6 +87,7 @@ class CifaBytecode : public Cifa
     };
     static_assert(sizeof(Instruction) == 80);
     static_assert(sizeof(BuildInstruction) == 88);
+    // 与最终 PC 一一对应的冷诊断表，按需取得条件和赋值目标位置。
     struct InstructionDiagnostic
     {
         SourceRef source;
@@ -90,6 +95,7 @@ class CifaBytecode : public Cifa
         SourceRef target_source;
     };
     static_assert(sizeof(InstructionDiagnostic) == sizeof(size_t) * 3);
+    // 固定格式的数值热操作，供 NumericBinary 等专用路径使用。
     struct RegisterOperation
     {
         std::uint16_t opcode;
@@ -99,6 +105,7 @@ class CifaBytecode : public Cifa
         std::uint32_t right;
     };
     static_assert(sizeof(RegisterOperation) == 16);
+    // 一段根代码或函数代码的构建期、执行期和验证元数据集合。
     struct Instructions
     {
         std::vector<BuildInstruction> build_code;
@@ -117,6 +124,7 @@ class CifaBytecode : public Cifa
         size_t scope_capacity = 0;
     };
     struct CompactValue;
+    // VM 内部数组；共享底层容器并在写入时复制，维持语言的按值隔离语义。
     struct VmArray
     {
         struct Values
@@ -160,6 +168,7 @@ class CifaBytecode : public Cifa
         explicit VmArray(size_t size) : values(size) {}
         explicit VmArray(std::vector<CompactValue> elements) : values(std::move(elements)) {}
     };
+    // VM 内部 map；与 VmArray 相同，使用写时复制保持值隔离。
     struct VmMap
     {
         struct Values
@@ -188,6 +197,7 @@ class CifaBytecode : public Cifa
         explicit VmMap(ObjectMap&& elements);
         explicit VmMap(Values::Container elements) : values(std::move(elements)) {}
     };
+    // VM 槽中的唯一值表示：基础类型内联，数组/map 使用内部 COW 表示，其余资源保留 any。
     struct CompactValue : std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>
     {
         using Storage = std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>;
@@ -272,6 +282,7 @@ class CifaBytecode : public Cifa
         Storage value;
     };
     static_assert(sizeof(BytecodeValue) == sizeof(BytecodeValue::Storage));
+    // 常量池条目；continue_marker 仅用于编译期控制流归约。
     struct ConstantValue
     {
         BytecodeValue::Storage value;
@@ -283,6 +294,7 @@ class CifaBytecode : public Cifa
         explicit ConstantValue(ObjectVector elements) : value(std::any(std::move(elements))) {}
         ConstantValue(const char* text, bool marker) : value(std::any(std::string(text))), continue_marker(marker) {}
     };
+    // 连续寄存器文件的一个窗口。函数参数、局部和临时值共享同一存储，通过 base/size 划分生命周期。
     struct RegisterSlots
     {
         enum class NumericBinding : std::uint8_t { None, Int, Double };
@@ -294,6 +306,7 @@ class CifaBytecode : public Cifa
             std::string special;
             bool operator==(const TypeDescriptor&) const = default;
         };
+        // 与槽下标并行的负载、数值绑定、诊断来源和类型描述；扩容必须同步进行。
         struct Storage
         {
             std::vector<BytecodeValue> values;
@@ -342,11 +355,13 @@ class CifaBytecode : public Cifa
         size_t size() const { return window_size; }
         size_t base() const { return window_base; }
         size_t top() const { return window_top; }
-        void enter(size_t count);
-        size_t append();
-        void restore(size_t base, size_t size, size_t top);
-        void export_object(size_t slot, Object& destination) const;
-        void export_argument(size_t slot, Object& destination);
+        void enter(size_t count); // 在当前顶端创建子窗口。
+        size_t append(); // 向当前窗口追加一个已清空的槽。
+        void grow(size_t required); // 同步扩容所有并行槽元数据。
+        void restore(size_t base, size_t size, size_t top); // 释放退出窗口的值并恢复外层游标。
+        void export_object(size_t slot, Object& destination) const; // 复制导出到公开 Object 边界。
+        void export_argument(size_t slot, Object& destination); // 消费槽值并导出，用于返回值或实参。
+        void export_metadata(size_t slot, Object& destination) const; // 填写类型、名称和来源，不处理负载。
         void import_object(size_t slot, const Object& value);
         void import_object(size_t slot, Object&& value);
         template<class Value> void import_value(size_t slot, Value&& value);
@@ -354,7 +369,6 @@ class CifaBytecode : public Cifa
         void set_name(size_t slot, const std::string& name);
         void set_type(size_t slot, const TypeDescriptor& type);
         const BytecodeValue::Storage& payload(size_t slot) const;
-        const BytecodeValue::Storage& payload(size_t slot, BytecodeValue::Storage& numeric) const;
         BytecodeValue::Storage& resource_payload(size_t slot);
         void release_payload(size_t slot);
         void store_payload(size_t slot, BytecodeValue::Storage value);
@@ -390,6 +404,7 @@ class CifaBytecode : public Cifa
             std::int64_t right_integer, double right_number, bool right_double, Machine& machine, const SourceLocation& location,
             bool preserve_binding = false);
     };
+    // RegisterBinary 的冷站点信息，保存名称和精确诊断来源。
     struct RegisterBinarySite
     {
         RegisterOperation code;
@@ -411,6 +426,7 @@ class CifaBytecode : public Cifa
     std::string translation_error;
     std::string runtime_error;
     std::unordered_map<std::string, size_t> name_ids;
+    // 已解析的索引表达式站点，避免执行期重复解析名称和声明形态。
     struct IndexSite
     {
         size_t name_id;
@@ -421,6 +437,7 @@ class CifaBytecode : public Cifa
         bool string_index;
         bool with_type;
     };
+    // 已解析的变量声明或写入站点。
     struct VariableSite
     {
         size_t name_id;
@@ -434,6 +451,7 @@ class CifaBytecode : public Cifa
         Log10, Erf, Erfc, TGamma, LGamma, Atan2, Pow, Hypot, Fmod,
         Remainder, CopySign, FDim, FMax, FMin
     };
+    // 调用站点的参数诊断、接收者和可选数值快路径描述。
     struct CallSite
     {
         SourceRef source;
@@ -449,6 +467,7 @@ class CifaBytecode : public Cifa
         bool math_local_operands = false;
     };
     struct Module;
+    // 已编译脚本函数及其局部槽需求。
     struct FunctionCode
     {
         struct Parameter
@@ -463,6 +482,7 @@ class CifaBytecode : public Cifa
         Instructions instructions;
         size_t local_slot_count = 0;
     };
+    // 一次编译产生的不可变代码、常量、名称和源码诊断目录。
     struct Module
     {
         struct SourceLine
@@ -494,6 +514,7 @@ class CifaBytecode : public Cifa
         std::unordered_map<std::string, std::unordered_map<size_t, std::shared_ptr<FunctionCode>>> function_code;
         const SourceLocation& source(const SourceRef& reference) const { return sources.at(reference.id - 1); }
     };
+    // 单次或嵌套执行的 VM 状态；全局槽、作用域、调用缓存和错误状态均归属此对象。
     struct Machine
     {
         struct ReturnState
@@ -523,6 +544,7 @@ class CifaBytecode : public Cifa
         Object error_placeholder;
         bool exit_requested = false;
 
+        // 指向局部、动态作用域或全局槽的可写命名值引用。
         struct NamedValueRef
         {
             RegisterSlots* file = nullptr;
@@ -552,6 +574,7 @@ class CifaBytecode : public Cifa
                 return std::nullopt;
             }
         };
+        // 索引结果的统一引用，可指向 VM 内部值或宿主 Object 边界。
         struct IndexedValueRef
         {
             CompactValue* compact = nullptr;
@@ -656,6 +679,7 @@ class CifaBytecode : public Cifa
     std::unordered_set<std::string> compile_inline_functions;
     std::unordered_map<const std::vector<BuildInstruction>*, std::vector<InstructionDiagnostic>> pending_diagnostics;
 
+    // 编译器辅助函数：建立冷源码表、密封指令流，并在 compact 时重映射控制流 PC。
     size_t source_id(const CalUnit& source);
     SourceRef source_ref(const CalUnit* node);
     InstructionDiagnostic& pending_diagnostic(std::vector<BuildInstruction>& instructions);
@@ -673,7 +697,8 @@ class CifaBytecode : public Cifa
         std::unordered_set<std::string>* active_functions = nullptr) const;
     void emit(CalUnit& node, std::vector<BuildInstruction>& instructions);
     size_t emit_statement(CalUnit& node, std::vector<BuildInstruction>& instructions);
-    static void discard_statement_result(std::vector<BuildInstruction>& instructions, size_t begin);
+    static void discard_statement_result(std::vector<BuildInstruction>& instructions, size_t begin,
+        std::optional<size_t> end = std::nullopt);
     bool emit_register_expression(CalUnit& node, std::vector<BuildInstruction>& instructions);
     bool verify(Instructions& instructions, size_t local_slot_count = 0);
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
@@ -681,6 +706,7 @@ class CifaBytecode : public Cifa
     static Object run_module(Machine& machine, const Module& module);
 
 public:
+    // 高性能宿主函数的受控寄存器视图，不暴露 RegisterSlots 的窗口和扩容细节。
     class NativeCallContext
     {
         friend struct Machine;
@@ -711,8 +737,7 @@ public:
         template<class T> const T* resource(size_t index) const
         {
             if (index >= argument_count_value) return nullptr;
-            BytecodeValue::Storage numeric;
-            const auto& value = arguments.payload(argument_slots[index], numeric);
+            const auto& value = arguments.payload(argument_slots[index]);
             const auto* payload = value_get_if<std::any>(&value);
             return payload ? std::any_cast<T>(payload) : nullptr;
         }
@@ -730,6 +755,7 @@ public:
     };
     using native_func_type = std::function<void(NativeCallContext&)>;
 
+    // 只读编译统计；用于外部观测，不公开私有指令布局。
     struct BytecodeStatistics
     {
         struct Function
@@ -751,6 +777,7 @@ public:
         std::vector<Function> functions;
     };
 
+    // 运行期 RAII 会话：持有 Machine，并在嵌套执行边界同步全局状态。
     class Session
     {
     public:
