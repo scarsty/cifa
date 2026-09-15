@@ -147,24 +147,3 @@ code.set_optimization_enabled(false);
 | 控制流 | VM 通过 PC 和单一 `switch/case` 分派执行。条件与循环转换为比较、分支、跳转等指令，部分数值序列融合执行；脚本函数使用显式调用帧保存返回位置、窗口及控制状态。 |
 | 作用域与 RAII | `ScopeEnter`、`ScopeLeave` 和 `Unwind` 维护词法作用域及提前跳转时的清理；退出窗口立即释放不再存活的值，但保留存储容量。不能把这些操作当成无用标记删除。 |
 | 诊断与宿主调用 | 源码位置和诊断帧保存在与 PC 对齐的冷表，报错时还原调用链。native 回调直接通过 `NativeCallContext` 访问参数槽和结果槽；传统宿主调用在边界进行 Object 转换及必要的全局同步。 |
-
-## 验证与基准
-
-Debug 全套测试入口为：
-
-```powershell
-$msbuild = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe")
-& $msbuild unit_test\cifa_test.sln /m /t:Build /p:Configuration=Debug /p:Platform=x64
-& .\unit_test\x64\Debug\cifa_test.exe
-```
-
-当前完整回归结果为 `Passed 88 out of 88 tests.`。
-
-使用 CMake 构建并运行当前 Release PI 基准：
-
-```powershell
-./tools/build.ps1
-./build/cmake/Release/cifa_benchmark.exe 15 pi
-```
-
-它比较 AST 与优化字节码的 500 位 PI 输出，预热后记录 15 次执行并逐次检查结果。CMake 还会运行直接分配、内存池及分配器生命周期测试。性能结论、计数器用法和 CPU 采样方法见 [vm-optimization.md](vm-optimization.md)。

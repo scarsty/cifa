@@ -4,7 +4,7 @@
 
 下表只汇总最终保留的成功项。`阶段耗时`是当时可执行版本的 Release PI `execute_ms` 中位数或同批代表值，
 用于展示演进位置；不同日期、不同二进制之间不能直接相减。`同批证据`列中明确写有 A/B 的，才可据此认定该项
-提速。所有原始样本、撤回候选和测量口径仍保留在后文单批账本中。
+提速。后文只保留必要的验证方式、结果和结论。
 
 | 阶段耗时 | 最终保留的主要优化 | 同批证据或记录结论 |
 | ---: | --- | --- |
@@ -125,8 +125,7 @@ A/B/B/A 比较，首轮两批中位数平均为 94.039ms 对 93.896ms，variant 
 基于修复后的相同热路径重建纯 any，Debug 仍为 77/77。A/B/B/A/A/B 六批交错中，variant 三批中位数
 平均为 93.604ms，纯 any 为 122.185ms，退化约 30.53%；六批均为 14/14 输出一致、长度 502。
 说明缩小 8 字节带来的缓存收益远小于数值热路径上的 `any_cast/type_info` 成本。纯 any 候选已撤回，
-最终 variant Debug 再次 77/77。公平对照可执行文件为 `build/variant_export_fix.exe` 和
-`build/std_any_fair.exe`，日志为 `build/std_any_fair_A1.log` 至 `build/std_any_fair_B3.log`。
+最终 variant Debug 再次 77/77。
 
 曾尝试在 `Machine` 中给宿主 `global_variables` 叠加 `global_values/global_slots` 缓存；该方案在 typed
 array、宿主替换全局、嵌套执行和重复 Session 上形成两份可变真相，并且 `VmArray` 转换无法独立保留
@@ -164,8 +163,7 @@ const 数组直接遍历原 ObjectVector，非数组资源仍保持值复制语�
 Debug x64 完整回归为 77/77。冻结修改前未插桩 Release 可执行文件后，按 A/B/B/A 运行现有
 `bytecode_benchmark`；四批均为 14 次 PI 输出一致、长度 502。基线两批优化 VM 中位数为
 95.877/95.332ms，候选为 91.782/91.934ms；两批中位数平均从 95.604ms 降至 91.858ms，
-约下降 3.92%。日志为 `build/array_const_ab_a1.log`、`build/array_const_ab_b1.log`、
-`build/array_const_ab_b2.log`、`build/array_const_ab_a2.log`。下一步应让执行期全局值直接驻留于
+约下降 3.92%。下一步应让执行期全局值直接驻留于
 CompactValue 槽，并只在真正宿主可观察边界同步，以消除约 296 万入站和 85 万出站元素转换；必须同时
 保持跨脚本持久全局、宿主修改、注册回调观察和嵌套执行语义。
 
@@ -191,9 +189,7 @@ Debug x64 最终完整回归为 77/77。`CIFA_VALUE_PROFILE` 使用现有 14 轮
 
 未插桩 Release 两批 optimized VM 7 次样本中位数分别约 88.39ms 和 89.43ms，两批均
 `PASS: all 14 outputs identical, characters=502`。相对上一批候选中位数均值 91.86ms，跨批次约再下降
-3.2%；这不是冻结旧二进制后的严格交错 A/B。日志为 `build/global_slots_release_1.log` 和
-`build/global_slots_release_2.log`。新增 `build/bytecode_value_profile.bat` 作为可重复 Profile 入口；
-两个 benchmark 脚本在调用 `VsDevCmd` 前清理继承的 VS 环境变量，避免持久终端出现“输入行太长”。
+3.2%；这不是冻结旧二进制后的严格交错 A/B。
 
 #### 剩余复杂资源复制审计（2026-09-13）
 
@@ -206,8 +202,8 @@ Debug x64 最终完整回归为 77/77。`CIFA_VALUE_PROFILE` 使用现有 14 轮
 动态 `Load` 的 26,229 次/2,120,041 元素和 `Store` 的 52,472 次/1,695,848 元素。总体
 `VmArray` 深复制 95,095 次、3,817,695 元素，另有 1,015 次字符串复制、约 240KB。
 
-新增 `build/complex_copy_profile.cpp` 和 `build/complex_copy_profile.bat`。128 个 62 字节字符串组成的数组
-反复跨函数按值传递 200 次时，产生 1,204 次数组深复制、153,984 个元素和约 9.56MB 字符串复制；
+增加了一个独立的复杂值复制探针。128 个 62 字节字符串组成的数组反复跨函数按值传递 200 次时，产生
+1,204 次数组深复制、153,984 个元素和约 9.56MB 字符串复制；
 其中 `LoadLocal` 本身占 400 次、51,200 个元素。再加入 64 项字符串 map、100 次按值传递后，额外观察到
 603 次 map 深复制、38,592 个顶层条目；map 内字符串的递归复制尚未完整归因，因此该数字是保守值。
 这证明减少复制对非简单类型任务有直接意义，不能只依据 PI 的数值元素成本判断。
@@ -218,8 +214,7 @@ PI 数组导入元素从 1,778,917 降至 930,993，导出从 1,786,134 降至 9
 从 25,728 降为 0，导出从 25,984 降为仅最终公开结果的 256。语言值复制量保持 153,984 个数组元素和
 约 9.56MB 字符串，说明边界转换与值语义复制已被清楚分离。
 
-未插桩 Release 两批 optimized VM 中位数约 88.66ms 和 85.47ms，均 14/14 输出一致；日志为
-`build/direct_global_store_release_1.log` 和 `build/direct_global_store_release_2.log`。下一优先级应是为
+未插桩 Release 两批 optimized VM 中位数约 88.66ms 和 85.47ms，均 14/14 输出一致。下一优先级应是为
 `VmArray`/`ObjectMap` 设计保持深复制可观察语义的 copy-on-write，或在编译期证明只读的参数/临时值上
 使用借用；不要继续针对 321 万次数值 `LoadLocal` 增加运行时 tag 分支。
 
@@ -242,7 +237,7 @@ map 时仅共享存储；索引写、扩容、`push_back/pop_back/insert/erase/c
 说明 COW 删除的是语言内部按值传递复制，不是掩盖边界转换。
 
 未插桩 Release 两批 optimized VM 中位数为 87.39ms 和 85.54ms，均 14/14 输出一致；改动前约为
-88.66ms 和 85.47ms，当前可判定无回退。日志为 `build/cow_release_1.log` 和 `build/cow_release_2.log`。
+88.66ms 和 85.47ms，当前可判定无回退。
 
 #### COW 后剩余复制审计（2026-09-14）
 
@@ -266,8 +261,7 @@ VM Profile 将其归因为 129 次宿主调用，其中 `to_string` 127 次、`p
 
 复杂数组/map 探针现在 `array_imports=0`、`array_exports=2/256 elements`，即仅 Session 最终公开全局结果；
 数组和 map 深复制仍均为 0，字符串复制 257 次/12,158 字节。两批未插桩 Release optimized VM 中位数为
-77.39ms 和 78.83ms，均 14/14 输出一致；相对上一轮 87.39/85.54ms 的两批平均约下降 9.8%。日志为
-`build/remaining_copy_release_1.log` 和 `build/remaining_copy_release_2.log`。
+77.39ms 和 78.83ms，均 14/14 输出一致；相对上一轮 87.39/85.54ms 的两批平均约下降 9.8%。
 
 #### 独立 Native ABI 与寄存器内建（2026-09-14）
 
@@ -303,7 +297,7 @@ runtime error 传播给父 VM；普通顶层连续执行仍以宿主新注册参
 
 #### Lua 5.4 字节码长度与执行效率对比（2026-09-14）
 
-新增只读 `CifaBytecode::bytecode_statistics()` 和 `build/bytecode_compare.cpp`。500 位 PI 的七个共同算法函数
+新增只读 `CifaBytecode::bytecode_statistics()`。500 位 PI 的七个共同算法函数
 Cifa 共 464 条静态指令，Lua 5.4.5 共 379 条，Cifa 多 22%；Cifa 含顶层计算共 579 条，Lua 七函数加
 `calculate_pi` 共 442 条。单次动态执行 Cifa 为 4,473,343 条，Lua 由 instruction hook 测得 3,952,869 条，
 Cifa 只多 13.2%。同机无插桩 Release 中位数为 78.3302ms 对 9.3437ms，Cifa 慢 8.38 倍；按动态条数折算，
@@ -313,7 +307,7 @@ Cifa 只多 13.2%。同机无插桩 Release 中位数为 78.3302ms 对 9.3437ms�
 当前 `Instruction=104` 字节，PI 579 条结构体有效长度约 60KB；Lua 32 位指令的 442 条核心码约 1.7KB。
 但既有 40/44 字节独立执行流 A/B 已证实会退化 2%--3%，不能再次只做机械压缩。后续优先融合热序列：
 局部数值 load/binary/store、循环 scope/mark/branch/jump/increment，以及局部 typed VmArray 的 index/push；
-只有专用 opcode 确实减少必读字段后，才原地缩小单一指令流。完整表见 `build/bytecode_comparison.md`。
+只有专用 opcode 确实减少必读字段后，才原地缩小单一指令流。
 
 #### switch 分派与单指令固定成本（2026-09-14）
 
@@ -335,7 +329,7 @@ handler 线性扫描，但不是最终实现，其四批内部 `execute_ms` 中�
 当前执行循环是覆盖全部 opcode 的单一真实 `switch/case`：每个 case 直接执行对应语义，不再通过 goto、
 label 或 case 内重复 opcode 判断转发。机械迁移曾使优化 `size(value)` 因错误 `break` 跳过寄存器路径，修复为
 同一 `Size` case 内分别处理命名值和寄存器值后，Debug x64 完整回归为 89/89。使用
-`build/bytecode_benchmark.cpp` 的程序内部 `execute_ms`，当前完整 switch 连续四批中位数为
+benchmark 程序内部的 `execute_ms` 显示，当前完整 switch 连续四批中位数为
 62.6468/63.6289/63.7821/62.3279ms，平均 63.0964ms；相对历史同口径 78.2926ms 跨版本下降约 19.4%。
 旧线性 if 源码未在本轮交错重建，因此 19.4% 只作同口径跨版本对照，不标记为严格 A/B。
 
@@ -462,7 +456,7 @@ Enter/Leave 时随 PC remap；遗漏 remap 会跳入错误指令并破坏脚本�
 
 PI 的 181,860 次 push 全部进入 `ArrayPushGlobal`，没有参数 fallback；Profile 的 `method_push_ms` 从约
 28.8ms 降至 9.8ms，插桩总执行从 145.5ms 降至 126.6ms。使用相同
-`build/bytecode_benchmark.cpp` 的未插桩 A/B/B/A/A/B 中，`NumericCompareBranch` 基线三组截尾均值约
+benchmark 程序的未插桩 A/B/B/A/A/B 中，`NumericCompareBranch` 基线三组截尾均值约
 53.56/53.92/53.10ms，平均 53.53ms；候选约 50.01/49.39/49.51ms，平均 49.64ms，增量下降约
 7.3%。Debug x64 完整回归为 89/89；结构测试同时要求全局数组生成专用 opcode、函数局部数组保留
 `MethodPush`。该版本成为新的当前性能基线。
@@ -603,8 +597,7 @@ A/B/B/A/A/B 中，baseline 三批中位数均值约 43.51ms，candidate 约 42.4
 随后在 `RegisterSlots::copy()` 内按 tag 直接调用整数、double、bool 写入，避免先复制完整 variant 再
 解包标量。Debug 为 77/77，但无插桩 Release A/B/B/A 中，冻结 variant 基线两批优化 VM 中位数平均
 93.316ms，候选 94.364ms，退化约 1.12%；四批均为 14 次 PI 输出一致、长度 502。该候选已撤回，
-说明 STL variant 的普通复制已足够便宜，额外 tag 分支不值得。日志为 `build/scalar_copy_A1.log` 至
-`build/scalar_copy_A2.log`。
+说明 STL variant 的普通复制已足够便宜，额外 tag 分支不值得。
 
 本轮保留两项不增加热路径分支的复制收紧：`RegisterSlots::payload(size_t)` 改为返回槽内 const 引用；
 数组声明检查空维度也改用引用型 payload，避免观察值时复制 72 字节 `CompactValue`。最终 Debug 完整
@@ -654,7 +647,7 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 `StoreLocal` 882 次。无插桩 Release 三组 A/B/B/A 共十二批中，每批均为 14 次 PI 输出一致、长度 502；
 六批基线中位数平均约 95.194ms，六批候选约 94.765ms，候选约快 0.45%。单组波动范围较大
 （首组慢 1.11%，后两组分别快 1.35% 和 1.11%），因此只认定无性能回归并保留架构简化，不把 0.45%
-作为稳定提速。日志为 `build/direct_operand_A1.log` 至 `build/direct_operand_A6.log` 及对应 B 日志。
+作为稳定提速。
 
 下一步若继续借鉴 Lua，应优先让紧凑 `RegisterOperation` 自身编码操作数来源和常用立即数，减少
 `RegisterBinarySite` 的布尔判断与旁表读取；必须保持当前统一结果槽语义并做独立 A/B。不要直接把整个
@@ -666,9 +659,6 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 原样 PI 结果为 length=502、fnv1a32=1d4b4c2f。无插桩 `/O2 /MD /DNDEBUG` A/B/B/A 中，优化 VM
 基线中位数为 91.696/92.225ms，候选为 95.929/97.807ms；两批平均 91.961ms 对 96.868ms，
 退化约 5.34%。未优化 VM 基线平均 152.967ms，候选 157.751ms，退化约 3.13%。该实现已完整撤回。
-日志为 `build/pi_value_array_final_A1.log`、`build/pi_value_array_final_B1.log`、
-`build/pi_value_array_final_B2.log`、`build/pi_value_array_final_A2.log` 和
-`build/value_array_reverted_debug.txt`。
 
 本次失败说明 `std::any<vector<variant<...>>>` 仍不是 Lua 式紧凑容器值：每个元素继续承担完整 variant 尺寸，
 执行点还要同时探测 `ValueArray`/`ObjectVector`，边界递归转换也扩大代码与分支。下一版若继续容器槽化，
@@ -695,7 +685,7 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 1. 将局部槽、声明类型、别名和赋值目标在编译期分类，生成无需运行时重新判定的专用指令。
 2. 设计唯一的 VM 数组表示，数组元素使用同一种 tagged value；只在宿主 ABI 边界转换 `ObjectVector`。
 3. 缩小脚本调用帧，使参数直接占用被调函数窗口，帧主要保存 PC、窗口基址、返回槽和作用域基址。
-4. 指令布局暂不继续调整；只有 CPU 采样确认取指带宽成为瓶颈后，才重新设计单流编码。
+4. 指令布局暂不继续调整；只有出现明确的取指瓶颈证据后，才重新设计单流编码。
 4. 每个完整协议切片执行 Debug 回归；重构期的微小切片使用针对性的结构断言或最小探针。性能比较推迟到
 	编译器格式和主发射路径冻结后。
 
@@ -723,11 +713,9 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 	Bytecode 编译 continue 时同样反向选择最近的非 switch 循环，不再把 switch 内 continue 编译为特殊 Object 常量。
 	静态检查中无写入来源的 `type1 == "__"` 旧哨兵已删除，Bytecode 编译期常量标记也不再从 Object 特殊类型推导。
 	`Object::type1` 仅保留 `Error`、`NoValue` 等值／API 边界描述，不再驱动 AST 运行期跳转。
-	新增双后端控制状态回归，switch 内 continue 的 C 语义结果由错误的 56 修正为 46，并通过 Debug 77/77；日志为 `build/frontend_control_build.log` 和
-	`build/frontend_control_test.log`。
+	新增双后端控制状态回归，switch 内 continue 的 C 语义结果由错误的 56 修正为 46，并通过 Debug 77/77。
 	静态检查同时拒绝顶层 break、顶层 continue 和仅位于 switch 内的 continue；允许 switch 内 break 及 loop+switch 内 continue。
-	双后端回归同时核对错误正文、源码行和 `^` 对齐。当前完整 Debug 回归为 77/77，日志为
-	`build/vm_next_build.log` 和 `build/vm_next_test.log`。
+	双后端回归同时核对错误正文、源码行和 `^` 对齐。当前完整 Debug 回归为 77/77。
 - `Machine::registers` 持有执行存储。形参、静态局部、临时值、内部返回槽使用同一底层存储；
 	每次脚本调用不再创建独立局部负载数组。稳定窗口描述放在 deque 中，调用帧记录窗口恢复信息。
 - `ScopeEnter` 编译时记录本层静态绑定数量，执行时一次预留 `Scope::bindings` 容量，避免循环块绑定逐级扩容。
@@ -772,16 +760,15 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 - `RegisterSlots::reference()` 已删除。后端测试不再主动锁定“整槽物化后地址稳定”的旧契约，改为验证 A 区资源
 	跨逻辑槽扩容地址稳定、资源深复制/移动、窗口恢复及时释放、名称边界往返和槽类型约束。
 	`CIFA_VALUE_PROFILE` PI 结果为 length=502、fnv1a32=1d4b4c2f，`metadata_allocations=0`、`object_copies=0`；
-	优化 VM 中位数 121.446ms。日志为 `build/pi_value_profile_18.log`。
+	优化 VM 中位数 121.446ms。
 - `argument_origin` 已从兼容 Object 迁入独立旁侧数组；Object 导入始终拆分为 IDBA 负载、类型、名称和来源描述。
 	`RegisterSlots::objects` 字段及所有双轨读取已删除，复制、移动、赋值、类型绑定、转换、条件、范围、索引和成员负载
 	只读取槽区与旁侧描述。宿主回调和公开结果边界按需构造短生命周期 Object，不回写为内部长期值源。
-	字段删除后的 Debug 完整回归为 76/76，日志为 `build/vm_object_removal_debug.txt`。
+	字段删除后的 Debug 完整回归为 76/76。
 - 无元数据的 int/double/bool 数组元素读取直接写 IDB 槽；无元素类型约束、无名称和来源描述的数值 `push_back`
 	直接构造容器元素并清理参数槽，跳过通用 Object 元数据导入导出。Value Profile PI 中 `object_imports` 从
 	4,634,903 降至 4,211,949，`object_exports` 从 4,760,210 降至 4,339,062；`metadata_allocations=0`、
 	`object_copies=0` 保持不变。数组、map 和结构体元素的所有权仍是 Object，本项只是边界快路径，不代表容器元素槽化完成。
-	日志为 `build/pi_value_profile_19.log`、`build/pi_value_profile_21.log`。
 - 脚本函数无返回值时直接写 A 区 `NoValue` 负载和特殊描述，不再构造临时 Object；
 	已物化兼容数值目标直接更新稳定对象，不再重复调用 `reference()` 切换值源。
 - 解析器的后置 `++/--` 已支持单层成员与索引赋值目标，不再只接受裸变量；
@@ -790,12 +777,11 @@ descriptor 扩展到比较/分支和调用参数窗口；成员、索引、动�
 	自移动、嵌套实参、递归、重复执行容量保留及清空、真实 Session 宿主重入、名称边界往返、
 	全局链接扩容稳定性，以及全局／数组／结构字段复合写入。
 	新增方法参数中嵌套方法调用，以及嵌套 range、break、循环中修改原数组的快照语义回归。
-	日志为 `build/vm_idba_build.log` 和 `build/vm_idba_test.log`。
 
 ### PI 实测
 
-MSVC x64 `/O2 /MD /DNDEBUG`，不插桩，使用原样 `cifa/calc-pi.c` 和现有 `build/pi_benchmark.cpp`。
-保留修改前基线 `build/pi_unified_baseline.exe`，按 A/B/B/A 顺序运行，每进程预热 1 次、测量 6 次。
+测量使用 MSVC x64 `/O2 /MD /DNDEBUG`，不插桩，运行原样 `cifa/calc-pi.c`。修改前后的版本按 A/B/B/A
+顺序交错运行，每个进程预热 1 次、测量 6 次。
 所有执行结果均与 AST 完整字符串比较，length=502、fnv1a32=1d4b4c2f。
 
 | 批次 | 基线 A1 | 当前 B1 | 当前 B2 | 基线 A2 |
@@ -806,48 +792,38 @@ MSVC x64 `/O2 /MD /DNDEBUG`，不插桩，使用原样 `cifa/calc-pi.c` 和现�
 第 9/10 批对应兼容源 copy/move 拆分后的源码，早于后续别名、结构体／数组声明、
 全局链接及复合写入迁移，因此不是当前最终性能验收。按两批中位数的平均值比较（不是合并样本中位数），
 优化 VM 耗时下降约 6.5%，未优化 VM 耗时下降约 1.0%，后者波动较大。
-日志为 `build/pi_idba_ab_baseline_9.log`、`build/pi_idba_ab_current_9.log`、
-`build/pi_idba_ab_current_10.log`、`build/pi_idba_ab_baseline_10.log`。
 第 11/12 批重建了当时最新的全局链接源码：基线优化 VM 为 125.207/123.800ms，
 当前为 118.773/188.914ms。第 12 个当前样本范围为 148.716--197.456ms，明显异常，
 仅保留为环境波动记录，不用于结论。
 随后的第 13/14 批复测：基线优化 VM 为 122.728/122.807ms，当前为 115.998/116.091ms；
 两侧中位数平均分别为 122.768ms 与 116.045ms，优化 VM 耗时下降约 5.5%。
 未优化 VM 的对应平均值为 179.913ms 与 180.283ms，基本持平。全部样本均校验
-length=502、fnv1a32=1d4b4c2f。日志为 `build/pi_idba_ab_baseline_11.log` 至
-`build/pi_idba_ab_baseline_14.log` 的对应四组文件。
+length=502、fnv1a32=1d4b4c2f。
 第 11--14 批早于最后删除旧 Object 二元执行和解析器后置成员修复，仍不是最终性能验收。
 第 15/16 批重建了辅助状态统一窗口后的最新源码，全部结果校验仍为 length=502、fnv1a32=1d4b4c2f，
 但基线优化 VM 自身从此前约 123ms 跳到 229.886/231.482ms，未优化基线样本也呈现约 188ms 与
 315--331ms 的明显双峰；当前优化样本同样出现 118--215ms 跨档波动。该批仅作为环境异常记录，
-不计算代码改善比例。日志为 `build/pi_idba_ab_baseline_15.log`、`build/pi_idba_ab_current_15.log`、
-`build/pi_idba_ab_current_16.log`、`build/pi_idba_ab_baseline_16.log`。
+不计算代码改善比例。
 局部及融合写回去物化后的第 17/18 批均校验 length=502、fnv1a32=1d4b4c2f。第 17 批优化 VM
 中位数为 121.712ms，未优化 VM 为 184.843ms；第 18 批再次出现跨档波动，优化样本范围
 142.025--218.575ms，未优化样本范围 184.019--321.503ms，因此仍不计算改善比例。
-日志为 `build/pi_idba_current_17.log` 和 `build/pi_idba_current_18.log`。本机 VS18 实例处于安装器
-`isRebootRequired=true` 状态，`vswhere -latest` 会排除该实例；本批使用 `vswhere -all -property installationPath`
-解析同一 VS18 路径后按原 `/O2 /MD /DNDEBUG` 参数构建，未改基准程序。
 删除 `RegisterSlots::objects` 并加入数值数组读取／追加边界快路径后的第 21 批，优化 VM 六次样本为
 108.248/108.493/108.729/108.971/109.078/109.135ms，中位数 108.971ms；未优化 VM 中位数 169.289ms，
 其中一个样本为 183.173ms。结果仍为 length=502、fnv1a32=1d4b4c2f。该批仅记录当前绝对值，
-不与此前双峰环境批次计算改善比例。日志为 `build/pi_container_fast_21.log`。
+不与此前双峰环境批次计算改善比例。
 默认优化和函数冻结修正后的无插桩 `/O2 /MD /DNDEBUG` 基准中，显式未优化 VM 六次中位数为
 172.656ms，默认优化 VM 六次中位数为 108.370ms，优化执行耗时约低 37.2%。两组均使用同一原样
 `cifa/calc-pi.c`，结果为 length=502、fnv1a32=1d4b4c2f。基准已显式设置未优化组为 false，避免默认值变化后
-两组实际都启用优化。日志为 `build/pi_default_optimization.log`。
+两组实际都启用优化。
 Profile 曾显示 `MethodPush` 181,860 次、插桩耗时约 23.6ms；尝试让局部数组 push_back 直接按帧槽读取后，
 同一 Profile 的 `method_push_ms` 升至约 25.2ms、总执行也上升，因此该改动已撤回，不计为优化成果。
 Scope 优化按两阶段 A/B/B/A 验证。仅增加编译期 binding 数量与 `reserve()` 后，优化 VM 从两批 A 平均
 109.983ms 降到两批 B 平均 102.063ms，约下降 7.2%；未优化 VM 从 172.728ms 降到 166.040ms，约下降 3.9%。
 进一步复用纯静态 Scope 容器后，优化 VM 从两批 A 平均 101.450ms 降到两批 B 平均 96.867ms，约再下降 4.5%。
-最终独立六次复测：优化 VM 中位数 95.837ms，未优化 VM 中位数 160.628ms；相对本轮原始优化 A/B 基线
-109.983ms 累计下降约 12.9%。所有样本均为 length=502、fnv1a32=1d4b4c2f。日志为
-`build/pi_scope_reserve_A1.log` 至 `build/pi_scope_reserve_A2.log`、`build/pi_scope_reuse_A1.log` 至
-`build/pi_scope_reuse_A2.log` 及 `build/pi_scope_final.log`。
+最终独立六次复测：优化 VM 中位数 95.837ms，未优化 VM 中位数 160.628ms；相对本轮 A/B 基线
+109.983ms 累计下降约 12.9%。所有样本均为 length=502、fnv1a32=1d4b4c2f。
 尝试让 Scope 保留 Binding 对象并用活动前缀避免字符串析构后，优化 VM 从约 97.185ms 退化到约 99.576ms，
-约慢 2.5%，该第三步已撤回。最终 Debug 回归 77/77，日志为 `build/vm_scope_final_build.log` 和
-`build/vm_scope_final_test.log`。
+约慢 2.5%，该第三步已撤回。最终 Debug 回归 77/77。
 Scope 优化后的当前代码重新增加分区 Profile。PI 中 `StoreLocal` 共 437,558 次，其中 typed numeric
 248,475 次、numeric assign 180,998 次、compound local 8,084 次；`IncrementLocal` 182,847 次全部走整数快路，
 `RegisterSnapshot` 185,109 次中局部槽为 182,717 次。`MethodPush` 181,860 次中，扩容追加 26,457 次，
@@ -863,10 +839,7 @@ Scope 优化后的当前代码重新增加分区 Profile。PI 中 `StoreLocal` �
 合并中位数分别为 96.761ms 和 94.781ms，当前绝对性能已回到并略优于此前 95.837ms 档。
 分区 Profile 中 typed numeric 从约 11.96ms 降至 8.28ms，
 `StoreLocal` 总计从约 26.10ms 降至 22.49ms；numeric assign 仍约 13.54ms，未随本项变化。所有 PI 结果均为
-length=502、fnv1a32=1d4b4c2f。日志为 `build/vm_profile_partitioned_*.err.log`、
-`build/vm_profile_growth_*.err.log`、`build/pi_push_reserve_*.log`、`build/pi_numeric_site_*.log`、
-`build/vm_module_type_test.log`、`build/pi_module_type_*.log`、`build/pi_retest_*.log` 和
-`build/vm_profile_module_type.err.log`。
+length=502、fnv1a32=1d4b4c2f。
 下一步按当前数据先研究 numeric assign 与 `RegisterBinary` 写回的重复读取／结果复制；随后再评估数值数组的
 内部紧凑元素表示。固定小容量 reserve 和扩展 `VariableSite` 字段均已证伪，不重复尝试。
 
@@ -896,13 +869,10 @@ operand 3,391,622 次，inputs 1,465,560 次，discard 903,965 次，member_site
 
 本轮最终源码仅保留 `CIFA_VM_PROFILE` 下的 RegisterBinary 分区、全局链接和指令字段密度统计；正常构建
 不含上述候选行为变化。最终撤回状态 Debug 77/77，PI length=502、fnv1a32=1d4b4c2f。最终单批绝对中位数
-98.037ms 处于环境慢档，仅作为正确性记录；各候选结论均来自同批交错 A/B。日志为
-`build/pi_binary_direct_*.log`、`build/pi_value_array_*.log`、`build/pi_vector_states_*.log`、
-`build/pi_instruction_96_*.log`、`build/vm_profile_binary_paths.err.log`、`build/vm_profile_global_links.err.log`、
-`build/vm_profile_instruction_layout.err.log` 和 `build/cifa_unit_test_all_candidates_final.log`。
+98.037ms 处于环境慢档，仅作为正确性记录；各候选结论均来自同批交错 A/B。
 
 下一轮不再优先做局部二元直写、`std::any` 双容器紧凑数组、固定执行状态向量或简单 Instruction 字段重排。
-需要先重新 Profile 正常构建下的 CPU 采样热点；结构性方向应优先研究保持热字段前缀不变的冷热指令旁表，
+需要先确认正常构建下的性能热点；结构性方向应优先研究保持热字段前缀不变的冷热指令旁表，
 或让数组从创建起使用单一 tagged 存储，避免运行期双类型探测。
 此前批次 3/4 的约 9.9% 和批次 5/6 的约 6.8% 是中间源码结果，不作为当前结论。
 中间版本曾因逐槽名称哈希和 variant 数值往返退化到约 137--141ms，已用名称编号和直接数值路径修正。
@@ -943,8 +913,6 @@ fnv1a32=`1d4b4c2f`。
 同一冻结统一槽基线 A/B/B/A：40 字节版基线两批中位数平均 93.175ms，候选 95.870ms，退化约 2.89%；
 44 字节版基线 92.848ms，候选 94.972ms，退化约 2.29%。两版均已完整撤回。结果说明本工作集不能仅靠
 复制一份紧凑执行数组获益；额外 lower、双份代码工作集及旁表访问抵消了结构缩小。下一步改做编译期 opcode 语义专用化。
-日志为 `build/pi_hot_A1.log`、`build/pi_hot_B1.log`、`build/pi_hot_B2.log`、`build/pi_hot_A2.log` 和
-`build/pi_hot_source_A1.log`、`build/pi_hot_source_B1.log`、`build/pi_hot_source_B2.log`、`build/pi_hot_source_A2.log`。
 
 ### TypedStoreLocal 专用 opcode A/B 证伪（2026-09-13，已撤回）
 
@@ -952,9 +920,7 @@ fnv1a32=`1d4b4c2f`。
 `type_id` 的重复分类；作用域同名冲突仍回落原 `StoreLocal`。Debug 77/77，PI length=502、
 fnv1a32=`1d4b4c2f`。同一冻结基线 A/B/B/A 中，基线两批中位数平均 92.975ms，候选 93.483ms，
 退化约 0.55%，已完整撤回。仅拆出分类 opcode 没有减少 `initialize_numeric`、scope 查询、绑定和结果搬运，
-收益不足以抵消额外分派。后续专用化必须覆盖完整数据流，或先用正常 Release CPU 采样确认具体指令级热点。
-日志为 `build/pi_typed_store_A1.log`、`build/pi_typed_store_B1.log`、`build/pi_typed_store_B2.log`、
-`build/pi_typed_store_A2.log`。
+收益不足以抵消额外分派。后续专用化必须覆盖完整数据流，或先用正常 Release 性能数据确认具体指令级热点。
 
 ### 仍未完成
 
@@ -983,7 +949,7 @@ fnv1a32=`1d4b4c2f`。同一冻结基线 A/B/B/A 中，基线两批中位数平�
 	不是 IDBA 数值区免析构方案，也不是 Object 兼容路径删除。
 - 在现有 `RegisterBackendTest` 中增加嵌套窗口资源、已物化资源立即释放、外层存活、
 	容量保留和复用后槽为空的断言。x64 Debug 重建及完整回归通过 76/76。
-- 完整日志：`build/vm_window_build.log`、`build/vm_window_test.log`。未测性能，未声称提速。
+- 未测性能，因此未声称提速。
 - 后续仍需将调用前窗口预留、形参诊断描述分离、局部和临时存储统一与 IDBA 布局共同推进。
 	当前脚本调用仍创建独立局部 RegisterSlots，参数仍物化 Object；总体计划各项保持未验收。
 
@@ -1075,7 +1041,7 @@ copy兼容来源统计已修正：带NumericBinding的纯值复制不再算Objec
 ## 剩余 Object 审计（2026-09-12）
 
 测量配置：MSVC x64 Release /O2 /DNDEBUG，单独定义 CIFA_VALUE_PROFILE，使用
-build/vm_profile.cpp 编译并运行一次优化后的 cifa/calc-pi.c，println 注册为空回调。
+使用单独的 profile build 编译并运行一次优化后的 cifa/calc-pi.c，println 注册为空回调。
 不定义 CIFA_VM_PROFILE，后者的部分旧统计会调用 reference 并改变物化行为。
 两次执行计数一致，PI length=502、fnv1a32=1d4b4c2f。计数覆盖当前线程进程生命周期，
 此探针只编译、执行一次；不是所有 Object 构造函数的全局计数。
@@ -1155,9 +1121,9 @@ Debug x64 完整回归为 `Passed 77 out of 77 tests.`，包括数组深复制�
 结果长度 502；优化 VM 7 次 execute_ms 为 97.4538、96.5992、96.9960、97.6946、96.8819、
 96.8064、99.1574，中位数 96.996ms。
 
-本轮开始前没有保留可执行的旧 72 字节 variant 基线，因此无法做同批 A/B/B/A；上述耗时只能证明
+本轮没有做同批 A/B/B/A；上述耗时只能证明
 当前实现可运行，不能据此宣称改善。文档最近稳定历史值约 94.908ms，与本轮相差约 2.2%，但跨批次、
-不同整机状态，不作为回归结论。下次性能判断必须先冻结当前基线可执行文件，再做同批交错测试。
+不同整机状态，不作为回归结论。后续性能比较应使用同批交错测试。
 
 #### 测量基线
 
@@ -1428,19 +1394,19 @@ A/B/B/A/A/B 交错执行。
 
 ## 2026-09-15 单批 Release PI 账本
 
-以下均使用 `build/bytecode_benchmark.bat` 的 optimized-bytecode `execute_ms`，每批 7 个样本，且均为
-`PASS: all 14 outputs identical, characters=502`。保留所有样本，不只保留中位数。
+以下均使用 benchmark 程序的 optimized-bytecode `execute_ms`，每批 7 个样本，且均为
+`PASS: all 14 outputs identical, characters=502`。后文只列出有助于结论的中位数和汇总结果。
 
 ### 最早同进程优化开关对照（2026-09-12）
 
-早期 `build/pi_benchmark.cpp` 在同一进程内分别测量未优化与优化的字节码执行。该批记录的中位数为：
+早期 benchmark 程序在同一进程内分别测量未优化与优化的字节码执行。该批记录的中位数为：
 
 | 配置 | optimized-bytecode execute 中位数 |
 | --- | ---: |
 | 未优化 | `355.710 ms` |
 | 优化 | `313.109 ms` |
 
-优化包含当时的常量折叠、数值内建直达和局部一维数组直接路径；同进程差异为约 `$11.98\%$`。早期基准输出格式没有在现有归档中保留 7 个原始样本，因此这里如实记录可恢复的中位数，不伪造样本。
+优化包含当时的常量折叠、数值内建直达和局部一维数组直接路径；同进程差异为约 `$11.98\%$`。
 
 ### 数值表达式临时槽按活跃深度复用
 
@@ -1471,56 +1437,16 @@ A/B/B/A/A/B 交错执行。
 
 
 
-## 2026-09-15：标准 PMR、作用域临时存储与性能分析
+## 2026-09-15：标准 PMR 与作用域临时存储
 
-本轮保留赋值路径的诊断名称 ID 复用，避免复制并重新驻留名称字符串；随后将 VM 内部容器迁移为标准 PMR，显式传递资源，并为生命周期明确的临时数据使用栈缓冲区。资源接口及边界见 [cifabytecode.md](cifabytecode.md)。早期自定义分配器和缓冲池实现已由标准实现替换。
+本轮将 VM 内部容器迁移到标准 PMR，通过构造参数显式传递资源；生命周期明确的临时数据使用栈缓冲区。赋值路径
+复用诊断名称 ID，早期的自定义分配器和缓冲池实现已删除。资源接口及宿主边界见 [cifabytecode.md](cifabytecode.md)。
 
-### 测量方法与结果
+在 Ryzen 7 9800X3D、Windows、MSVC x64 Release 上，标准内存池版本的 PI 执行时间为 `41.0412 ms`，20,000
+次调用为 `22.5789 ms`；上一版分别为 `43.5414 ms` 和 `24.4955 ms`，约快 5.7% 和 7.8%。这是整次迁移的结果，
+不能单独归因于栈缓冲区。预热后的资源计数也显示，标准池可以满足后续请求而不再向上游申请内存。
 
-机器为 Ryzen 7 9800X3D，Windows，MSVC x64 Release。PI 使用 `cifa/calc-pi.c` 的 500 位计算，移除输出语句；调用负载执行 20,000 次脚本函数调用。编译单独计时，预热一次后记录执行时间，每次检查结果。普通模式还与 AST 解释器比较结果；其解析加执行时间不能直接视为 VM 的纯执行时间。
-
-```powershell
-./tools/build.ps1
-./build/cmake/Release/cifa_benchmark.exe 15 pi
-./build/cmake/Release/cifa_benchmark.exe 15 calls
-./build/cmake/Release/cifa_benchmark.exe 15 pi --vm-only --pool
-./build/cmake/Release/cifa_benchmark.exe 3 calls --vm-only --pool --allocations
-```
-
-`--vm-only` 跳过 AST 对照，仍检查结果；`--pool`/`--no-pool` 显式选择标准内存池或直接分配，省略时默认使用标准池；`--allocations` 开启资源计数，会引入额外开销，不应用于耗时比较。运行基准时不要同时编译或采样。比较改动前后的版本时，应先保存基线可执行文件及匹配 PDB，再交错运行；`tools/compare.ps1 -Baseline <基线程序路径>` 提供 A/B/B/A/A/B 测量，`-Pool` 显式固定两侧的分配模式。
-
-本轮按旧池/直接分配/标准池/标准池/直接分配/旧池顺序运行六批，每批每种负载记录 15 次执行，关闭计数器：
-
-| 实现 | PI 两批中位数（ms） | 20,000 次调用两批中位数（ms） |
-| --- | ---: | ---: |
-| 上一版自定义分配器与缓冲池 | 43.3925 / 43.6902 | 24.5329 / 24.4580 |
-| 标准 PMR，直接分配 | 42.9401 / 42.5020 | 28.7914 / 28.6217 |
-| 标准 PMR、标准池与作用域临时存储 | 41.1391 / 40.9433 | 22.5563 / 22.6015 |
-
-两批中位数取平均，标准池版为 PI 41.0412 ms、调用 22.5789 ms；上一版为 43.5414 ms、24.4955 ms，耗时分别减少约 5.7% 和 7.8%。这是整个迁移的对比，不能单独归因于栈缓冲区。当前基准默认使用标准池，直接分配需显式传入 `--no-pool`。
-
-另行开启计数器，预热后三次执行的结果：
-
-| 负载 | VM 资源请求 | 直接分配的上游请求 | 标准池的上游请求 | 标准池生命周期上游峰值 |
-| --- | ---: | ---: | ---: | ---: |
-| PI | 165,312 | 165,312 | 0 | 1,748,640 字节 |
-| 20,000 次调用 | 1,500,078 | 1,500,078 | 0 | 324,104 字节 |
-
-预热后上游请求为零只说明池满足了这些请求，不表示进程没有其他堆分配。峰值包含编译阶段；标准池在 PI 上保留的内存高于上一版约 1.07 MiB 的上游峰值。
-
-Release 和 Debug 均通过直接分配回归、池分配回归及分配器测试。测试覆盖资源存活期、COW 隔离、嵌套回调、错误恢复、导出结果、释放大小/对齐、构造失败清理和重复执行后的内存稳定性。测试期间拒绝意外的全局默认 PMR 分配，库本身不修改全局默认资源。MSVC Debug 的部分哈希容器在 `noexcept` 构造中分配迭代器代理，故 Debug 仅对最初两次分配注入失败，Release 另测更深路径。测试及基准程序将 CRT/Windows 错误写入 stderr，并用终止处理器输出堆栈，避免失败时弹出模态窗口。
-
-原始样本在 `build/results/standard-pmr-*.txt`，分配计数在 `build/results/standard-counts-*.txt`，对应可执行文件和 PDB 保存在 `build/standard-pmr`。这些是本机生成、被 Git 忽略的产物，不随仓库分发。
-
-### Visual Studio CPU 采样
-
-```powershell
-./tools/profile.ps1 -Workload pi -Samples 200 -Pool -Output build/results/vm.diagsession
-```
-
-脚本使用已安装的 Visual Studio `VSDiagnostics` 命令行收集器，仅附加到本次启动的基准进程，不启动提权跟踪助手。程序先等待五秒供收集器附加，退出后保存报告；脚本使用会话 42，不要并发运行多个采样。采样时的耗时不作为性能比较数据。
-
-在 Visual Studio 中通过“文件 → 打开 → 文件”加载 `.diagsession`，打开 CPU Usage 详情，再选择 Flame Graph 或 Call Tree。关闭 Just My Code 可查看 STL 和分配器成本，选择稳定执行区间以排除启动和编译。保留采样所用的可执行文件及匹配 PDB。本轮报告为 `build/results/standard-pmr.diagsession`；收集报告无需 UI 自动化。
+Release 和 Debug 的回归测试、池分配测试及 allocator 测试全部通过；库本身不修改全局默认 PMR 资源。
 
 ## 2026-09-15：VM 字符串与安全的 string_view
 
@@ -1530,9 +1456,9 @@ Release 和 Debug 均通过直接分配回归、池分配回归及分配器测�
 
 Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 字节字符串、长 map 键、数组/map 的 COW 隔离、格式结果覆盖原格式变量、嵌套 native 回调、类型推导及 VM 销毁后的结果读取。原有 NoValue 错误语义保持不变。
 
-### 同批 A/B/B/A/A/B
+### 性能结果
 
-基线为本轮修改前保存的 `build/before-pmr-strings/cifa_benchmark.exe`，候选保存在 `build/pmr-strings`。每种模式、每种负载各三批，每批预热后记录 15 次执行，未开启分配计数。下表为三批中位数的中位数：
+在直接分配和标准池两种模式下做同批 A/B/B/A/A/B 测量，每种模式和负载各记录三批、每批 15 次执行。三批中位数的中位数如下：
 
 | 模式 | 负载 | 修改前（ms） | 修改后（ms） |
 | --- | --- | ---: | ---: |
@@ -1541,21 +1467,8 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 | 标准池 | PI | 40.7282 | 40.6594 |
 | 标准池 | 20,000 次调用 | 22.4901 | 22.3494 |
 
-变化约为 0.2%–1.1%，不据此宣称有明确的整体提速。原始数据为 `build/results/strings-ab-*.txt`。
+变化约为 0.2%–1.1%，不足以宣称有明确的整体提速。新增 `strings` 负载覆盖长字符串返回、拼接、格式化和长度累加，结果为 `1388890`，并与 AST 后端一致。当前版本的分配模式对比为直接分配 `17.9966 ms`、标准池 `14.4046 ms`；这是模式之间的差异，不是字符串迁移的前后收益证据。
 
-新增 `strings` 负载执行 10,000 次长字符串函数返回、拼接、格式化和长度累加，初始字符串为 128 字节，结果必须为 `1388890`，并与 AST 后端对照：
-
-```powershell
-./build/cmake/Release/cifa_benchmark.exe 15 strings --no-pool
-./build/cmake/Release/cifa_benchmark.exe 15 strings --pool
-./build/cmake/Release/cifa_benchmark.exe 3 strings --vm-only --pool --allocations
-```
-
-历史记录的直接分配 `18.6295 ms` 采样于分配默认值切换之前（无标志命令实际走池路径），口径不再可比；已用显式标志复测。当前版本（2026-09-15，独立测机）15 次执行中位数为直接分配 `17.9966 ms`、标准池 `14.4046 ms`。这是分配模式对比；旧二进制没有该负载，不作为字符串迁移的前后收益证据。原始数据为 `build/results/strings-workload-*.txt`。
-
-另外三次计数运行中，字符串负载共请求 VM 资源 `870,090` 次；直接分配同样到达上游 `870,090` 次，预热后的标准池上游请求为零，池生命周期上游峰值为 `328,200` 字节。PI 的 VM 资源请求从先前的 `165,312` 增至 `166,521`，因为字符串缓冲区现在计入 PMR 统计；统计覆盖范围变化不能直接解释为总堆分配变多。原始计数为 `build/results/strings-counts-*.txt`。
-
-本轮 Visual Studio CPU 报告为 `build/results/pmr-strings.diagsession`，匹配程序/PDB 在 `build/pmr-strings`。这些文件均为本机生成的 Git 忽略产物。采样命令仍使用 Visual Studio 收集器，不需要 UI 自动化或提权。
 
 ## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）
 
@@ -1566,8 +1479,7 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 ### clang-cl 三组编译配置（拆分前）
 
 为了确认问题是否来自编译器的 inline budget，我们用同一份源码测试三种配置：MSVC、默认的 clang-cl，
-以及把 inline threshold 调高的 clang-cl。对应的构建目录是 `build/clangcl`（`-T ClangCL`，clang 22.1.3）
-和 `build/clangcl-big`（额外加入 `-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`）。
+以及把 inline threshold 调高的 clang-cl（`-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`）。
 三种配置交错运行，每种配置做 3 轮、每轮 15 次采样：
 
 | 负载 | MSVC | clang-cl 默认 | clang-cl（高 inline threshold） |
@@ -1613,10 +1525,3 @@ lambda 辅助函数改成了成员函数，头文件只增加一行前置声明�
 `NumericCompareBranch`、`Branch` handlers、`IncrementLocal` 等）仍受到默认 inline budget 的限制。后续应
 一次只拆一个 handler，把 fast path 留在 inline 路径，把低频 tail path 设为 `noinline`，并用 A/B 测试逐项确认。
 `increment` 上 MSVC 的优势来自生成的循环代码，与 dispatcher 的结构无关。
-
-构建配置：
-
-```powershell
-cmake -S . -B build/clangcl -G "Visual Studio 18 2026" -A x64 -T ClangCL
-cmake -S . -B build/clangcl-big -G "Visual Studio 18 2026" -A x64 -T ClangCL -DCMAKE_CXX_FLAGS_RELEASE="/O2 /Ob2 /DNDEBUG -mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000"
-```

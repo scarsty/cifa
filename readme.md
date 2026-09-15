@@ -22,21 +22,6 @@ Cifa曾经单独开发，后来为方便改成了mlcc的一部分，目前因为
 
 独立编译字节码后端的用法及高性能宿主函数接口见 [cifabytecode.md](cifabytecode.md)。优化内容及前后实测时间见 [vm-optimization.md](vm-optimization.md)。
 
-## 构建与测试
-
-项目使用 C++23。在 Windows 上可使用 Visual Studio 2026 的 C++ 桌面开发工具，通过 CMake 构建：
-
-```powershell
-./tools/build.ps1
-./tools/build.ps1 -Configuration Debug
-```
-
-脚本在 PATH 中找不到 CMake 时，会查找 Visual Studio 自带的版本；构建完成后自动运行测试。Release 构建保留 PDB，便于 CPU 性能分析。
-
-使用 VS Code 时，打开仓库目录并安装推荐的 CMake Tools、C/C++ 扩展，选择 `windows` 配置预设和 `release` 构建预设。`Ctrl+Shift+B` 执行所选预设的 Release 构建；构建并自动运行完整测试请使用 `tools/build.ps1`。当前预设面向 Visual Studio 2026 x64；其他工具链可直接使用 `CMakeLists.txt`，需支持项目使用的 C++23 标准库功能。
-
-字节码 VM 的内存资源接口见 [cifabytecode.md](cifabytecode.md)，性能测试和 Visual Studio 采样方法见 [vm-optimization.md](vm-optimization.md)。
-
 ## 使用方法
 
 ### 基本用法
