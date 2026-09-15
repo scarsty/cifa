@@ -28,9 +28,10 @@
 | `43.28 ms` | 二元数学调用的双局部操作数描述符 | 两轮 A/B：约 `44.54` -> `43.28 ms`，约快 `2.8%` |
 | `42.48 ms` | `ConstantLocal` 直接写目标局部槽 | A/B/B/A/A/B：`43.51` -> `42.48 ms`，约快 `2.37%` |
 | `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A：`41.442` -> `39.216/39.330 ms`，约快 `5.3%` |
-| `33.84 ms` | `InterpState` 上下文重构；RegisterBinary/Store+Increment/Call/Index/IndexLocal 拆为 noinline 成员 | 冻结基线交错 A/B（3×15）：`39.15` -> `33.84 ms`，约快 `13.5%`；Debug 回归 90/90 |
-| `31.96 ms` | 十六个冷 handler 续拆（调用/方法族、数学族、NumericBinaryLocal、RangeNext、Size 等） | 冻结基线交错 A/B：`39.09` -> `31.96 ms`，约快 `18.2%`；Debug 90/90 |
-| `32.96 ms` | `StoreLocal` 类型化数值快路保持内联、冷尾拆为 noinline | 对冻结上一批二进制交错 A/B：`34.12` -> `32.96 ms`，约快 `3.4%`；同批试拆 `IncrementLocal` 尾部因 incrementf `+2.7%` 撤回；Debug 90/90 |
+
+注：2026-09-15 的分派器 handler 拆分序列在另一台 CPU 上测量，且基线已包含 `2ab6301`（allocator 与 scoped
+guard elision）等内容，不与上表跨机比较；独立图表见文末
+`## 2026-09-15：分派器 handler 拆分独立序列（独立测机，与主表解耦）`。
 
 未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用、
 冷热诊断分离。它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
@@ -1596,16 +1597,17 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 （取消每条指令向状态写入当前指令指针）。`NumericBinary`/`NumericBinaryLocal` 的 `goto register_binary`
 回退改为直接调用，热路（Profile 零回退）不变。
 
-三批提交与同批交错 A/B（3 轮 × 15 样本，冻结基线二进制）：
+两批提交与同批交错 A/B（3 轮 × 15 样本，冻结基线二进制）：
 
 - `033101d`：RegisterBinary(215 行)、Store/Increment(166)、Call(109)、Index(105)、IndexLocal(71)。
   PI `39.15 -> 33.84 ms`（约 -13.5%），calls `22.39 -> 21.51`（-3.8%），increment `5.97 -> 5.79`（-3%）。
 - `0159b4a`：MethodPush、ArrayPushGlobalLocal、MethodBegin、MethodValue、MethodNoArgs、CallBegin、Return、
   PrepareStore、Unwind、RegisterSnapshot、MathUnary、MathBinary、NumericBinaryLocal、RangeNext、Array、
   Size。PI `39.09 -> 31.96 ms`（同批约 -18.2%），calls `-7.3%`，incrementf `-4%`，increment `-2%`。
-- `c3dc0b0`：StoreLocal 拆分——PI 热的类型化数值 Assign 路径与 alias/数值复合 guard 保持内联，其余
-  （类型化非数值、外部 position、`alias_target` 通用回退）拆为 `op_store_local_tail`。对冻结上一批二进制
-  交错 A/B：PI `34.12 -> 32.96 ms`（-3.4%），calls `-1.8%`，increment `-2.7%`，incrementf 持平。
+
+曾试拆 `StoreLocal`（`c3dc0b0`，已移除，见文末独立序列一节）：PI 热的类型化数值 Assign 路径保持内联，
+其余 guard 拆为 `op_store_local_tail`；其自身会话 PI `-3.4%`，但当日加长序列反转为 `+3.3%`，未达稳定
+收益标准，rebase 移除。
 
 迁移中确立的两条语义规则与撤回项：
 
@@ -1653,3 +1655,33 @@ cmake --build build/clangcl-big --config Release --target cifa_benchmark --paral
 
 MSVC 三方数据使用 `build/cmake`，交错基线二进制保存在 `build/trial/baseline-msvc.exe`、
 `build/trial/oneb-msvc.exe`、`build/trial/twob-msvc.exe`（分别为重构前、第一批后、第二批后）。
+
+## 2026-09-15：分派器 handler 拆分独立序列（独立测机，与主表解耦）
+
+handler 拆分序列在另一台 CPU 上独立测量；基线提交 `524f810` 已包含 `2ab6301`（allocator、scoped guard
+elision 等）与 increment/incrementf 微基准，因此本序列只度量其后的 handler 形状改动，不与主表跨机相减。
+四个代码点在本会话内逐提交重建二进制并按轮转交错测量（3 轮 × 15 样本，`--vm-only`，程序内 `execute_ms`）；
+`84176aa` 只改测试源文件，VM 二进制与基线相同，不设点。
+
+| 提交 | PI | calls | increment | incrementf |
+| --- | ---: | ---: | ---: | ---: |
+| `524f810` 基线 | 38.40 | 21.99 | 5.96 | 185.7 |
+| `033101d` 六个巨型 handler | 33.48 | 20.97 | 5.79 | 182.3 |
+| `0159b4a` 十六个冷 handler | 31.83 | 20.90 | 5.76 | 176.7 |
+
+同会话累计：PI 约 `-17.1%`、calls 约 `-5.0%`、increment 约 `-3.4%`、incrementf 约 `-4.9%`。
+
+### StoreLocal 拆分批次已移除
+
+第三批（`StoreLocal` 类型化快路内联 + 冷尾 `op_store_local_tail`，曾以 `c3dc0b0` 提交）未达稳定收益
+标准，已从分支 rebase 移除：
+
+- 其自身 A/B 会话中 PI `-3.4%`（全样本分离）；同日加长序列（5 轮 × 4 交接，20 样本）反转为 `+3.3%`
+  （`0159b4a` 31.74--31.97 ms 对拆分版 32.65--33.26 ms，全样本分离）。`0159b4a` 二进制自身跨会话漂移
+  31.8--34.1 ms：该尺寸的分派器仍处布局敏感区，单会话 ±3% 的差值不能作为保留依据。
+- calls 的改善两会话方向一致（约 `-1.8%`），但幅度小，不足以抵消 PI 的不稳定。
+- 教训：紧邻热路径的冷尾拆分效果由会话级布局决定；将来重试需与其它布局改动合并评估，并以多会话多轮次
+  为大样本，而非单会话 A/B。
+
+冻结二进制留档：`build/trial/chart-0-base.exe`、`chart-1a.exe`、`chart-1b.exe`（`chart-2.exe` 为已移除
+批次，仅留档）。上文 clang-cl 三方探针的 MSVC 侧对照是移除前版本；后续复测需基于当前分支重建。
