@@ -442,14 +442,14 @@ struct CalUnit
 
     CalUnit() {}
 
-    bool can_cal()
+    bool can_cal() const
     {
         return type == CalUnitType::Constant || type == CalUnitType::String || type == CalUnitType::Parameter
             || type == CalUnitType::Function || type == CalUnitType::Cast
             || type == CalUnitType::Operator && v.size() > 0;
     }
 
-    bool is_statement()
+    bool is_statement() const
     {
         return suffix || !can_cal();
     }

@@ -1,11 +1,13 @@
-﻿#pragma once
+#pragma once
 #include "Cifa.h"
 #include <optional>
+#include "CifaMemory.h"
 
 namespace cifa
 {
 class CifaBytecode : public Cifa
 {
+    memory::Resource allocation_resource;
     friend class Cifa;
     // 最终执行流的操作码；构建期标记会在 compact() 中移出执行流。
     enum class Opcode { Constant, ConstantLocal, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Enter, Leave, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
@@ -39,19 +41,22 @@ class CifaBytecode : public Cifa
     // 一个词法作用域的名称绑定；动态创建的变量单独使用动态槽窗口。
     struct Scope
     {
+        const memory::Resource* value_resource;
         struct Binding
         {
-            std::string name;
+            std::pmr::string name;
             RegisterSlots* file = nullptr;
             size_t slot = 0;
         };
-        std::vector<Binding> bindings;
+        std::pmr::vector<Binding> bindings;
         std::unique_ptr<RegisterSlots> dynamic_registers;
-        Binding* find(const std::string& name);
+        explicit Scope(const memory::Resource& resource = memory::default_resource())
+            : value_resource(&resource), bindings(resource.get()) {}
+        Binding* find(std::string_view name);
         Binding& create(const std::string& name);
         void bind(const std::string& name, RegisterSlots* file, size_t slot);
     };
-    using ScopeStack = std::vector<Scope>;
+    using ScopeStack = std::pmr::vector<Scope>;
     struct Machine;
     enum class WriteOperation { Assign, Add, Subtract, Multiply, Divide, Modulo, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight, PostAdd, PostSubtract, Invalid };
     static WriteOperation write_operation(const std::string& symbol);
@@ -69,6 +74,7 @@ class CifaBytecode : public Cifa
         size_t input_offset = 0;
         size_t input_count = 0;
         bool discard_result = false;
+        bool plain_increment = false; // Compiled syntax fact; no declaration/type binding.
     };
     // 编译期指令，额外携带 SourceRef，seal() 后投影为热 Instruction。
     struct BuildInstruction
@@ -108,13 +114,22 @@ class CifaBytecode : public Cifa
     // 一段根代码或函数代码的构建期、执行期和验证元数据集合。
     struct Instructions
     {
-        std::vector<BuildInstruction> build_code;
-        std::vector<Instruction> code;
-        std::vector<InstructionDiagnostic> diagnostics;
-        std::vector<RegisterOperation> numeric_operations;
-        std::vector<size_t> numeric_local_sites;
-        std::vector<size_t> register_inputs;
-        std::vector<std::vector<std::pair<size_t, bool>>> diagnostic_frames;
+        struct IntegerLoop
+        {
+            std::int64_t limit;
+            size_t body;
+            size_t exit;
+        };
+        std::pmr::memory_resource* resource;
+        explicit Instructions(std::pmr::memory_resource* value = std::pmr::get_default_resource()) : resource(value) {}
+        std::pmr::vector<BuildInstruction> build_code{resource};
+        std::pmr::vector<Instruction> code{resource};
+        std::pmr::vector<InstructionDiagnostic> diagnostics{resource};
+        std::pmr::vector<RegisterOperation> numeric_operations{resource};
+        std::pmr::vector<IntegerLoop> integer_loops{resource};
+        std::pmr::vector<size_t> numeric_local_sites{resource};
+        std::pmr::vector<size_t> register_inputs{resource};
+        std::pmr::vector<std::pmr::vector<std::pair<size_t, bool>>> diagnostic_frames{resource};
         size_t register_capacity = 0;
         size_t temporary_count = 0;
         size_t loop_state_count = 0;
@@ -129,25 +144,34 @@ class CifaBytecode : public Cifa
     {
         struct Values
         {
-            using Container = std::vector<CompactValue>;
+            using Container = std::pmr::vector<CompactValue>;
             using const_iterator = Container::const_iterator;
-            std::shared_ptr<Container> storage;
+            struct Storage {
+                memory::Resource resource;
+                Container elements;
+                explicit Storage(memory::Resource owner) : resource(std::move(owner)), elements(resource.get()) {}
+                Storage(memory::Resource owner, const Container& source)
+                    : resource(std::move(owner)), elements(source, resource.get()) {}
+                Storage(memory::Resource owner, Container&& source)
+                    : resource(std::move(owner)), elements(std::move(source), resource.get()) {}
+            };
+            std::shared_ptr<Storage> storage;
 
-            Values();
-            explicit Values(size_t size);
-            explicit Values(Container elements);
-            size_t size() const { return storage->size(); }
-            size_t capacity() const { return storage->capacity(); }
-            bool empty() const { return storage->empty(); }
-            operator const Container&() const { return *storage; }
-            const CompactValue& operator[](size_t index) const { return (*storage)[index]; }
+            explicit Values(const memory::Resource& resource = memory::default_resource());
+            Values(size_t size, const memory::Resource& resource);
+            Values(Container elements, const memory::Resource& resource);
+            size_t size() const { return storage->elements.size(); }
+            size_t capacity() const { return storage->elements.capacity(); }
+            bool empty() const { return storage->elements.empty(); }
+            operator const Container&() const { return storage->elements; }
+            const CompactValue& operator[](size_t index) const { return (storage->elements)[index]; }
             CompactValue& operator[](size_t index) { return writable()[index]; }
-            const CompactValue& front() const { return storage->front(); }
+            const CompactValue& front() const { return storage->elements.front(); }
             CompactValue& front() { return writable().front(); }
-            const_iterator begin() const { return storage->begin(); }
-            const_iterator end() const { return storage->end(); }
-            const_iterator begin() { return storage->begin(); }
-            const_iterator end() { return storage->end(); }
+            const_iterator begin() const { return storage->elements.begin(); }
+            const_iterator end() const { return storage->elements.end(); }
+            const_iterator begin() { return storage->elements.begin(); }
+            const_iterator end() { return storage->elements.end(); }
             void resize(size_t size) { writable().resize(size); }
             void reserve(size_t size) { writable().reserve(size); }
             void clear() { writable().clear(); }
@@ -165,48 +189,82 @@ class CifaBytecode : public Cifa
         };
         Values values;
         VmArray() = default;
-        explicit VmArray(size_t size) : values(size) {}
-        explicit VmArray(std::vector<CompactValue> elements) : values(std::move(elements)) {}
+        VmArray(size_t size, const memory::Resource& resource) : values(size, resource) {}
+        VmArray(std::pmr::vector<CompactValue> elements, const memory::Resource& resource) : values(std::move(elements), resource) {}
     };
     // VM 内部 map；与 VmArray 相同，使用写时复制保持值隔离。
     struct VmMap
     {
         struct Values
         {
-            using Container = std::map<std::string, CompactValue>;
+            using Container = std::pmr::map<std::pmr::string, CompactValue, std::less<>>;
             using const_iterator = Container::const_iterator;
-            std::shared_ptr<Container> storage;
+            struct Storage {
+                memory::Resource resource;
+                Container elements;
+                explicit Storage(memory::Resource owner) : resource(std::move(owner)), elements(resource.get()) {}
+                Storage(memory::Resource owner, const Container& source)
+                    : resource(std::move(owner)), elements(source, resource.get()) {}
+                Storage(memory::Resource owner, Container&& source)
+                    : resource(std::move(owner)), elements(std::move(source), resource.get()) {}
+            };
+            std::shared_ptr<Storage> storage;
 
-            Values();
-            explicit Values(Container elements);
-            size_t size() const { return storage->size(); }
-            bool contains(const std::string& key) const { return storage->find(key) != storage->end(); }
-            const_iterator begin() const { return storage->begin(); }
-            const_iterator end() const { return storage->end(); }
-            CompactValue& operator[](const std::string& key) { return writable()[key]; }
-            size_t erase(const std::string& key) { return writable().erase(key); }
+            explicit Values(const memory::Resource& resource = memory::default_resource());
+            Values(Container elements, const memory::Resource& resource);
+            size_t size() const { return storage->elements.size(); }
+            bool contains(std::string_view key) const { return storage->elements.find(key) != storage->elements.end(); }
+            const_iterator begin() const { return storage->elements.begin(); }
+            const_iterator end() const { return storage->elements.end(); }
+            CompactValue& operator[](std::string_view key) {
+                auto& container = writable();
+                if (auto found = container.find(key); found != container.end()) return found->second;
+                return container.try_emplace(std::pmr::string(key, container.get_allocator().resource())).first->second;
+            }
+            size_t erase(std::string_view key) { auto& container = writable(); auto found = container.find(key); if (found == container.end()) return 0; container.erase(found); return 1; }
             void clear() { writable().clear(); }
-            const Container& readable() const { return *storage; }
+            const Container& readable() const { return storage->elements; }
 
         private:
             Container& writable();
         };
         Values values;
         VmMap() = default;
-        explicit VmMap(const ObjectMap& elements);
-        explicit VmMap(ObjectMap&& elements);
-        explicit VmMap(Values::Container elements) : values(std::move(elements)) {}
+        explicit VmMap(const memory::Resource& resource) : values(resource) {}
+        VmMap(const ObjectMap& elements, const memory::Resource& resource);
+        VmMap(ObjectMap&& elements, const memory::Resource& resource);
+        VmMap(Values::Container elements, const memory::Resource& resource) : values(std::move(elements), resource) {}
     };
-    // VM 槽中的唯一值表示：基础类型内联，数组/map 使用内部 COW 表示，其余资源保留 any。
-    struct CompactValue : std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>
+    // 字符串保留其资源所有权，跨模块复制后不依赖原模块的存活期。
+    struct VmString {
+        memory::Resource allocation;
+        std::pmr::string text;
+        VmString(std::string_view value, const memory::Resource& resource)
+            : allocation(resource), text(value, resource.get()) {}
+        VmString(std::pmr::string&& value, const memory::Resource& resource)
+            : allocation(resource), text(std::move(value), resource.get()) {}
+        VmString(const VmString& other) : VmString(std::string_view(other.text), other.allocation) {}
+        VmString(VmString&&) noexcept = default;
+        VmString& operator=(const VmString& other) {
+            if (this != &other) { VmString copy(other); *this = std::move(copy); }
+            return *this;
+        }
+        VmString& operator=(VmString&& other) noexcept {
+            if (this != &other) { std::destroy_at(this); std::construct_at(this, std::move(other)); }
+            return *this;
+        }
+    };
+    // VM 槽中的唯一值表示：基础类型内联，字符串保留 PMR 资源，数组/map 使用 COW，其余资源保留 any。
+    struct CompactValue : std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, VmString, std::any>
     {
-        using Storage = std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, std::any>;
+        // Copies share existing COW ownership; default construction is empty.
+        using Storage = std::variant<std::monostate, std::int64_t, double, bool, VmArray, VmMap, VmString, std::any>;
         CompactValue() = default;
         using Storage::Storage;
         using Storage::operator=;
-        explicit CompactValue(std::any value);
-        CompactValue(const Object::Storage& value);
-        CompactValue(Object::Storage&& value);
+        explicit CompactValue(std::any value, const memory::Resource& allocation = memory::default_resource());
+        CompactValue(const Object::Storage& value, const memory::Resource& allocation = memory::default_resource());
+        CompactValue(Object::Storage&& value, const memory::Resource& allocation = memory::default_resource());
         CompactValue(const CompactValue& other);
         CompactValue(CompactValue&& other) noexcept;
         CompactValue& operator=(const CompactValue& other);
@@ -214,8 +272,8 @@ class CifaBytecode : public Cifa
 
         void clear() { emplace<std::monostate>(); }
         bool empty() const { return std::holds_alternative<std::monostate>(*this); }
-        static Storage import_resource(const std::any& value);
-        static Storage import_resource(std::any&& value);
+        static Storage import_resource(const std::any& value, const memory::Resource& allocation);
+        static Storage import_resource(std::any&& value, const memory::Resource& allocation);
         Object::Storage export_storage() const;
         Object::Storage take_storage();
         template<class T> T* resource()
@@ -227,6 +285,10 @@ class CifaBytecode : public Cifa
             else if constexpr (std::same_as<T, VmMap>)
             {
                 return std::get_if<VmMap>(this);
+            }
+            if constexpr (std::same_as<T, std::pmr::string>) {
+                auto* string = std::get_if<VmString>(this);
+                return string ? &string->text : nullptr;
             }
             auto* value = std::get_if<std::any>(this);
             return value ? std::any_cast<T>(value) : nullptr;
@@ -287,11 +349,11 @@ class CifaBytecode : public Cifa
     {
         BytecodeValue::Storage value;
         bool continue_marker = false;
-        ConstantValue(Object object) : value(std::move(object.value)) {}
+        ConstantValue(Object object, const memory::Resource& resource) : value(std::move(object.value), resource) {}
         explicit ConstantValue(bool boolean) : value(boolean) {}
         explicit ConstantValue(int integer) : value(std::int64_t(integer)) {}
-        explicit ConstantValue(const std::string& text) : value(std::any(text)) {}
-        explicit ConstantValue(ObjectVector elements) : value(std::any(std::move(elements))) {}
+        ConstantValue(const std::string& text, const memory::Resource& resource) : value(VmString(text, resource)) {}
+        ConstantValue(ObjectVector elements, const memory::Resource& resource) : value(std::any(std::move(elements)), resource) {}
         ConstantValue(const char* text, bool marker) : value(std::any(std::string(text))), continue_marker(marker) {}
     };
     // 连续寄存器文件的一个窗口。函数参数、局部和临时值共享同一存储，通过 base/size 划分生命周期。
@@ -309,32 +371,38 @@ class CifaBytecode : public Cifa
         // 与槽下标并行的负载、数值绑定、诊断来源和类型描述；扩容必须同步进行。
         struct Storage
         {
-            std::vector<BytecodeValue> values;
-            std::vector<NumericBinding> bindings;
-            std::vector<const Object*> origins;
-            std::vector<size_t> names;
-            std::deque<std::string> name_pool{std::string{}};
-            std::unordered_map<std::string, size_t> name_ids;
-            std::vector<size_t> types;
-            std::deque<TypeDescriptor> type_pool{TypeDescriptor{}};
-            explicit Storage(size_t count) : values(count), bindings(count), origins(count), names(count), types(count) {}
+            memory::Resource resource;
+            std::pmr::vector<BytecodeValue> values;
+            std::pmr::vector<NumericBinding> bindings;
+            std::pmr::vector<const Object*> origins;
+            std::pmr::vector<size_t> names;
+            std::pmr::deque<std::pmr::string> name_pool;
+            std::pmr::unordered_map<std::pmr::string, size_t, memory::StringHash, memory::StringEqual> name_ids;
+            std::pmr::vector<size_t> types;
+            std::pmr::deque<TypeDescriptor> type_pool;
+            Storage(size_t count, memory::Resource value_resource)
+                : resource(std::move(value_resource)), values(count, resource.get()), bindings(count, resource.get()),
+                  origins(count, resource.get()), names(count, resource.get()), name_pool(resource.get()),
+                  name_ids(resource.get()), types(count, resource.get()), type_pool(resource.get()) {
+                name_pool.emplace_back(); type_pool.emplace_back();
+            }
         };
         std::unique_ptr<Storage> storage;
-        std::vector<BytecodeValue>& values;
+        std::pmr::vector<BytecodeValue>& values;
         Storage& owner;
-        std::vector<NumericBinding>& bindings;
-        std::vector<const Object*>& origins;
-        std::vector<size_t>& slot_names;
-        std::deque<std::string>& name_pool;
-        std::unordered_map<std::string, size_t>& name_ids;
-        std::vector<size_t>& slot_types;
-        std::deque<TypeDescriptor>& type_pool;
+        std::pmr::vector<NumericBinding>& bindings;
+        std::pmr::vector<const Object*>& origins;
+        std::pmr::vector<size_t>& slot_names;
+        std::pmr::deque<std::pmr::string>& name_pool;
+        std::pmr::unordered_map<std::pmr::string, size_t, memory::StringHash, memory::StringEqual>& name_ids;
+        std::pmr::vector<size_t>& slot_types;
+        std::pmr::deque<TypeDescriptor>& type_pool;
         size_t window_base = 0;
         size_t window_top = 0;
         size_t window_size = 0;
 
-        explicit RegisterSlots(size_t count = 0)
-            : storage(std::make_unique<Storage>(count)), values(storage->values), owner(*storage), bindings(storage->bindings),
+        explicit RegisterSlots(size_t count = 0, const memory::Resource& resource = memory::default_resource())
+            : storage(std::make_unique<Storage>(count, resource)), values(storage->values), owner(*storage), bindings(storage->bindings),
               origins(storage->origins), slot_names(storage->names), name_pool(storage->name_pool),
               name_ids(storage->name_ids), slot_types(storage->types), type_pool(storage->type_pool), window_top(count), window_size(count) {}
         RegisterSlots(RegisterSlots& owner, size_t base, size_t count)
@@ -366,7 +434,7 @@ class CifaBytecode : public Cifa
         void import_object(size_t slot, Object&& value);
         template<class Value> void import_value(size_t slot, Value&& value);
         void clear(size_t slot);
-        void set_name(size_t slot, const std::string& name);
+        void set_name(size_t slot, std::string_view name);
         void set_type(size_t slot, const TypeDescriptor& type);
         const BytecodeValue::Storage& payload(size_t slot) const;
         BytecodeValue::Storage& resource_payload(size_t slot);
@@ -377,6 +445,8 @@ class CifaBytecode : public Cifa
         template<class Number> void write_number(size_t slot, Number number, bool preserve_binding = false);
         void write_payload(size_t slot, BytecodeValue::Storage value);
         void write_payload(size_t slot, std::any value);
+        void write_text(size_t slot, std::string_view value) { write_payload(slot, CompactValue(VmString(value, owner.resource))); }
+        void write_text(size_t slot, std::pmr::string&& value) { write_payload(slot, CompactValue(VmString(std::move(value), owner.resource))); }
         void write_payload(size_t slot, std::int64_t value);
         void write_payload(size_t slot, double value);
         void write_payload(size_t slot, bool value);
@@ -420,12 +490,12 @@ class CifaBytecode : public Cifa
         bool right_temporary = false;
         size_t temporary_destination = 0;
     };
-    std::unordered_map<const CalUnit*, size_t> source_ids;
-    std::unordered_map<size_t, const CalUnit*> compile_sources;
+    std::pmr::unordered_map<const CalUnit*, size_t> source_ids{allocation_resource.get()};
+    std::pmr::unordered_map<size_t, const CalUnit*> compile_sources{allocation_resource.get()};
     CalUnit* active_statement_node = nullptr;
     std::string translation_error;
     std::string runtime_error;
-    std::unordered_map<std::string, size_t> name_ids;
+    std::pmr::unordered_map<std::string, size_t> name_ids{allocation_resource.get()};
     // 已解析的索引表达式站点，避免执行期重复解析名称和声明形态。
     struct IndexSite
     {
@@ -454,8 +524,10 @@ class CifaBytecode : public Cifa
     // 调用站点的参数诊断、接收者和可选数值快路径描述。
     struct CallSite
     {
+        explicit CallSite(std::pmr::memory_resource* resource = std::pmr::get_default_resource()) : arguments(resource) {}
+        CallSite(SourceRef value, std::pmr::memory_resource* resource) : source(value), arguments(resource) {}
         SourceRef source;
-        std::vector<SourceLocation> arguments;
+        std::pmr::vector<SourceLocation> arguments;
         size_t local_slot = 0;
         bool global_receiver = false;
         size_t name_id = 0;
@@ -470,12 +542,13 @@ class CifaBytecode : public Cifa
     // 已编译脚本函数及其局部槽需求。
     struct FunctionCode
     {
+        explicit FunctionCode(std::pmr::memory_resource* resource) : parameters(resource), instructions(resource) {}
         struct Parameter
         {
             std::string name;
             std::string type_name;
         };
-        std::vector<Parameter> parameters;
+        std::pmr::vector<Parameter> parameters;
         std::string name;
         std::string return_type;
         SourceRef body_source;
@@ -485,6 +558,8 @@ class CifaBytecode : public Cifa
     // 一次编译产生的不可变代码、常量、名称和源码诊断目录。
     struct Module
     {
+        memory::Resource resource;
+        explicit Module(memory::Resource value) : resource(std::move(value)), root_instructions(resource.get()) {}
         struct SourceLine
         {
             std::string filename;
@@ -495,23 +570,23 @@ class CifaBytecode : public Cifa
         size_t host_function_version = 0;
         size_t script_function_version = 0;
         bool freeze_script_functions = false;
-        std::vector<SourceLine> source_lines;
-        std::unordered_map<std::string, size_t> entry_labels;
+        std::pmr::vector<SourceLine> source_lines{resource.get()};
+        std::pmr::unordered_map<std::string, size_t> entry_labels{resource.get()};
         std::unordered_map<std::string, std::vector<StructField>> structures;
-        std::deque<SourceLocation> sources;
-        std::vector<ConstantValue> constants;
-        std::deque<std::string> names;
+        std::pmr::deque<SourceLocation> sources{resource.get()};
+        std::pmr::vector<ConstantValue> constants{resource.get()};
+        std::pmr::deque<std::string> names{resource.get()};
         size_t int_type_id = 0;
         size_t double_type_id = 0;
-        std::vector<IndexSite> index_sites;
-        std::vector<VariableSite> variable_sites;
-        std::vector<RegisterBinarySite> register_binary_sites;
-        std::vector<std::pair<size_t, size_t>> member_sites;
+        std::pmr::vector<IndexSite> index_sites{resource.get()};
+        std::pmr::vector<VariableSite> variable_sites{resource.get()};
+        std::pmr::vector<RegisterBinarySite> register_binary_sites{resource.get()};
+        std::pmr::vector<std::pair<size_t, size_t>> member_sites{resource.get()};
         Instructions root_instructions;
         SourceRef root_source;
-        std::vector<size_t> root_entries;
-        std::deque<CallSite> calls;
-        std::unordered_map<std::string, std::unordered_map<size_t, std::shared_ptr<FunctionCode>>> function_code;
+        std::pmr::vector<size_t> root_entries{resource.get()};
+        std::pmr::deque<CallSite> calls{resource.get()};
+        std::pmr::unordered_map<std::string, std::pmr::unordered_map<size_t, std::shared_ptr<FunctionCode>>> function_code{resource.get()};
         const SourceLocation& source(const SourceRef& reference) const { return sources.at(reference.id - 1); }
     };
     // 单次或嵌套执行的 VM 状态；全局槽、作用域、调用缓存和错误状态均归属此对象。
@@ -524,22 +599,22 @@ class CifaBytecode : public Cifa
         CifaBytecode& host;
         RegisterSlots registers;
         RegisterSlots global_values;
-        std::unordered_map<std::string, size_t> global_slots;
-        std::vector<bool> global_exists;
+        std::pmr::unordered_map<std::string, size_t> global_slots;
+        std::pmr::vector<bool> global_exists;
         ScopeStack scopes;
-        std::unordered_map<std::string, std::unordered_map<size_t, std::shared_ptr<const Module>>> functions;
+        std::pmr::unordered_map<std::string, std::pmr::unordered_map<size_t, std::shared_ptr<const Module>>> functions;
         struct CachedFunction
         {
             std::shared_ptr<const Module> owner;
             const FunctionCode* code = nullptr;
         };
-        std::unordered_map<const CallSite*, CachedFunction> function_cache;
+        std::pmr::unordered_map<const CallSite*, CachedFunction> function_cache;
         std::unordered_map<std::string, std::vector<StructField>> structures;
         size_t function_version = 0;
         const Module* frozen_function_module = nullptr;
-        std::vector<ReturnState> returns;
-        std::vector<std::pair<const SourceLocation*, bool>> call_stack;
-        std::function<void(std::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
+        std::pmr::vector<ReturnState> returns;
+        std::pmr::vector<std::pair<const SourceLocation*, bool>> call_stack;
+        std::function<void(std::pmr::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
         std::string error;
         Object error_placeholder;
         bool exit_requested = false;
@@ -568,7 +643,7 @@ class CifaBytecode : public Cifa
             {
                 const auto* value = resource();
                 if (!value) return std::nullopt;
-                if (const auto* text = value->resource<std::string>()) return text->size();
+                if (const auto* text = value->resource<std::pmr::string>()) return text->size();
                 if (const auto* map = value->resource<VmMap>()) return map->values.size();
                 if (const auto* array = value->resource<VmArray>()) return array->values.size();
                 return std::nullopt;
@@ -585,7 +660,12 @@ class CifaBytecode : public Cifa
             size_t slot = 0;
         };
 
-        explicit Machine(CifaBytecode& value_host) : host(value_host) { }
+        explicit Machine(CifaBytecode& value_host)
+            : host(value_host), registers(0,host.allocation_resource), global_values(0,host.allocation_resource),
+              global_slots(host.allocation_resource.get()), global_exists(host.allocation_resource.get()),
+              scopes(host.allocation_resource.get()), functions(host.allocation_resource.get()),
+              function_cache(host.allocation_resource.get()), returns(host.allocation_resource.get()),
+              call_stack(host.allocation_resource.get()) { }
     size_t ensure_global_slot(const std::string& name);
     size_t find_global_slot(const std::string& name) const;
     bool global_exists_at(size_t slot) const;
@@ -617,18 +697,19 @@ class CifaBytecode : public Cifa
             const std::string& type_name, const SourceLocation& location);
         bool condition(RegisterSlots& source, size_t slot, const SourceLocation* location);
         void conversion_error(RegisterSlots& source, size_t slot, const std::string& target, const SourceLocation* location);
-        std::string string_value(RegisterSlots& source, size_t slot);
+        // 仅借用当前槽的字符串；槽被修改或发生嵌套执行前，调用者必须消费完或复制。
+        std::string_view string_value(RegisterSlots& source, size_t slot);
         bool range(RegisterSlots& source, size_t slot, const SourceLocation& location,
             RegisterSlots& destination, size_t target);
         bool bind_range(RegisterSlots& values, size_t slot, const std::string& name, const std::string& type_name, const SourceLocation& location);
-        Object call_host(const std::string& name, ObjectVector& arguments, const std::vector<SourceLocation>& locations);
+        Object call_host(const std::string& name, ObjectVector& arguments, const std::pmr::vector<SourceLocation>& locations);
         bool call_native_registers(const std::string& name, RegisterSlots& destination, size_t result,
             RegisterSlots& values, const size_t* arguments, size_t count,
-            const std::vector<SourceLocation>& locations);
+            const std::pmr::vector<SourceLocation>& locations);
         bool call_builtin_registers(const std::string& name, RegisterSlots& destination, size_t result,
             RegisterSlots& values, const size_t* arguments, size_t count);
         void call_method(RegisterSlots& destination, size_t slot, const std::string& name, const SourceLocation& location,
-            NamedValueRef& receiver, const std::vector<SourceLocation>& locations, RegisterSlots& arguments);
+            NamedValueRef& receiver, const std::pmr::vector<SourceLocation>& locations, RegisterSlots& arguments);
         IndexedValueRef indexed(const std::string& name, const std::string& type_name, size_t dimensions, bool is_decl_array,
             bool only_check, bool declare_current, RegisterSlots& indices, const size_t* index_slots);
         void read_indexed(RegisterSlots& destination, size_t slot, const IndexedValueRef& element, bool map_access);
@@ -637,70 +718,80 @@ class CifaBytecode : public Cifa
         Object make_no_value(const std::string& function_name, const SourceLocation& call_site) const;
         bool should_stop() const { return exit_requested || !error.empty(); }
     };
-    std::shared_ptr<Module> module_data = std::make_shared<Module>();
+    std::shared_ptr<Module> module_data = std::make_shared<Module>(allocation_resource);
     bool& compiled_valid = module_data->compiled_valid;
-    std::vector<Module::SourceLine>& source_lines = module_data->source_lines;
-    std::unordered_map<std::string, size_t>& entry_labels = module_data->entry_labels;
-    std::deque<SourceLocation>& sources = module_data->sources;
-    std::vector<ConstantValue>& constants = module_data->constants;
-    std::deque<std::string>& names = module_data->names;
-    std::vector<IndexSite>& index_sites = module_data->index_sites;
-    std::vector<VariableSite>& variable_sites = module_data->variable_sites;
-    std::vector<std::pair<size_t, size_t>>& member_sites = module_data->member_sites;
+    std::pmr::vector<Module::SourceLine>& source_lines = module_data->source_lines;
+    std::pmr::unordered_map<std::string, size_t>& entry_labels = module_data->entry_labels;
+    std::pmr::deque<SourceLocation>& sources = module_data->sources;
+    std::pmr::vector<ConstantValue>& constants = module_data->constants;
+    std::pmr::deque<std::string>& names = module_data->names;
+    std::pmr::vector<IndexSite>& index_sites = module_data->index_sites;
+    std::pmr::vector<VariableSite>& variable_sites = module_data->variable_sites;
+    std::pmr::vector<std::pair<size_t, size_t>>& member_sites = module_data->member_sites;
     Instructions& root_instructions = module_data->root_instructions;
     SourceRef& root_source = module_data->root_source;
-    std::vector<size_t>& root_entries = module_data->root_entries;
-    std::deque<CallSite>& calls = module_data->calls;
+    std::pmr::vector<size_t>& root_entries = module_data->root_entries;
+    std::pmr::deque<CallSite>& calls = module_data->calls;
     decltype(Module::function_code)& function_code = module_data->function_code;
     struct Loop
     {
+        Loop(size_t scope_count, size_t trace_count, std::pmr::memory_resource* resource, bool switch_loop = false)
+            : scopes(scope_count), traces(trace_count), breaks(resource), continues(resource), is_switch(switch_loop) {}
         size_t scopes;
         size_t traces;
-        std::vector<size_t> breaks;
-        std::vector<size_t> continues;
+        std::pmr::vector<size_t> breaks;
+        std::pmr::vector<size_t> continues;
         bool is_switch = false;
     };
-    std::vector<Loop> compile_loops;
+    std::pmr::vector<Loop> compile_loops{allocation_resource.get()};
     struct LabelBlock
     {
+        LabelBlock(size_t value, std::pmr::memory_resource* resource) : mark(value), targets(resource), jumps(resource) {}
+        LabelBlock(const LabelBlock&) = delete;
+        LabelBlock(LabelBlock&&) = default;
+        LabelBlock& operator=(LabelBlock&&) = default;
         size_t mark;
-        std::unordered_map<std::string, size_t> targets;
-        std::vector<std::pair<size_t, std::string>> jumps;
+        std::pmr::unordered_map<std::string, size_t> targets;
+        std::pmr::vector<std::pair<size_t, std::string>> jumps;
     };
-    std::vector<LabelBlock> compile_blocks;
+    std::pmr::vector<LabelBlock> compile_blocks{allocation_resource.get()};
     size_t compile_scopes = 0;
     size_t compile_traces = 0;
     FunctionCode* compiling_function = nullptr;
-    std::vector<std::unordered_map<std::string, size_t>> compile_local_scopes;
-    std::vector<size_t> compile_local_scope_bases;
-    std::unordered_set<std::string> compile_array_locals;
+    std::pmr::vector<std::pmr::unordered_map<std::string, size_t>> compile_local_scopes{allocation_resource.get()};
+    std::pmr::unordered_map<const CalUnit*, bool> compile_scope_effects{allocation_resource.get()};
+    std::pmr::vector<size_t> compile_local_scope_bases{allocation_resource.get()};
+    std::pmr::unordered_set<std::string> compile_array_locals{allocation_resource.get()};
     const std::unordered_map<std::string, FunctionOverloads>* compile_script_functions = nullptr;
     bool compile_allows_script_constant_folding = false;
-    std::unordered_set<std::string> compile_inline_functions;
-    std::unordered_map<const std::vector<BuildInstruction>*, std::vector<InstructionDiagnostic>> pending_diagnostics;
+    std::pmr::unordered_set<std::string> compile_inline_functions{allocation_resource.get()};
+    std::pmr::unordered_map<const std::pmr::vector<BuildInstruction>*, std::pmr::vector<InstructionDiagnostic>> pending_diagnostics{allocation_resource.get()};
 
     // 编译器辅助函数：建立冷源码表、密封指令流，并在 compact 时重映射控制流 PC。
     size_t source_id(const CalUnit& source);
     SourceRef source_ref(const CalUnit* node);
-    InstructionDiagnostic& pending_diagnostic(std::vector<BuildInstruction>& instructions);
+    InstructionDiagnostic& pending_diagnostic(std::pmr::vector<BuildInstruction>& instructions);
     size_t intern_name(const std::string& name);
     size_t index_site(const CalUnit& node);
     void seal(Instructions& instructions);
     void seal_calls();
-    static std::vector<size_t> compact(Instructions& instructions);
+    std::pmr::vector<size_t> compact(Instructions& instructions);
     SourceLocation& source(const SourceRef& reference) const;
     std::optional<size_t> local_slot(const CalUnit& node, bool declare, bool allow_untyped_declaration = false);
     size_t next_local_slot() const;
+    bool block_needs_runtime_scope(const CalUnit& node);
+    void analyze_binding_scopes(const CalUnit& node, bool custom_conversions);
     static bool operation(const CalUnit& node, Opcode& opcode);
     bool try_fold_constant(const CalUnit& node, Object& value,
-        const std::unordered_map<std::string, Object>* parameters = nullptr,
-        std::unordered_set<std::string>* active_functions = nullptr) const;
-    void emit(CalUnit& node, std::vector<BuildInstruction>& instructions);
-    size_t emit_statement(CalUnit& node, std::vector<BuildInstruction>& instructions);
-    static void discard_statement_result(std::vector<BuildInstruction>& instructions, size_t begin,
+        const std::pmr::unordered_map<std::string, Object>* parameters = nullptr,
+        std::pmr::unordered_set<std::string>* active_functions = nullptr) const;
+    void emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
+    size_t emit_statement(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
+    static void discard_statement_result(std::pmr::vector<BuildInstruction>& instructions, size_t begin,
         std::optional<size_t> end = std::nullopt);
-    bool emit_register_expression(CalUnit& node, std::vector<BuildInstruction>& instructions);
+    bool emit_register_expression(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
     bool verify(Instructions& instructions, size_t local_slot_count = 0);
+    struct InterpState;
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
         Object& result, size_t start = 0);
     static Object run_module(Machine& machine, const Module& module);
@@ -714,14 +805,14 @@ public:
         RegisterSlots& destination;
         RegisterSlots& arguments;
         const size_t* argument_slots;
-        const std::vector<SourceLocation>& locations;
+        const std::pmr::vector<SourceLocation>& locations;
         size_t result_slot;
         size_t argument_count_value;
         bool result_written = false;
 
         NativeCallContext(Machine& value_machine, RegisterSlots& value_destination, size_t value_result_slot,
             RegisterSlots& value_arguments, const size_t* value_argument_slots, size_t value_argument_count,
-            const std::vector<SourceLocation>& value_locations);
+            const std::pmr::vector<SourceLocation>& value_locations);
 
     public:
         size_t argument_count() const { return argument_count_value; }
@@ -773,6 +864,7 @@ public:
         size_t constant_count = 0;
         size_t call_site_count = 0;
         size_t total_instruction_count = 0;
+        size_t integer_loop_count = 0;
         size_t total_operand_count = 0;
         std::vector<Function> functions;
     };
@@ -801,6 +893,7 @@ public:
     };
 
     CifaBytecode();
+    explicit CifaBytecode(memory::Resource resource);
     ~CifaBytecode();
     CifaBytecode(const CifaBytecode&) = delete;
     CifaBytecode& operator=(const CifaBytecode&) = delete;
@@ -832,10 +925,10 @@ private:
     void prepare_compile_visibility();
     void clear_compile_visibility();
     std::unique_ptr<Session> session;
-    std::vector<std::unique_ptr<CifaBytecode>> nested_modules;
+    std::pmr::vector<std::unique_ptr<CifaBytecode>> nested_modules{allocation_resource.get()};
     std::unordered_map<std::string, FunctionOverloads> persistent_functions;
     std::unordered_map<std::string, std::vector<StructField>> persistent_struct_defs;
-    std::unordered_map<std::string, NativeFunction> native_functions;
+    std::pmr::unordered_map<std::string, NativeFunction> native_functions{allocation_resource.get()};
     std::unordered_set<std::string> native_function_names;
     size_t native_function_version = 0;
     bool optimization_enabled = true;
