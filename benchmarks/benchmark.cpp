@@ -40,7 +40,11 @@ int main(int argc, char** argv) try {
     } else if (workload == "strings") {
         script = "echo(value) { return value+\"::tail\"; } base=\"" + std::string(128, 'x')
             + "\"; int total=0; for(int i=0;i<10000;i++) { total+=size(format(\"{0}:{1}\",echo(base),i)); } return total;";
-    } else throw std::runtime_error("workload must be pi, calls, or strings");
+    } else if (workload == "increment") {
+        script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
+    } else if (workload == "incrementf") {
+        script = "double loop() { double value = 0; for (double i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
+    } else throw std::runtime_error("workload must be pi, calls, strings, increment, or incrementf");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.
@@ -58,6 +62,8 @@ int main(int argc, char** argv) try {
     if(vm.has_runtime_error()) throw std::runtime_error(vm.get_runtime_error());
     if (workload == "calls" && expected != "200010000.000000") throw std::runtime_error("Incorrect call sum");
     if (workload == "strings" && expected != "1388890.000000") throw std::runtime_error("Incorrect string length sum");
+    if (workload == "increment" && expected != "1000000.000000") throw std::runtime_error("Incorrect increment sum");
+    if (workload == "incrementf" && expected != "1000000.000000") throw std::runtime_error("Incorrect float increment sum");
     if (workload == "pi" && (expected.size()!=502 || !expected.starts_with("3.141592653589793238462643383279"))) throw std::runtime_error("Incorrect PI result");
     if (!profile) {
         cifa::Cifa direct;
