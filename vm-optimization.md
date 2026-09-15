@@ -28,6 +28,9 @@
 | `43.28 ms` | 二元数学调用的双局部操作数描述符 | 两轮 A/B：约 `44.54` -> `43.28 ms`，约快 `2.8%` |
 | `42.48 ms` | `ConstantLocal` 直接写目标局部槽 | A/B/B/A/A/B：`43.51` -> `42.48 ms`，约快 `2.37%` |
 | `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A：`41.442` -> `39.216/39.330 ms`，约快 `5.3%` |
+| `33.84 ms` | `InterpState` 上下文重构；RegisterBinary/Store+Increment/Call/Index/IndexLocal 拆为 noinline 成员 | 冻结基线交错 A/B（3×15）：`39.15` -> `33.84 ms`，约快 `13.5%`；Debug 回归 90/90 |
+| `31.96 ms` | 十六个冷 handler 续拆（调用/方法族、数学族、NumericBinaryLocal、RangeNext、Size 等） | 冻结基线交错 A/B：`39.09` -> `31.96 ms`，约快 `18.2%`；Debug 90/90 |
+| `32.96 ms` | `StoreLocal` 类型化数值快路保持内联、冷尾拆为 noinline | 对冻结上一批二进制交错 A/B：`34.12` -> `32.96 ms`，约快 `3.4%`；同批试拆 `IncrementLocal` 尾部因 incrementf `+2.7%` 撤回；Debug 90/90 |
 
 未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用、
 冷热诊断分离。它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
@@ -1552,3 +1555,101 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 另外三次计数运行中，字符串负载共请求 VM 资源 `870,090` 次；直接分配同样到达上游 `870,090` 次，预热后的标准池上游请求为零，池生命周期上游峰值为 `328,200` 字节。PI 的 VM 资源请求从先前的 `165,312` 增至 `166,521`，因为字符串缓冲区现在计入 PMR 统计；统计覆盖范围变化不能直接解释为总堆分配变多。原始计数为 `build/results/strings-counts-*.txt`。
 
 本轮 Visual Studio CPU 报告为 `build/results/pmr-strings.diagsession`，匹配程序/PDB 在 `build/pmr-strings`。这些文件均为本机生成的 Git 忽略产物。采样命令仍使用 Visual Studio 收集器，不需要 UI 自动化或提权。
+
+## 2026-09-15：编译器内联预算探针与 InterpState handler 拆分
+
+### clang-cl 三方探针（重构前基线）
+
+新增两个工具链构建目录，不改源码：`build/clangcl`（VS 生成器 `-T ClangCL`，clang 22.1.3，MSVC STL）与
+`build/clangcl-big`（同上加 `-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`）。
+三方交错轮转（MSVC / clang 默认 / clang 大阈值，各 3 轮 × 15 样本，`--vm-only`，程序内 `execute_ms`），
+重构前结果（中位数）：
+
+| 负载 | MSVC | clang 默认 | clang 大阈值 |
+| --- | ---: | ---: | ---: |
+| PI | 39.30 | 29.50 | 22.20 |
+| 20,000 次调用 | 22.81 | 17.64 | 15.50 |
+| increment | 5.96 | 6.60 | 6.62 |
+
+结论：
+
+- 同一编译器、同一源码，仅提高内联阈值即 PI `-24.7%`（29.50 -> 22.20）。巨型 switch 耗尽内联预算的假设
+  在同变量对照下成立。
+- MSVC 没有等价的阈值旋钮，恢复被拒内联只能改函数形状。
+- increment 反转：MSVC 在最紧融合循环上比 clang 快约 11%，且对两个 clang 构建提高阈值均无效。小热
+  handler 本就没有预算问题，病灶在巨型 handler 体。这既否决"提高阈值"作为候选修复，也支持"只拆大冷
+  handler、小热 op 保持内联"的切分策略。
+- 顺带核实 `build/lua-audit/findings.md`：Lua 参照为本地 MSVC x64 Release 构建，即 switch 分派（无跳转
+  表），Lua 对比在分派机制维度是同口径的。
+- 注意 clang-cl 下 `cifa_unit_test.cpp` 曾因 `Object` 到 bool/int/double 的多路隐式转换导致 `sin` 二义
+  无法编译，已单独修复（提交 `84176aa`）。
+
+### InterpState 与 handler 拆分（三批提交）
+
+结构：新增 `CifaBytecode::InterpState`——`execute_instructions` 循环全部可变状态的引用束；循环 lambda
+（`input_slot`、`current_diagnostic`、`current_location`、`release_scope`、`finish_call`、`alias_target`、
+`read_alias`、`bind_local_storage`、`initialize_numeric`、`link_globals`）改为成员函数；六个局部结构体
+（`LoopState`、`Frame`、`SwitchState`、`RangeState`、`MethodArguments`、`RangeBinding`）移入。头文件只加
+一行 `struct InterpState;` 前置声明，handler 定义全部留在 cpp。Handler 为 `CIFA_NOINLINE` 成员函数，函数
+体逐字迁移，仅做控制流映射：原循环 `continue` -> `return true`（已处理，继续分派），原停止路径
+`return true` -> `return false`（置好 result 后停止执行），`input_slot` 增加显式 `instruction` 参数
+（取消每条指令向状态写入当前指令指针）。`NumericBinary`/`NumericBinaryLocal` 的 `goto register_binary`
+回退改为直接调用，热路（Profile 零回退）不变。
+
+三批提交与同批交错 A/B（3 轮 × 15 样本，冻结基线二进制）：
+
+- `033101d`：RegisterBinary(215 行)、Store/Increment(166)、Call(109)、Index(105)、IndexLocal(71)。
+  PI `39.15 -> 33.84 ms`（约 -13.5%），calls `22.39 -> 21.51`（-3.8%），increment `5.97 -> 5.79`（-3%）。
+- `0159b4a`：MethodPush、ArrayPushGlobalLocal、MethodBegin、MethodValue、MethodNoArgs、CallBegin、Return、
+  PrepareStore、Unwind、RegisterSnapshot、MathUnary、MathBinary、NumericBinaryLocal、RangeNext、Array、
+  Size。PI `39.09 -> 31.96 ms`（同批约 -18.2%），calls `-7.3%`，incrementf `-4%`，increment `-2%`。
+- `c3dc0b0`：StoreLocal 拆分——PI 热的类型化数值 Assign 路径与 alias/数值复合 guard 保持内联，其余
+  （类型化非数值、外部 position、`alias_target` 通用回退）拆为 `op_store_local_tail`。对冻结上一批二进制
+  交错 A/B：PI `34.12 -> 32.96 ms`（-3.4%），calls `-1.8%`，increment `-2.7%`，incrementf 持平。
+
+迁移中确立的两条语义规则与撤回项：
+
+- 原循环中 `return true` 恒为"停止执行"，`continue` 恒为"下一条指令"。Return 最外层帧的停止路径前一行是
+  `export_argument` 而非错误赋值，基于"前一行"判别的重写漏掉它：handler 越过程序末尾继续分派，循环顶用
+  0 号寄存器覆盖 result（PI 静默错误，且一个回归用例死循环导致 ctest 挂起 11 分钟）。全部 21 个 handler
+  审计后仅此一处误判（另一处命中为 `read_number` 局部 lambda 的布尔返回，属误报，保持原样）。
+- MathUnary/MathBinary 内层 kind `switch` 的 `default: continue` 改写为 `default: return true`（跳过
+  payload 写入，进入下一条指令，与原语义一致）。
+- `IncrementLocal` 尾部拆分已撤回：double 自增不命中仅整型的快路，incrementf 约两百万次落入拆分尾部
+  （`+2.7%`，交错 A/B 全样本高于对照）。PI 中它仅 525 次的冷热判断对 increment/incrementf 微基准不成立。
+  这与 EmptyScope 实验同向：handler 级冷热必须按负载混合判定，不能只看单一 Profile。
+- `case` 级裸 `break` 与循环内 `continue` 审计：16 个新范围内无循环内 `continue`；仅有的两处 `break` 都在
+  作用域搜索的内层循环中，逐字迁移语义不变。
+- `ArrayPushGlobal`（PI 181,860 次、36 行）暂缓，未拆；`IncrementLocal` 保持内联。
+
+全部批次 Debug x64 回归 90/90。
+
+### clang-cl 复测（重构后）
+
+同源三方交错轮转（同前配置），重构后结果（中位数）：
+
+| 负载 | MSVC | clang 默认 | clang 大阈值 |
+| --- | ---: | ---: | ---: |
+| PI | 32.83 | 27.94 | 21.88 |
+| 20,000 次调用 | 20.64 | 17.91 | 15.60 |
+| increment | 5.76 | 6.64 | 6.61 |
+
+与重构前相比：MSVC 对 clang 默认的 PI 差距从约 `25%` 缩到约 `15%`，对大阈值 clang 从约 `43.5%` 缩到约
+`33.3%`；clang 默认自身 `29.50 -> 27.94 ms`，说明函数形状收缩对两个编译器都有利。同一编译器大阈值相对
+默认仍余约 `-21.7%`（PI）：剩余热核心（约 600 行 case 体：LoadLocal/Peek、NumericCompareBranch、
+NumericBinary、Branch 族、IncrementLocal、ArrayPushGlobal 等）在内联上仍受默认预算限制。其中多数是热
+路径，后续只能按"快路内联 + 冷尾 noinline"逐个拆分并逐批 A/B，不能整体搬出。increment 的 MSVC 优势
+（约 15%）在重构前后、阈值前后均稳定，属融合循环代码生成差异，与分派结构无关。
+
+复现命令：
+
+```powershell
+cmake -S . -B build/clangcl -G "Visual Studio 18 2026" -A x64 -T ClangCL
+cmake -S . -B build/clangcl-big -G "Visual Studio 18 2026" -A x64 -T ClangCL -DCMAKE_CXX_FLAGS_RELEASE="/O2 /Ob2 /DNDEBUG -mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000"
+cmake --build build/clangcl --config Release --target cifa_benchmark --parallel
+cmake --build build/clangcl-big --config Release --target cifa_benchmark --parallel
+./build/cmake/Release/cifa_benchmark.exe 15 pi --vm-only
+```
+
+MSVC 三方数据使用 `build/cmake`，交错基线二进制保存在 `build/trial/baseline-msvc.exe`、
+`build/trial/oneb-msvc.exe`、`build/trial/twob-msvc.exe`（分别为重构前、第一批后、第二批后）。
