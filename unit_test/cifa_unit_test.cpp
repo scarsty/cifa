@@ -111,7 +111,7 @@ bool register_function_test()
         c1.register_native_function("sin", [](TestBytecode::NativeCallContext& context)
             { context.set_result(std::sin(context.to_number(0))); });
     else
-        c1.register_function("sin", [](ObjectVector& d) { return sin(d[0]); });
+        c1.register_function("sin", [](ObjectVector& d) { return std::sin(d[0].toDouble()); });
 
     std::string script_code = R"(
     double PI = 3.141592653589793238462643383279;
