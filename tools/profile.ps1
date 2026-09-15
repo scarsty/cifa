@@ -15,7 +15,7 @@ $outputPath = [IO.Path]::GetFullPath($Output)
 New-Item -ItemType Directory -Force (Split-Path $outputPath) | Out-Null
 # Target only our benchmark. Use the installed Visual Studio collector directly.
 $benchmarkArgs = "$Samples $Workload --vm-only --wait"
-if($Pool) { $benchmarkArgs += ' --pool' }
+if($Pool) { $benchmarkArgs += ' --pool' } else { $benchmarkArgs += ' --no-pool' }
 $process = Start-Process $exe -ArgumentList $benchmarkArgs -PassThru -WindowStyle Hidden
 $session = 42
 $started = $false

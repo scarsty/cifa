@@ -1,6 +1,8 @@
 #include "CifaPmrAny.h"
 #include "test_process.h"
 #include <array>
+#include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
