@@ -791,6 +791,7 @@ class CifaBytecode : public Cifa
         std::optional<size_t> end = std::nullopt);
     bool emit_register_expression(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
     bool verify(Instructions& instructions, size_t local_slot_count = 0);
+    struct InterpState;
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
         Object& result, size_t start = 0);
     static Object run_module(Machine& machine, const Module& module);

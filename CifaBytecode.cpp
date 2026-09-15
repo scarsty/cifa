@@ -6,6 +6,14 @@
 #include <iostream>
 #include <limits>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define CIFA_NOINLINE __declspec(noinline)
+#elif defined(__clang__) || defined(__GNUC__)
+#define CIFA_NOINLINE __attribute__((noinline))
+#else
+#define CIFA_NOINLINE
+#endif
+
 namespace cifa
 {
 CifaBytecode::VmArray::Values::Values(const memory::Resource& resource) : storage(std::make_shared<Storage>(resource)) {}
@@ -3672,6 +3680,911 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
     compile_sources.clear();
 }
 
+    // 执行器上下文：持有 execute_instructions 循环全部可变状态的引用，
+    // 使大型 opcode handler 可以拆分为独立 noinline 函数而保持语义与命名不变。
+    struct CifaBytecode::InterpState
+    {
+        struct LoopState
+        {
+            size_t scopes; size_t local_scope_bases;
+            std::pmr::vector<size_t> ranges; std::pmr::vector<size_t> switches;
+            LoopState(size_t s, size_t l, std::pmr::memory_resource* r) : scopes(s), local_scope_bases(l), ranges(r), switches(r) {}
+            LoopState(const LoopState& other) : LoopState(other.scopes,other.local_scope_bases,other.ranges.get_allocator().resource()) {
+                ranges=other.ranges; switches=other.switches;
+            }
+            LoopState(LoopState&&) = default;
+            LoopState& operator=(LoopState&&) = default;
+            LoopState& operator=(const LoopState&) = default;
+        };
+        struct SwitchState { size_t condition_slot = 0; bool active = false; };
+        struct RangeState { size_t snapshot_slot = 0; size_t index = 0; };
+        struct MethodArguments { size_t base = 0; size_t count = 0; size_t received = 0; };
+        struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
+        struct Frame
+        {
+            const Instructions* instructions;
+            const SourceLocation* node;
+            size_t pc;
+            size_t call_pc;
+            size_t return_register;
+            RegisterSlots* locals;
+            ScopeStack scopes;
+            std::pmr::vector<size_t> local_scope_bases;
+            std::pmr::vector<std::optional<LoopState>> loops;
+            std::pmr::unordered_map<size_t, SwitchState> switches;
+            const FunctionCode* function;
+            const SourceLocation* call;
+            std::pmr::unordered_map<size_t, RangeState> ranges;
+            std::pmr::unordered_map<size_t, MethodArguments> method_arguments;
+            size_t method_argument_top;
+            const Module* owner;
+            std::shared_ptr<const Module> module;
+            std::pmr::vector<unsigned char> aliases;
+            size_t register_base;
+            size_t register_size;
+            size_t register_top;
+        };
+
+        Machine& machine;
+        CifaBytecode& interpreter;
+        RegisterSlots& registers;
+        ScopeStack& scopes;
+        std::pmr::vector<Scope>& reusable_scopes;
+        Object& result;
+        std::pmr::deque<Frame>& frames;
+        std::pmr::deque<RegisterSlots>& local_windows;
+        RegisterSlots*& active_locals;
+        std::pmr::vector<unsigned char>& active_aliases;
+        std::pmr::vector<std::optional<LoopState>>& loop_states;
+        std::pmr::vector<size_t>& local_scope_bases;
+        std::pmr::unordered_map<size_t, SwitchState>& switches;
+        std::pmr::unordered_map<size_t, RangeState>& ranges;
+        std::pmr::unordered_map<size_t, MethodArguments>& method_arguments;
+        size_t& method_argument_top;
+        std::optional<RangeBinding>& range_binding;
+        std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>>& global_links;
+        std::pmr::vector<size_t>*& active_globals;
+        const Module*& active_owner;
+        std::shared_ptr<const Module>& active_module;
+        const Instructions*& active_instructions;
+        const SourceLocation*& active_node;
+        const FunctionCode*& active_function;
+        const SourceLocation*& active_call;
+        const SourceLocation*& current_source;
+        std::pmr::vector<Machine::ReturnState>& return_states;
+        SourceRef& register_assignment_source;
+        size_t& error_pc;
+        size_t& pc;
+        const size_t missing_global;
+
+        size_t input_slot(const Instruction& instruction, size_t index)
+        {
+            if (index >= instruction.input_count
+                || instruction.input_offset + index >= active_instructions->register_inputs.size())
+                return std::numeric_limits<size_t>::max();
+            return active_instructions->register_inputs[instruction.input_offset + index];
+        }
+        const InstructionDiagnostic& current_diagnostic()
+        {
+            return active_instructions->diagnostics[error_pc];
+        }
+        const SourceLocation& current_location()
+        {
+            if (current_source == nullptr)
+            {
+                const auto source = current_diagnostic().source;
+                current_source = source.id != 0 ? &active_owner->source(source) : active_node;
+            }
+            return *current_source;
+        }
+        void release_scope()
+        {
+            if (!scopes.back().dynamic_registers)
+            {
+                scopes.back().bindings.clear();
+                reusable_scopes.push_back(std::move(scopes.back()));
+            }
+            scopes.pop_back();
+        }
+        void release_scopes_to(size_t size)
+        {
+            while (scopes.size() > size) release_scope();
+        }
+        std::pmr::vector<size_t>& link_globals(const Module* owner)
+        {
+            auto [entry, inserted] = global_links.try_emplace(owner);
+            if (inserted) entry->second.resize(owner->names.size(), missing_global);
+            return entry->second;
+        }
+        size_t linked_global(size_t name_id)
+        {
+            auto& linked = (*active_globals)[name_id];
+            if (linked == missing_global) linked = machine.find_global_slot(active_owner->names[name_id]);
+            return linked;
+        }
+        Machine::NamedValueRef alias_target(size_t name_id)
+        {
+            const size_t linked = linked_global(name_id);
+            if (linked != missing_global && machine.global_exists_at(linked))
+            {
+                const size_t index = machine.global_values.base() + linked;
+                return {&machine.global_values, linked,
+                    machine.global_values.type_pool[machine.global_values.slot_types[index]].element, true};
+            }
+            auto value = machine.assign_named(active_owner->names[name_id], "", false, false, {});
+            (*active_globals)[name_id] = value.slot;
+            return value;
+        }
+        void read_alias(size_t destination, size_t name_id, const SourceLocation& location)
+        {
+            const auto& name = active_owner->names[name_id];
+            if (auto* binding = machine.find_slot(name))
+            {
+                registers.copy(destination, *binding->file, binding->slot);
+            }
+            else
+            {
+                const size_t linked = linked_global(name_id);
+                if (linked != missing_global && machine.global_exists_at(linked))
+                {
+                    registers.copy(destination, machine.global_values, linked);
+                }
+                else
+                {
+                    machine.read_named(registers, destination, name, "", false, false, false, location);
+                }
+            }
+        }
+        void bind_local_storage(const std::string& name, size_t slot, bool current_only)
+        {
+            active_aliases[slot] = true;
+            for (size_t scope = scopes.size(); scope > 0; --scope)
+            {
+                auto& current = scopes[scope - 1];
+                if (auto* found = current.find(name))
+                {
+                    if (found->file != current.dynamic_registers.get())
+                        active_aliases[slot] = found->file != active_locals || found->slot != slot;
+                    else
+                    {
+                        active_locals->move(slot, *current.dynamic_registers, found->slot);
+                        current.bind(name, active_locals, slot);
+                        active_aliases[slot] = false;
+                    }
+                    return;
+                }
+                if (current_only) break;
+            }
+        }
+        bool initialize_numeric(size_t slot, RegisterSlots& source, size_t argument, const VariableSite& binding)
+        {
+            const auto numeric_binding = binding.type_id == active_owner->int_type_id ? RegisterSlots::NumericBinding::Int
+                : binding.type_id == active_owner->double_type_id ? RegisterSlots::NumericBinding::Double
+                : RegisterSlots::NumericBinding::None;
+            if (!binding.with_type || scopes.empty() || numeric_binding == RegisterSlots::NumericBinding::None) return false;
+            const auto& name = active_owner->names[binding.name_id];
+            const auto* existing = scopes.back().find(name);
+            if (existing && (existing->file != active_locals || existing->slot != slot)) return false;
+            if (!active_locals->cast_numeric(slot, source, argument, numeric_binding)) return false;
+            active_locals->bind_numeric(slot, numeric_binding);
+            if (!existing) scopes.back().bind(name, active_locals, slot);
+            active_aliases[slot] = false;
+            return true;
+        }
+        void finish_call()
+        {
+            auto& caller = frames.back();
+            RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
+            if (active_function && return_value.empty(0))
+            {
+                return_value.write_payload(0, std::any(Object::NoValue{active_function->name, Machine::format_frame(*active_call)}));
+                return_value.set_type(0, {typeid(void), "", "", "NoValue"});
+            }
+            auto saved = std::move(frames.back());
+            frames.pop_back();
+            return_states.pop_back();
+            local_windows.pop_back();
+            active_locals = saved.locals;
+            active_aliases = std::move(saved.aliases);
+            scopes = std::move(saved.scopes);
+            local_scope_bases = std::move(saved.local_scope_bases);
+            registers.restore(saved.register_base, saved.register_size, saved.register_top);
+            loop_states = std::move(saved.loops);
+            switches = std::move(saved.switches);
+            ranges = std::move(saved.ranges);
+            method_arguments = std::move(saved.method_arguments);
+            method_argument_top = saved.method_argument_top;
+            active_owner = saved.owner;
+            active_globals = &link_globals(active_owner);
+            active_module = std::move(saved.module);
+            active_instructions = saved.instructions;
+            active_node = saved.node;
+            active_function = std::move(saved.function);
+            active_call = saved.call;
+            pc = saved.pc;
+        }
+
+        bool op_index(const Instruction& instruction);
+        bool op_index_local(const Instruction& instruction);
+        bool op_call(const Instruction& instruction);
+        bool op_store_increment(const Instruction& instruction);
+        bool op_register_binary(const Instruction& instruction);
+    };
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_index(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+        const auto& site = active_owner->index_sites[instruction.auxiliary];
+        const auto& name = active_owner->names[site.name_id];
+        Machine::NamedValueRef receiver;
+        if (!site.declaration && site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
+            && !active_aliases[site.local_slot - 1])
+        {
+            const size_t slot = site.local_slot - 1;
+            const size_t absolute = active_locals->base() + slot;
+            receiver = {active_locals, slot,
+                active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
+        }
+        else receiver = machine.named_value(name);
+        auto* container = receiver.resource();
+        auto* array = container ? container->resource<VmArray>() : nullptr;
+        const bool map_access = (container && container->resource<VmMap>()) || site.string_index;
+        if (site.declaration)
+        {
+            if (auto* binding = machine.find_slot(name))
+            {
+                auto& file = *binding->file;
+                const size_t slot = binding->slot;
+                std::int64_t requested = 0;
+                if (site.dimensions != 0)
+                {
+                    const size_t argument = input_slot(instruction, instruction.input_count - instruction.operand);
+                    if (!registers.empty(argument) && !registers.integer(argument, requested))
+                    {
+                        machine.conversion_error(registers, argument, "int", nullptr);
+                        requested = 0;
+                    }
+                }
+                const size_t count = requested < 0 ? 0 : static_cast<size_t>(requested);
+                if (!array)
+                {
+                    file.write_payload(slot, BytecodeValue::Storage(VmArray(count, machine.host.allocation_resource)));
+                    array = file.resource_payload(slot).resource<VmArray>();
+                }
+                else array->values.resize(count);
+                const auto& type = active_owner->names[site.type_id];
+                const size_t absolute = file.base() + slot;
+                auto descriptor = file.type_pool[file.slot_types[absolute]];
+                descriptor.element = type;
+                file.set_type(slot, descriptor);
+                file.set_name(slot, name);
+                registers.copy(output, file, slot);
+                for (size_t index = 0; index < instruction.operand; ++index)
+                {
+                    const size_t argument = input_slot(instruction, instruction.input_count - instruction.operand + index);
+                    if (argument != output) registers.clear(argument);
+                }
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                return true;
+            }
+        }
+        if (active_owner->host_function_version != 0 && !site.declaration && site.dimensions == 1
+            && array != nullptr)
+        {
+            const size_t index_slot = input_slot(instruction, instruction.input_count - 1);
+            std::int64_t offset = 0;
+            if (!registers.integer(index_slot, offset))
+            {
+                machine.conversion_error(registers, index_slot, "int", nullptr);
+                offset = 0;
+            }
+            if (offset < 0)
+            {
+                machine.set_error("array index is out of range");
+                result = machine.error_result();
+                return false;
+            }
+            const auto index = static_cast<size_t>(offset);
+            auto& values = array->values;
+            if (index >= values.size())
+            {
+                values.resize(index + 1);
+                machine.read_indexed(registers, output,
+                    {&values[index], nullptr, name, receiver.element_type}, false);
+            }
+            else
+            {
+                const auto& readable = std::as_const(values);
+                const auto& element = readable[index];
+                if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
+                registers.store_payload(output, element);
+                registers.set_name(output, name);
+            }
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            return true;
+        }
+        auto element = machine.indexed(name, active_owner->names[site.type_id],
+            site.dimensions, site.declaration, false, false, registers,
+            active_instructions->register_inputs.data() + instruction.input_offset + instruction.input_count - instruction.operand);
+        machine.read_indexed(registers, output, element, map_access);
+        for (size_t index = 0; index < instruction.operand; ++index)
+        {
+            const size_t argument = input_slot(instruction, instruction.input_count - instruction.operand + index);
+            if (argument != output) registers.clear(argument);
+        }
+        if (machine.exit_requested) { result = Object(); return false; }
+        if (machine.exit_requested) { result = Object(); return false; }
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_index_local(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+        const auto& site = active_owner->index_sites[instruction.auxiliary];
+        const auto& name = active_owner->names[site.name_id];
+        const size_t local_slot = instruction.member_site - 1;
+        const auto& local_name = active_owner->names[instruction.variable_site];
+        RegisterSlots* index_file = active_locals;
+        size_t source_slot = local_slot;
+        if (active_aliases[local_slot])
+            for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
+                if (auto* found = scope->find(local_name))
+                {
+                    index_file = found->file;
+                    source_slot = found->slot;
+                    break;
+                }
+        if (index_file->empty(source_slot))
+        {
+            machine.set_error("variable '" + local_name + "' has not been initialized",
+                &active_owner->source(current_diagnostic().condition_source));
+            result = machine.error_result();
+            return false;
+        }
+        Machine::NamedValueRef receiver;
+        if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
+            && !active_aliases[site.local_slot - 1])
+        {
+            const size_t slot = site.local_slot - 1;
+            const size_t absolute = active_locals->base() + slot;
+            receiver = {active_locals, slot,
+                active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
+        }
+        else receiver = machine.named_value(name);
+        auto* container = receiver.resource();
+        auto* array = container ? container->resource<VmArray>() : nullptr;
+        if (array != nullptr)
+        {
+            std::int64_t offset = 0;
+            if (!index_file->integer(source_slot, offset))
+                machine.conversion_error(*index_file, source_slot, "int", nullptr);
+            if (offset < 0) machine.set_error("array index is out of range");
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            const size_t index = static_cast<size_t>(offset);
+            auto& values = array->values;
+            if (index >= values.size())
+            {
+                values.resize(index + 1);
+                machine.read_indexed(registers, output,
+                    {&values[index], nullptr, name, receiver.element_type}, false);
+            }
+            else
+            {
+                const auto& element = std::as_const(values)[index];
+                if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
+                registers.store_payload(output, element);
+                registers.set_name(output, name);
+            }
+        }
+        else
+        {
+            registers.copy(output, *index_file, source_slot);
+            const size_t index_slot = output;
+            auto element = machine.indexed(name, active_owner->names[site.type_id], 1, false,
+                false, false, registers, &index_slot);
+            machine.read_indexed(registers, output, element,
+                (container && container->resource<VmMap>()) || site.string_index);
+        }
+        if (machine.exit_requested) { result = Object(); return false; }
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+        auto& call = active_owner->calls[instruction.operand];
+        auto& call_source = active_owner->source(call.source);
+        const auto& call_name = active_owner->names[call.name_id];
+        if (interpreter.native_functions.contains(call_name))
+        {
+            const size_t* argument_slots = active_instructions->register_inputs.data()
+                + instruction.input_offset + instruction.input_count - call.arguments.size();
+            if (machine.call_native_registers(call_name, registers, output,
+                registers, argument_slots, call.arguments.size(), call.arguments))
+            {
+                for (size_t index = 0; index < call.arguments.size(); ++index)
+                    if (argument_slots[index] != output) registers.clear(argument_slots[index]);
+                if (active_owner->host_function_version != 0
+                    && active_owner->host_function_version != machine.host.native_function_version)
+                    machine.set_error("native functions changed during optimized bytecode execution", &call_source);
+                if (active_owner->freeze_script_functions
+                    && active_owner->script_function_version != machine.function_version)
+                    machine.set_error("script functions changed during optimized bytecode execution", &call_source);
+                if (machine.exit_requested) { result = Object(); return false; }
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                return true;
+            }
+            if (active_owner->host_function_version != 0
+                && active_owner->host_function_version != machine.host.native_function_version)
+            {
+                machine.set_error("native functions changed during optimized bytecode execution", &call_source);
+            }
+            if (active_owner->freeze_script_functions
+                && active_owner->script_function_version != machine.function_version)
+            {
+                machine.set_error("script functions changed during optimized bytecode execution", &call_source);
+            }
+        }
+        else
+        {
+            std::shared_ptr<const Module> function_module;
+            const auto* cached = machine.find_cached_function(call, call_name, call.arguments.size(), function_module);
+            if (!cached)
+            {
+                machine.set_error("bytecode function was not prepared: " + call_name);
+                result = machine.error_result();
+                return false;
+            }
+            ScopeStack locals(scopes.get_allocator());
+            locals.emplace_back(machine.host.allocation_resource);
+            const size_t caller_base = registers.base();
+            const size_t caller_size = registers.size();
+            const size_t local_count = (std::max)(cached->local_slot_count, call.arguments.size());
+            const size_t caller_top = registers.top();
+            RegisterSlots caller_values(registers, caller_base, caller_size);
+            registers.enter(local_count);
+            local_windows.emplace_back(registers, registers.base(), registers.size());
+            auto* local_values = &local_windows.back();
+            for (size_t index = 0; index < call.arguments.size(); ++index)
+            {
+                const auto& parameter = cached->parameters[index];
+                const size_t argument = input_slot(instruction, instruction.input_count - call.arguments.size() + index);
+                if (parameter.type_name.empty() || parameter.type_name == "auto")
+                    local_values->move(index, caller_values, argument);
+                else
+                {
+                    machine.convert_type(*local_values, index, caller_values, argument, parameter.type_name, call.arguments[index]);
+                    caller_values.clear(argument);
+                }
+                if ((parameter.type_name == "int" || parameter.type_name == "double")
+                    && local_values->payload(index).index() >= 1 && local_values->payload(index).index() <= 3)
+                {
+                    local_values->bind_numeric(index, parameter.type_name == "int"
+                        ? RegisterSlots::NumericBinding::Int : RegisterSlots::NumericBinding::Double);
+                }
+                else machine.bind_type(*local_values, index, parameter.type_name, call.arguments[index]);
+                if (!local_values->has_name(index)) local_values->set_name(index, call.arguments[index].str);
+                locals.back().bind(parameter.name, local_values, index);
+            }
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            frames.push_back({active_instructions, active_node, pc, pc - 1, output,
+                active_locals, std::move(scopes), std::move(local_scope_bases), std::move(loop_states), std::move(switches), active_function, active_call,
+                std::move(ranges), std::move(method_arguments), method_argument_top, active_owner, std::move(active_module), std::move(active_aliases),
+                caller_base, caller_size, caller_top});
+            active_function = cached;
+            active_call = &call_source;
+            active_node = &function_module->source(cached->body_source);
+            active_owner = function_module.get();
+            active_globals = &link_globals(active_owner);
+            active_module = std::move(function_module);
+            active_instructions = &cached->instructions;
+            registers.enter(active_instructions->register_capacity + active_instructions->temporary_count
+                + active_instructions->switch_count + active_instructions->range_count
+                + active_instructions->method_argument_count + 4);
+            active_locals = local_values;
+            active_aliases.assign(active_locals->size(), false);
+            scopes = std::move(locals);
+            scopes.reserve(scopes.size() + active_instructions->scope_capacity);
+            local_scope_bases.clear();
+            loop_states.assign(active_instructions->loop_state_count, std::nullopt);
+            switches.clear();
+            ranges.clear();
+            method_arguments.clear();
+            method_argument_top = 0;
+            return_states.emplace_back();
+            return_states.back().return_type = cached->return_type;
+            pc = 0;
+        }
+        if (machine.exit_requested) { result = Object(); return false; }
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_store_increment(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+        const auto& source = current_location();
+        const bool increment = instruction.opcode == Opcode::Increment;
+        const bool member = instruction.member_site != 0;
+        const bool indexed = instruction.operand != 0;
+        const IndexSite* site = indexed ? &active_owner->index_sites[instruction.operand - 1] : nullptr;
+        const VariableSite* variable = instruction.variable_site != 0
+            ? &active_owner->variable_sites[instruction.variable_site - 1] : nullptr;
+        if (!member && !indexed && variable)
+        {
+            const auto& name = active_owner->names[variable->name_id];
+            RegisterSlots* target_file = nullptr;
+            size_t target_slot = 0;
+            for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
+            {
+                if (auto* found = scope->find(name))
+                {
+                    target_file = found->file;
+                    target_slot = found->slot;
+                    break;
+                }
+                if (increment && variable->with_type) break;
+            }
+            if (target_file)
+            {
+                const auto& type = active_owner->names[variable->type_id];
+                if (variable->with_type) machine.bind_type(*target_file, target_slot, type, active_owner->source(current_diagnostic().target_source));
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                const bool post = increment && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
+                if (post) registers.copy(output, *target_file, target_slot);
+                const size_t computed = registers.size() - 2;
+                const size_t conversion = registers.size() - 1;
+                const size_t argument = increment ? conversion : input_slot(instruction, instruction.input_count - 1);
+                if (increment) registers.write_payload(argument, std::int64_t(1));
+                size_t value_slot = argument;
+                if (instruction.write != WriteOperation::Assign)
+                {
+                    const auto operation = write_opcode(instruction.write);
+                    if (!operation) { machine.set_error("invalid bytecode write operation", &source); result = machine.error_result(); return true; }
+                    registers.copy(computed, *target_file, target_slot);
+                    registers.binary_fallback(*operation, computed, computed, argument, machine, source, false);
+                    value_slot = computed;
+                }
+                if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, value_slot, conversion, source);
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                registers.clear(argument);
+                registers.clear(computed);
+                registers.clear(conversion);
+                if (!post) registers.copy(output, *target_file, target_slot);
+                return true;
+            }
+        }
+        Machine::IndexedValueRef target;
+        if (indexed && !increment && instruction.write == WriteOperation::Assign && site->dimensions == 1)
+        {
+            const auto& name = active_owner->names[site->name_id];
+            if (auto* binding = machine.find_slot(name))
+            {
+                auto* array = binding->file->resource_payload(binding->slot).resource<VmArray>();
+                if (array != nullptr)
+                {
+                    const size_t index_slot = input_slot(instruction, instruction.input_count - 2);
+                    std::int64_t offset = 0;
+                    if (!registers.integer(index_slot, offset))
+                        machine.conversion_error(registers, index_slot, "int", nullptr);
+                    if (offset < 0)
+                    {
+                        machine.set_error("array index is out of range");
+                        result = machine.error_result();
+                        return false;
+                    }
+                    const size_t index = static_cast<size_t>(offset);
+                    auto& values = array->values;
+                    if (index >= values.size()) values.resize(index + 1);
+                    const size_t argument = input_slot(instruction, instruction.input_count - 1);
+                    const size_t absolute = binding->file->base() + binding->slot;
+                    const auto& element_type = binding->file->type_pool[binding->file->slot_types[absolute]].element;
+                    if (element_type.empty())
+                    {
+                        values[index] = std::move(registers.resource_payload(argument));
+                        registers.clear(argument);
+                    }
+                    else
+                    {
+                        const size_t converted = registers.size() - 1;
+                        if (!machine.convert_type(registers, converted, registers, argument, element_type, source))
+                        {
+                            result = machine.error_result();
+                            return false;
+                        }
+                        registers.clear(argument);
+                        values[index] = std::move(registers.resource_payload(converted));
+                        registers.clear(converted);
+                    }
+                    registers.store_payload(output, values[index]);
+                    registers.set_name(output, name);
+                    return true;
+                }
+            }
+        }
+        if (member)
+            target = machine.resolve_member(
+                active_owner->names[active_owner->member_sites[instruction.member_site - 1].first],
+                active_owner->names[active_owner->member_sites[instruction.member_site - 1].second]);
+        else if (indexed)
+            target = machine.indexed(
+                active_owner->names[site->name_id], active_owner->names[site->type_id],
+                site->dimensions, false, false, increment && site->with_type, registers,
+                active_instructions->register_inputs.data() + instruction.input_offset + instruction.input_count
+                    - (increment ? 0 : 1) - site->dimensions);
+        else
+        {
+            const auto named = machine.assign_named(active_owner->names[variable->name_id], active_owner->names[variable->type_id],
+                variable->with_type, increment && variable->with_type, active_owner->source(current_diagnostic().target_source));
+            target = {nullptr, nullptr, active_owner->names[variable->name_id], named.element_type, named.file, named.slot};
+        }
+        const bool post = increment && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
+        if (post) machine.read_indexed(registers, output, target, false);
+        const size_t computed = registers.size() - 2;
+        const size_t argument = increment ? registers.size() - 1 : input_slot(instruction, instruction.input_count - 1);
+        if (increment) registers.write_payload(argument, std::int64_t(1));
+        size_t value_slot = argument;
+        if (instruction.write != WriteOperation::Assign)
+        {
+            machine.read_indexed(registers, computed, target, false);
+            const auto operation = write_opcode(instruction.write);
+            if (!operation) machine.set_error("invalid bytecode write operation");
+            else registers.binary_fallback(*operation, computed, computed, argument, machine, source, false);
+            value_slot = computed;
+        }
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        if (target.file && !target.compact && !target.object)
+        {
+            const bool with_type = variable != nullptr ? variable->with_type : site != nullptr && site->with_type;
+            const std::string& type_name = variable != nullptr ? active_owner->names[variable->type_id]
+                : site != nullptr ? active_owner->names[site->type_id] : std::string();
+            if (with_type) machine.bind_type(*target.file, target.slot, type_name, source);
+            if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                value_slot, registers.size() - 1, source);
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            if (argument != value_slot) registers.clear(argument);
+            if (!post) registers.copy(output, *target.file, target.slot);
+            return true;
+        }
+        Object value;
+        registers.export_argument(value_slot, value);
+        if (argument != value_slot) registers.clear(argument);
+        const bool with_type = variable != nullptr ? variable->with_type : site != nullptr && site->with_type;
+        const std::string& type_name = variable != nullptr ? active_owner->names[variable->type_id]
+            : site != nullptr ? active_owner->names[site->type_id] : std::string();
+        machine.assign_indexed(target, std::move(value), with_type, type_name, source);
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        if (instruction.auxiliary != 0)
+        {
+            const size_t slot = instruction.auxiliary - 1;
+            if (slot >= active_locals->size())
+            {
+                machine.set_error("bytecode local slot out of range");
+                result = machine.error_result();
+                return false;
+            }
+        }
+        if (!post) machine.read_indexed(registers, output, target, false);
+        return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_register_binary(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+        const auto& site = active_owner->register_binary_sites[instruction.operand];
+        const size_t binary_destination = site.temporary_destination != 0
+            ? active_instructions->register_capacity + site.temporary_destination - 1
+            : (site.code.flags & 1) != 0 ? registers.size() - 1 : output;
+        if (site.left_temporary && site.right_temporary)
+        {
+            const size_t left = active_instructions->register_capacity + site.code.left;
+            const size_t right = active_instructions->register_capacity + site.code.right;
+            if (!registers.binary(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, current_location()))
+            {
+                registers.binary_fallback(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, current_location(), true);
+            }
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            if (site.code.destination != 0)
+            {
+                const size_t slot = site.code.destination - 1;
+                const auto& binding = active_owner->variable_sites[site.variable_site - 1];
+                const auto& name = active_owner->names[binding.name_id];
+                const bool initialized = initialize_numeric(slot, registers, binary_destination, binding);
+                const bool assigned = !initialized && !binding.with_type && !active_aliases[slot]
+                    && active_locals->assign_numeric(slot, registers, binary_destination);
+                if (initialized || assigned)
+                {
+                    registers.clear(binary_destination);
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *active_locals, slot);
+                    return true;
+                }
+                register_assignment_source = site.assignment_source;
+                current_source = &active_owner->source(site.assignment_source);
+                const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
+                const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
+                auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
+                const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
+                const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
+                if (direct)
+                {
+                    if (binding.with_type) machine.bind_type(*target_file, target_slot,
+                        active_owner->names[binding.type_id], current_location());
+                    const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
+                    if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, binary_destination, conversion, current_location());
+                    if (machine.should_stop()) { result = machine.error_result(); return false; }
+                    registers.clear(binary_destination);
+                    if (binding.with_type)
+                    {
+                        if (!existing) scopes.back().bind(name, active_locals, slot);
+                        active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
+                    }
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
+                    register_assignment_source = {};
+                    return true;
+                }
+                const auto target = alias_target(binding.name_id);
+                if (binding.with_type) machine.bind_type(*target.file, target.slot,
+                    active_owner->names[binding.type_id], current_location());
+                const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
+                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                    binary_destination, conversion, current_location());
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                bind_local_storage(name, slot, false);
+                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
+                register_assignment_source = {};
+            }
+            return true;
+        }
+        if ((site.left_constant || site.left_temporary || !active_aliases[site.code.left])
+            && (site.right_constant || site.right_temporary || !active_aliases[site.code.right]))
+        {
+            const size_t scratch_left = registers.size() - 2;
+            const auto read_number = [&](bool constant, bool temporary_value, size_t slot,
+                std::int64_t& integer, double& floating, bool& is_double)
+            {
+                if (temporary_value)
+                    return registers.number(active_instructions->register_capacity + slot, integer, floating, is_double);
+                if (!constant) return active_locals->number(slot, integer, floating, is_double);
+                const auto& value = active_owner->constants[slot].value;
+                if (const auto* number = value_get_if<std::int64_t>(&value)) integer = *number;
+                else if (const auto* number = value_get_if<bool>(&value)) integer = *number;
+                else if (const auto* number = value_get_if<double>(&value)) { floating = *number; is_double = true; }
+                else return false;
+                return true;
+            };
+            std::int64_t left_integer = 0, right_integer = 0;
+            double left_number = 0, right_number = 0;
+            bool left_double = false, right_double = false;
+            if (read_number(site.left_constant, site.left_temporary, site.code.left, left_integer, left_number, left_double)
+                && read_number(site.right_constant, site.right_temporary, site.code.right, right_integer, right_number, right_double)
+                && registers.binary_numbers(static_cast<Opcode>(site.code.opcode), scratch_left,
+                    left_integer, left_number, left_double, right_integer, right_number, right_double, machine, current_location()))
+            {
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                if (site.code.destination == 0)
+                {
+                    registers.move(binary_destination, registers, scratch_left);
+                    return true;
+                }
+                const size_t slot = site.code.destination - 1;
+                const auto& binding = active_owner->variable_sites[site.variable_site - 1];
+                const bool initialized = initialize_numeric(slot, registers, scratch_left, binding);
+                const bool assigned = !initialized && !binding.with_type && !active_aliases[slot]
+                    && active_locals->assign_numeric(slot, registers, scratch_left);
+                if (initialized || assigned)
+                {
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *active_locals, slot);
+                    registers.clear(scratch_left);
+                    return true;
+                }
+                const auto& name = active_owner->names[binding.name_id];
+                register_assignment_source = site.assignment_source;
+                current_source = &active_owner->source(site.assignment_source);
+                const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
+                const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
+                auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
+                const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
+                const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
+                if (direct)
+                {
+                    if (binding.with_type) machine.bind_type(*target_file, target_slot,
+                        active_owner->names[binding.type_id], current_location());
+                    if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, scratch_left, registers.size() - 1, current_location());
+                    if (machine.should_stop()) { result = machine.error_result(); return false; }
+                    registers.clear(scratch_left);
+                    if (binding.with_type)
+                    {
+                        if (!existing) scopes.back().bind(name, active_locals, slot);
+                        active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
+                    }
+                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
+                    register_assignment_source = {};
+                    return true;
+                }
+                const auto target = alias_target(binding.name_id);
+                if (binding.with_type) machine.bind_type(*target.file, target.slot,
+                    active_owner->names[binding.type_id], current_location());
+                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                    scratch_left, registers.size() - 1, current_location());
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                bind_local_storage(name, slot, false);
+                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
+                register_assignment_source = {};
+                return true;
+            }
+            else
+            {
+            }
+            registers.clear(scratch_left);
+        }
+        const size_t left_slot = registers.size() - 2;
+        const size_t right_slot = registers.size() - 1;
+        const auto read_register = [&](size_t destination, bool constant, bool temporary_value,
+            size_t slot, size_t name_id, SourceRef reference)
+        {
+            if (constant) { registers.write_payload(destination, active_owner->constants[slot].value); return; }
+            if (temporary_value)
+            {
+                registers.copy(destination, registers, active_instructions->register_capacity + slot);
+                return;
+            }
+            const auto& name = active_owner->names[name_id];
+            if (active_aliases[slot])
+                read_alias(destination, name_id, active_owner->source(reference));
+            else registers.copy(destination, *active_locals, slot);
+            if (registers.empty(destination))
+                machine.set_error("variable '" + name + "' has not been initialized", &active_owner->source(reference));
+        };
+        read_register(left_slot, site.left_constant, site.left_temporary,
+            site.code.left, site.left_name, site.left_source);
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        read_register(right_slot, site.right_constant, site.right_temporary,
+            site.code.right, site.right_name, site.right_source);
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        registers.binary_fallback(static_cast<Opcode>(site.code.opcode), left_slot, left_slot, right_slot, machine, current_location(), true);
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        if (site.code.destination != 0)
+        {
+            const size_t slot = site.code.destination - 1;
+            const auto& binding = active_owner->variable_sites[site.variable_site - 1];
+            const auto& name = active_owner->names[binding.name_id];
+            register_assignment_source = site.assignment_source;
+            current_source = &active_owner->source(site.assignment_source);
+            const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
+            const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
+            auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
+            const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
+            const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
+            if (direct)
+            {
+                if (binding.with_type) machine.bind_type(*target_file, target_slot,
+                    active_owner->names[binding.type_id], current_location());
+                if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, left_slot, right_slot, current_location());
+                if (machine.should_stop()) { result = machine.error_result(); return false; }
+                registers.clear(left_slot);
+                if (binding.with_type)
+                {
+                    if (!existing) scopes.back().bind(name, active_locals, slot);
+                    active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
+                }
+                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
+                register_assignment_source = {};
+                return true;
+            }
+            const auto target = alias_target(binding.name_id);
+            if (binding.with_type) machine.bind_type(*target.file, target.slot,
+                active_owner->names[binding.type_id], active_owner->source(site.assignment_source));
+            if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
+                left_slot, right_slot, active_owner->source(site.assignment_source));
+            if (machine.should_stop()) { result = machine.error_result(); return false; }
+            bind_local_storage(name, slot, false);
+            if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
+        }
+        else registers.move(binary_destination, registers, left_slot);
+        return true;
+}
+
 bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
     Object& result, size_t start)
 {
@@ -3703,68 +4616,22 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ~RestoreScopes() { scopes.resize(size); }
     } restore_scopes{scopes, scope_base};
     std::pmr::vector<Scope> reusable_scopes(&execution_scratch);
-    auto release_scope = [&]()
-    {
-        if (!scopes.back().dynamic_registers)
-        {
-            scopes.back().bindings.clear();
-            reusable_scopes.push_back(std::move(scopes.back()));
-        }
-        scopes.pop_back();
-    };
-    auto release_scopes_to = [&](size_t size)
-    {
-        while (scopes.size() > size) release_scope();
-    };
-    struct LoopState {
-        size_t scopes; size_t local_scope_bases;
-        std::pmr::vector<size_t> ranges; std::pmr::vector<size_t> switches;
-        LoopState(size_t s, size_t l, std::pmr::memory_resource* r) : scopes(s), local_scope_bases(l), ranges(r), switches(r) {}
-        LoopState(const LoopState& other) : LoopState(other.scopes,other.local_scope_bases,other.ranges.get_allocator().resource()) {
-            ranges=other.ranges; switches=other.switches;
-        }
-        LoopState(LoopState&&) = default;
-        LoopState& operator=(LoopState&&) = default;
-        LoopState& operator=(const LoopState&) = default;
-    };
+    using LoopState = InterpState::LoopState;
+    using SwitchState = InterpState::SwitchState;
+    using RangeState = InterpState::RangeState;
+    using MethodArguments = InterpState::MethodArguments;
+    using RangeBinding = InterpState::RangeBinding;
+    using Frame = InterpState::Frame;
     std::pmr::vector<std::optional<LoopState>> loop_states(instructions.loop_state_count, persistent);
     std::pmr::vector<size_t> local_scope_bases(persistent);
     if (start != 0 && !loop_states.empty()) loop_states[0] = LoopState{scopes.size(), local_scope_bases.size(), persistent};
-    struct SwitchState { size_t condition_slot = 0; bool active = false; };
     std::pmr::unordered_map<size_t, SwitchState> switches(persistent);
-    struct RangeState { size_t snapshot_slot = 0; size_t index = 0; };
     std::pmr::unordered_map<size_t, RangeState> ranges(persistent);
-    struct MethodArguments { size_t base = 0; size_t count = 0; size_t received = 0; };
     std::pmr::unordered_map<size_t, MethodArguments> method_arguments(persistent);
     size_t method_argument_top = 0;
-    struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
     std::optional<RangeBinding> range_binding;
     std::pmr::deque<RegisterSlots> local_windows(persistent);
     local_windows.emplace_back(registers, 0, 0);
-    struct Frame
-    {
-        const Instructions* instructions;
-        const SourceLocation* node;
-        size_t pc;
-        size_t call_pc;
-        size_t return_register;
-        RegisterSlots* locals;
-        ScopeStack scopes;
-        std::pmr::vector<size_t> local_scope_bases;
-        std::pmr::vector<std::optional<LoopState>> loops;
-        std::pmr::unordered_map<size_t, SwitchState> switches;
-        const FunctionCode* function;
-        const SourceLocation* call;
-        std::pmr::unordered_map<size_t, RangeState> ranges;
-        std::pmr::unordered_map<size_t, MethodArguments> method_arguments;
-        size_t method_argument_top;
-        const Module* owner;
-        std::shared_ptr<const Module> module;
-        std::pmr::vector<unsigned char> aliases;
-        size_t register_base;
-        size_t register_size;
-        size_t register_top;
-    };
     std::pmr::deque<Frame> frames(persistent);
     struct RestoreCaller
     {
@@ -3778,52 +4645,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     const Module* active_owner = &module;
     const size_t missing_global = std::numeric_limits<size_t>::max();
     std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>> global_links(&execution_scratch);
-    auto link_globals = [&](const Module* owner) -> std::pmr::vector<size_t>&
-    {
-        auto [entry, inserted] = global_links.try_emplace(owner);
-        if (inserted) entry->second.resize(owner->names.size(), missing_global);
-        return entry->second;
-    };
-    auto* active_globals = &link_globals(active_owner);
-    auto linked_global = [&](size_t name_id) -> size_t
-    {
-        auto& linked = (*active_globals)[name_id];
-        if (linked == missing_global) linked = machine.find_global_slot(active_owner->names[name_id]);
-        return linked;
-    };
-    auto alias_target = [&](size_t name_id) -> Machine::NamedValueRef
-    {
-        const size_t linked = linked_global(name_id);
-        if (linked != missing_global && machine.global_exists_at(linked))
-        {
-            const size_t index = machine.global_values.base() + linked;
-            return {&machine.global_values, linked,
-                machine.global_values.type_pool[machine.global_values.slot_types[index]].element, true};
-        }
-        auto value = machine.assign_named(active_owner->names[name_id], "", false, false, {});
-        (*active_globals)[name_id] = value.slot;
-        return value;
-    };
-    auto read_alias = [&](size_t destination, size_t name_id, const SourceLocation& location)
-    {
-        const auto& name = active_owner->names[name_id];
-        if (auto* binding = machine.find_slot(name))
-        {
-            registers.copy(destination, *binding->file, binding->slot);
-        }
-        else
-        {
-            const size_t linked = linked_global(name_id);
-            if (linked != missing_global && machine.global_exists_at(linked))
-            {
-                registers.copy(destination, machine.global_values, linked);
-            }
-            else
-            {
-                machine.read_named(registers, destination, name, "", false, false, false, location);
-            }
-        }
-    };
+    auto global_entry = global_links.try_emplace(active_owner);
+    if (global_entry.second) global_entry.first->second.resize(active_owner->names.size(), missing_global);
+    auto* active_globals = &global_entry.first->second;
     std::shared_ptr<const Module> active_module;
     const Instructions* active_instructions = &instructions;
     const SourceLocation* active_node = &module.source(module.root_source);
@@ -3878,27 +4702,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     } restore_object_reporter;
     auto* active_locals = &local_windows.front();
     std::pmr::vector<unsigned char> active_aliases(persistent);
-    auto bind_local_storage = [&](const std::string& name, size_t slot, bool current_only)
-    {
-        active_aliases[slot] = true;
-        for (size_t scope = scopes.size(); scope > 0; --scope)
-        {
-            auto& current = scopes[scope - 1];
-            if (auto* found = current.find(name))
-            {
-                if (found->file != current.dynamic_registers.get())
-                    active_aliases[slot] = found->file != active_locals || found->slot != slot;
-                else
-                {
-                    active_locals->move(slot, *current.dynamic_registers, found->slot);
-                    current.bind(name, active_locals, slot);
-                    active_aliases[slot] = false;
-                }
-                return;
-            }
-            if (current_only) break;
-        }
-    };
     auto& return_states = machine.returns;
     const size_t return_base = return_states.size();
     struct RestoreReturns
@@ -3907,53 +4710,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t size;
         ~RestoreReturns() { states.resize(size); }
     } restore_returns{return_states, return_base};
-    auto initialize_numeric = [&](size_t slot, RegisterSlots& source, size_t argument, const VariableSite& binding)
-    {
-        const auto numeric_binding = binding.type_id == active_owner->int_type_id ? RegisterSlots::NumericBinding::Int
-            : binding.type_id == active_owner->double_type_id ? RegisterSlots::NumericBinding::Double
-            : RegisterSlots::NumericBinding::None;
-        if (!binding.with_type || scopes.empty() || numeric_binding == RegisterSlots::NumericBinding::None) return false;
-        const auto& name = active_owner->names[binding.name_id];
-        const auto* existing = scopes.back().find(name);
-        if (existing && (existing->file != active_locals || existing->slot != slot)) return false;
-        if (!active_locals->cast_numeric(slot, source, argument, numeric_binding)) return false;
-        active_locals->bind_numeric(slot, numeric_binding);
-        if (!existing) scopes.back().bind(name, active_locals, slot);
-        active_aliases[slot] = false;
-        return true;
-    };
-    auto finish_call = [&]()
-    {
-        auto& caller = frames.back();
-        RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
-        if (active_function && return_value.empty(0))
-        {
-            return_value.write_payload(0, std::any(Object::NoValue{active_function->name, Machine::format_frame(*active_call)}));
-            return_value.set_type(0, {typeid(void), "", "", "NoValue"});
-        }
-        auto saved = std::move(frames.back());
-        frames.pop_back();
-        return_states.pop_back();
-        local_windows.pop_back();
-        active_locals = saved.locals;
-        active_aliases = std::move(saved.aliases);
-        scopes = std::move(saved.scopes);
-        local_scope_bases = std::move(saved.local_scope_bases);
-        registers.restore(saved.register_base, saved.register_size, saved.register_top);
-        loop_states = std::move(saved.loops);
-        switches = std::move(saved.switches);
-        ranges = std::move(saved.ranges);
-        method_arguments = std::move(saved.method_arguments);
-        method_argument_top = saved.method_argument_top;
-        active_owner = saved.owner;
-        active_globals = &link_globals(active_owner);
-        active_module = std::move(saved.module);
-        active_instructions = saved.instructions;
-        active_node = saved.node;
-        active_function = std::move(saved.function);
-        active_call = saved.call;
-        pc = saved.pc;
-    };
+    InterpState interp{machine, interpreter, registers, scopes, reusable_scopes, result, frames, local_windows,
+        active_locals, active_aliases, loop_states, local_scope_bases, switches, ranges, method_arguments,
+        method_argument_top, range_binding, global_links, active_globals, active_owner, active_module,
+        active_instructions, active_node, active_function, active_call, current_source, return_states,
+        register_assignment_source, error_pc, pc, missing_global};
     while (true)
     {
         if (pc >= active_instructions->code.size())
@@ -3962,32 +4723,12 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             auto& caller = frames.back();
             RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
             return_value.clear(0);
-            finish_call();
+            interp.finish_call();
             continue;
         }
         const auto& instruction = active_instructions->code[pc++];
         error_pc = pc - 1;
-        const auto input_slot = [&](size_t index)
-        {
-            if (index >= instruction.input_count
-                || instruction.input_offset + index >= active_instructions->register_inputs.size())
-                return std::numeric_limits<size_t>::max();
-            return active_instructions->register_inputs[instruction.input_offset + index];
-        };
         const size_t output = instruction.destination;
-        const auto current_diagnostic = [&]() -> const InstructionDiagnostic&
-        {
-            return active_instructions->diagnostics[error_pc];
-        };
-        const auto current_location = [&]() -> const SourceLocation&
-        {
-            if (current_source == nullptr)
-            {
-                const auto source = current_diagnostic().source;
-                current_source = source.id != 0 ? &active_owner->source(source) : active_node;
-            }
-            return *current_source;
-        };
         current_source = nullptr;
         switch (instruction.opcode)
         {
@@ -4033,21 +4774,21 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Branch:
         {
-            const auto condition_ref = current_diagnostic().condition_source;
+            const auto condition_ref = interp.current_diagnostic().condition_source;
             const SourceLocation* condition_source = condition_ref.id != 0 ? &active_owner->source(condition_ref) : nullptr;
             if (condition_source != nullptr) current_source = condition_source;
-            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), condition_source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
-            registers.clear(input_slot(instruction.input_count - 1));
+            registers.clear(interp.input_slot(instruction, instruction.input_count - 1));
             if (!condition) pc = instruction.operand;
             continue;
         }
         case Opcode::AndBranch:
         {
-            const auto condition_ref = current_diagnostic().condition_source;
+            const auto condition_ref = interp.current_diagnostic().condition_source;
             const SourceLocation* condition_source = condition_ref.id != 0 ? &active_owner->source(condition_ref) : nullptr;
             if (condition_source != nullptr) current_source = condition_source;
-            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), condition_source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (!condition)
             {
@@ -4058,10 +4799,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::OrBranch:
         {
-            const auto condition_ref = current_diagnostic().condition_source;
+            const auto condition_ref = interp.current_diagnostic().condition_source;
             const SourceLocation* condition_source = condition_ref.id != 0 ? &active_owner->source(condition_ref) : nullptr;
             if (condition_source != nullptr) current_source = condition_source;
-            const bool condition = machine.condition(registers, input_slot(instruction.input_count - 1), condition_source);
+            const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), condition_source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (condition)
             {
@@ -4102,7 +4843,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     active_aliases[slot] = false;
                 }
             }
-            release_scope();
+            interp.release_scope();
             local_scope_bases.pop_back();
             continue;
         case Opcode::LoopMark:
@@ -4124,7 +4865,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::MethodPush:
         {
             const auto& site = active_owner->calls[instruction.operand];
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             Machine::NamedValueRef receiver;
             if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
                 && !active_aliases[site.local_slot - 1])
@@ -4172,8 +4913,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::ArrayPushGlobal:
         {
             const auto& site = active_owner->calls[instruction.operand];
-            const size_t argument = input_slot(instruction.input_count - 1);
-            const size_t global_slot = linked_global(site.base_name_id);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
+            const size_t global_slot = interp.linked_global(site.base_name_id);
             auto* container = global_slot != missing_global && machine.global_exists_at(global_slot)
                 ? &machine.global_values.resource_payload(global_slot) : nullptr;
             auto* array = container ? container->resource<VmArray>() : nullptr;
@@ -4209,7 +4950,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         {
             const auto& site = active_owner->calls[instruction.operand];
             const size_t local_slot = instruction.auxiliary - 1;
-            const size_t global_slot = linked_global(site.base_name_id);
+            const size_t global_slot = interp.linked_global(site.base_name_id);
             auto* container = global_slot != missing_global && machine.global_exists_at(global_slot)
                 ? &machine.global_values.resource_payload(global_slot) : nullptr;
             auto* array = container ? container->resource<VmArray>() : nullptr;
@@ -4219,7 +4960,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 machine.set_error("push_back() requires an array or map", &active_owner->source(site.method_source));
             else
             {
-                const auto& load_source = active_owner->source(current_diagnostic().condition_source);
+                const auto& load_source = active_owner->source(interp.current_diagnostic().condition_source);
                 const auto& local_name = active_owner->names[instruction.member_site];
                 RegisterSlots* source_file = active_locals;
                 size_t source_slot = local_slot;
@@ -4309,7 +5050,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const size_t argument = active_instructions->register_capacity + active_instructions->temporary_count
                 + active_instructions->switch_count + active_instructions->range_count
                 + 1 + pending.base + pending.received++;
-            registers.move(argument, registers, input_slot(instruction.input_count - 1));
+            registers.move(argument, registers, interp.input_slot(instruction, instruction.input_count - 1));
             if (method_name == "insert" && pending.received < 2)
             {
                 const auto size = receiver.size();
@@ -4374,13 +5115,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::RangeBegin:
         {
             RangeState state;
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             state.snapshot_slot = active_instructions->register_capacity + active_instructions->temporary_count
                 + active_instructions->switch_count + ranges.size();
-            if (!machine.range(registers, argument, active_owner->source(current_diagnostic().target_source),
+            if (!machine.range(registers, argument, active_owner->source(interp.current_diagnostic().target_source),
                 registers, state.snapshot_slot))
             { result = machine.error_result(); return true; }
-            registers.clear(input_slot(instruction.input_count - 1));
+            registers.clear(interp.input_slot(instruction, instruction.input_count - 1));
             ranges[instruction.operand] = std::move(state);
             continue;
         }
@@ -4391,7 +5132,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const bool available = snapshot && state.index < snapshot->values.size();
             if (available)
             {
-                const auto& parameter = active_owner->source(current_diagnostic().target_source);
+                const auto& parameter = active_owner->source(interp.current_diagnostic().target_source);
                 const auto& site = active_owner->variable_sites[instruction.variable_site - 1];
                 const auto& name = active_owner->names[site.name_id];
                 range_binding.emplace();
@@ -4427,187 +5168,17 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             continue;
         }
         case Opcode::Index:
-        {
-            const auto& site = active_owner->index_sites[instruction.auxiliary];
-            const auto& name = active_owner->names[site.name_id];
-            Machine::NamedValueRef receiver;
-            if (!site.declaration && site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
-                && !active_aliases[site.local_slot - 1])
-            {
-                const size_t slot = site.local_slot - 1;
-                const size_t absolute = active_locals->base() + slot;
-                receiver = {active_locals, slot,
-                    active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
-            }
-            else receiver = machine.named_value(name);
-            auto* container = receiver.resource();
-            auto* array = container ? container->resource<VmArray>() : nullptr;
-            const bool map_access = (container && container->resource<VmMap>()) || site.string_index;
-            if (site.declaration)
-            {
-                if (auto* binding = machine.find_slot(name))
-                {
-                    auto& file = *binding->file;
-                    const size_t slot = binding->slot;
-                    std::int64_t requested = 0;
-                    if (site.dimensions != 0)
-                    {
-                        const size_t argument = input_slot(instruction.input_count - instruction.operand);
-                        if (!registers.empty(argument) && !registers.integer(argument, requested))
-                        {
-                            machine.conversion_error(registers, argument, "int", nullptr);
-                            requested = 0;
-                        }
-                    }
-                    const size_t count = requested < 0 ? 0 : static_cast<size_t>(requested);
-                    if (!array)
-                    {
-                        file.write_payload(slot, BytecodeValue::Storage(VmArray(count, machine.host.allocation_resource)));
-                        array = file.resource_payload(slot).resource<VmArray>();
-                    }
-                    else array->values.resize(count);
-                    const auto& type = active_owner->names[site.type_id];
-                    const size_t absolute = file.base() + slot;
-                    auto descriptor = file.type_pool[file.slot_types[absolute]];
-                    descriptor.element = type;
-                    file.set_type(slot, descriptor);
-                    file.set_name(slot, name);
-                    registers.copy(output, file, slot);
-                    for (size_t index = 0; index < instruction.operand; ++index)
-                    {
-                        const size_t argument = input_slot(instruction.input_count - instruction.operand + index);
-                        if (argument != output) registers.clear(argument);
-                    }
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    continue;
-                }
-            }
-            if (active_owner->host_function_version != 0 && !site.declaration && site.dimensions == 1
-                && array != nullptr)
-            {
-                const size_t index_slot = input_slot(instruction.input_count - 1);
-                std::int64_t offset = 0;
-                if (!registers.integer(index_slot, offset))
-                {
-                    machine.conversion_error(registers, index_slot, "int", nullptr);
-                    offset = 0;
-                }
-                if (offset < 0)
-                {
-                    machine.set_error("array index is out of range");
-                    result = machine.error_result();
-                    return true;
-                }
-                const auto index = static_cast<size_t>(offset);
-                auto& values = array->values;
-                if (index >= values.size())
-                {
-                    values.resize(index + 1);
-                    machine.read_indexed(registers, output,
-                        {&values[index], nullptr, name, receiver.element_type}, false);
-                }
-                else
-                {
-                    const auto& readable = std::as_const(values);
-                    const auto& element = readable[index];
-                    if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
-                    registers.store_payload(output, element);
-                    registers.set_name(output, name);
-                }
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                continue;
-            }
-            auto element = machine.indexed(name, active_owner->names[site.type_id],
-                site.dimensions, site.declaration, false, false, registers,
-                active_instructions->register_inputs.data() + instruction.input_offset + instruction.input_count - instruction.operand);
-            machine.read_indexed(registers, output, element, map_access);
-            for (size_t index = 0; index < instruction.operand; ++index)
-            {
-                const size_t argument = input_slot(instruction.input_count - instruction.operand + index);
-                if (argument != output) registers.clear(argument);
-            }
-            if (machine.exit_requested) { result = Object(); return true; }
-            if (machine.exit_requested) { result = Object(); return true; }
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (!interp.op_index(instruction)) return true;
             continue;
-        }
         case Opcode::IndexLocal:
-        {
-            const auto& site = active_owner->index_sites[instruction.auxiliary];
-            const auto& name = active_owner->names[site.name_id];
-            const size_t local_slot = instruction.member_site - 1;
-            const auto& local_name = active_owner->names[instruction.variable_site];
-            RegisterSlots* index_file = active_locals;
-            size_t source_slot = local_slot;
-            if (active_aliases[local_slot])
-                for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
-                    if (auto* found = scope->find(local_name))
-                    {
-                        index_file = found->file;
-                        source_slot = found->slot;
-                        break;
-                    }
-            if (index_file->empty(source_slot))
-            {
-                machine.set_error("variable '" + local_name + "' has not been initialized",
-                    &active_owner->source(current_diagnostic().condition_source));
-                result = machine.error_result();
-                return true;
-            }
-            Machine::NamedValueRef receiver;
-            if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size()
-                && !active_aliases[site.local_slot - 1])
-            {
-                const size_t slot = site.local_slot - 1;
-                const size_t absolute = active_locals->base() + slot;
-                receiver = {active_locals, slot,
-                    active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
-            }
-            else receiver = machine.named_value(name);
-            auto* container = receiver.resource();
-            auto* array = container ? container->resource<VmArray>() : nullptr;
-            if (array != nullptr)
-            {
-                std::int64_t offset = 0;
-                if (!index_file->integer(source_slot, offset))
-                    machine.conversion_error(*index_file, source_slot, "int", nullptr);
-                if (offset < 0) machine.set_error("array index is out of range");
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                const size_t index = static_cast<size_t>(offset);
-                auto& values = array->values;
-                if (index >= values.size())
-                {
-                    values.resize(index + 1);
-                    machine.read_indexed(registers, output,
-                        {&values[index], nullptr, name, receiver.element_type}, false);
-                }
-                else
-                {
-                    const auto& element = std::as_const(values)[index];
-                    if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
-                    registers.store_payload(output, element);
-                    registers.set_name(output, name);
-                }
-            }
-            else
-            {
-                registers.copy(output, *index_file, source_slot);
-                const size_t index_slot = output;
-                auto element = machine.indexed(name, active_owner->names[site.type_id], 1, false,
-                    false, false, registers, &index_slot);
-                machine.read_indexed(registers, output, element,
-                    (container && container->resource<VmMap>()) || site.string_index);
-            }
-            if (machine.exit_requested) { result = Object(); return true; }
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (!interp.op_index_local(instruction)) return true;
             continue;
-        }
         case Opcode::Array:
         {
             VmArray elements(instruction.operand, machine.host.allocation_resource);
             for (size_t index = elements.values.size(); index > 0; --index)
             {
-                const size_t argument = input_slot(instruction.input_count - elements.values.size() + index - 1);
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - elements.values.size() + index - 1);
                 elements.values[index - 1] = std::move(registers.resource_payload(argument));
                 registers.clear(argument);
             }
@@ -4646,119 +5217,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             continue;
         }
         case Opcode::Call:
-        {
-            auto& call = active_owner->calls[instruction.operand];
-            auto& call_source = active_owner->source(call.source);
-            const auto& call_name = active_owner->names[call.name_id];
-            if (interpreter.native_functions.contains(call_name))
-            {
-                const size_t* argument_slots = active_instructions->register_inputs.data()
-                    + instruction.input_offset + instruction.input_count - call.arguments.size();
-                if (machine.call_native_registers(call_name, registers, output,
-                    registers, argument_slots, call.arguments.size(), call.arguments))
-                {
-                    for (size_t index = 0; index < call.arguments.size(); ++index)
-                        if (argument_slots[index] != output) registers.clear(argument_slots[index]);
-                    if (active_owner->host_function_version != 0
-                        && active_owner->host_function_version != machine.host.native_function_version)
-                        machine.set_error("native functions changed during optimized bytecode execution", &call_source);
-                    if (active_owner->freeze_script_functions
-                        && active_owner->script_function_version != machine.function_version)
-                        machine.set_error("script functions changed during optimized bytecode execution", &call_source);
-                    if (machine.exit_requested) { result = Object(); return true; }
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    continue;
-                }
-                if (active_owner->host_function_version != 0
-                    && active_owner->host_function_version != machine.host.native_function_version)
-                {
-                    machine.set_error("native functions changed during optimized bytecode execution", &call_source);
-                }
-                if (active_owner->freeze_script_functions
-                    && active_owner->script_function_version != machine.function_version)
-                {
-                    machine.set_error("script functions changed during optimized bytecode execution", &call_source);
-                }
-            }
-            else
-            {
-                std::shared_ptr<const Module> function_module;
-                const auto* cached = machine.find_cached_function(call, call_name, call.arguments.size(), function_module);
-                if (!cached)
-                {
-                    machine.set_error("bytecode function was not prepared: " + call_name);
-                    result = machine.error_result();
-                    return true;
-                }
-                ScopeStack locals(scopes.get_allocator());
-                locals.emplace_back(machine.host.allocation_resource);
-                const size_t caller_base = registers.base();
-                const size_t caller_size = registers.size();
-                const size_t local_count = (std::max)(cached->local_slot_count, call.arguments.size());
-                const size_t caller_top = registers.top();
-                RegisterSlots caller_values(registers, caller_base, caller_size);
-                registers.enter(local_count);
-                local_windows.emplace_back(registers, registers.base(), registers.size());
-                auto* local_values = &local_windows.back();
-                for (size_t index = 0; index < call.arguments.size(); ++index)
-                {
-                    const auto& parameter = cached->parameters[index];
-                    const size_t argument = input_slot(instruction.input_count - call.arguments.size() + index);
-                    if (parameter.type_name.empty() || parameter.type_name == "auto")
-                        local_values->move(index, caller_values, argument);
-                    else
-                    {
-                        machine.convert_type(*local_values, index, caller_values, argument, parameter.type_name, call.arguments[index]);
-                        caller_values.clear(argument);
-                    }
-                    if ((parameter.type_name == "int" || parameter.type_name == "double")
-                        && local_values->payload(index).index() >= 1 && local_values->payload(index).index() <= 3)
-                    {
-                        local_values->bind_numeric(index, parameter.type_name == "int"
-                            ? RegisterSlots::NumericBinding::Int : RegisterSlots::NumericBinding::Double);
-                    }
-                    else machine.bind_type(*local_values, index, parameter.type_name, call.arguments[index]);
-                    if (!local_values->has_name(index)) local_values->set_name(index, call.arguments[index].str);
-                    locals.back().bind(parameter.name, local_values, index);
-                }
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                frames.push_back({active_instructions, active_node, pc, pc - 1, output,
-                    active_locals, std::move(scopes), std::move(local_scope_bases), std::move(loop_states), std::move(switches), active_function, active_call,
-                    std::move(ranges), std::move(method_arguments), method_argument_top, active_owner, std::move(active_module), std::move(active_aliases),
-                    caller_base, caller_size, caller_top});
-                active_function = cached;
-                active_call = &call_source;
-                active_node = &function_module->source(cached->body_source);
-                active_owner = function_module.get();
-                active_globals = &link_globals(active_owner);
-                active_module = std::move(function_module);
-                active_instructions = &cached->instructions;
-                registers.enter(active_instructions->register_capacity + active_instructions->temporary_count
-                    + active_instructions->switch_count + active_instructions->range_count
-                    + active_instructions->method_argument_count + 4);
-                active_locals = local_values;
-                active_aliases.assign(active_locals->size(), false);
-                scopes = std::move(locals);
-                scopes.reserve(scopes.size() + active_instructions->scope_capacity);
-                local_scope_bases.clear();
-                loop_states.assign(active_instructions->loop_state_count, std::nullopt);
-                switches.clear();
-                ranges.clear();
-                method_arguments.clear();
-                method_argument_top = 0;
-                return_states.emplace_back();
-                return_states.back().return_type = cached->return_type;
-                pc = 0;
-            }
-            if (machine.exit_requested) { result = Object(); return true; }
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
+            if (!interp.op_call(instruction)) return true;
             continue;
-        }
         case Opcode::SwitchMark:
         {
             auto& state = switches[instruction.operand];
             state.condition_slot = active_instructions->register_capacity + active_instructions->temporary_count + switches.size() - 1;
-            registers.move(state.condition_slot, registers, input_slot(instruction.input_count - 1));
+            registers.move(state.condition_slot, registers, interp.input_slot(instruction, instruction.input_count - 1));
             state.active = false;
             continue;
         }
@@ -4772,13 +5237,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             auto& state = switches.at(instruction.operand);
             if (instruction.auxiliary != 0)
             {
-                const size_t argument = input_slot(instruction.input_count - 1);
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                 if (!registers.binary_payloads(Opcode::Equal, output, registers.payload(state.condition_slot),
-                    registers.payload(argument), machine, current_location()))
+                    registers.payload(argument), machine, interp.current_location()))
                 {
                     const size_t scratch = registers.size() - 1;
                     registers.copy(scratch, registers, state.condition_slot);
-                    registers.binary_fallback(Opcode::Equal, output, scratch, argument, machine, current_location(), false);
+                    registers.binary_fallback(Opcode::Equal, output, scratch, argument, machine, interp.current_location(), false);
                 }
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 state.active = machine.condition(registers, output, nullptr);
@@ -4813,7 +5278,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     current = switches.erase(current);
                 }
                 else ++current;
-            release_scopes_to(state.scopes);
+            interp.release_scopes_to(state.scopes);
             while (local_scope_bases.size() > state.local_scope_bases)
             {
                 const size_t base = local_scope_bases.back();
@@ -4829,7 +5294,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::PrepareStore:
         {
-            auto& target = active_owner->source(current_diagnostic().target_source);
+            auto& target = active_owner->source(interp.current_diagnostic().target_source);
             if (instruction.member_site != 0)
             {
                 const auto& member = active_owner->member_sites[instruction.member_site - 1];
@@ -4876,7 +5341,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::DeclareLocal:
         {
-            const auto& source = current_location();
+            const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
             {
                 machine.set_error("bytecode local slot out of range");
@@ -4888,7 +5353,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 site.with_type, false, true, source);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             active_locals->copy(instruction.operand, registers, output);
-            bind_local_storage(active_owner->names[site.name_id], instruction.operand, false);
+            interp.bind_local_storage(active_owner->names[site.name_id], instruction.operand, false);
             if (active_aliases[instruction.operand]) active_locals->clear(instruction.operand);
             continue;
         }
@@ -4922,7 +5387,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     *integer = std::bit_cast<std::int64_t>(add ? before + 1 : before - 1);
                     continue;
                 }
-            const auto& source = current_location();
+            const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
             {
                 machine.set_error("bytecode local slot out of range");
@@ -4996,7 +5461,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 if (!post && !instruction.discard_result) registers.copy(output, *increment_file, increment_slot);
                 continue;
             }
-            const auto target = alias_target(binding.name_id);
+            const auto target = interp.alias_target(binding.name_id);
             const bool preserve_old = !instruction.discard_result
                 && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
             if (preserve_old) registers.copy(output, *target.file, target.slot);
@@ -5019,7 +5484,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::StoreLocal:
         {
-            const auto& source = current_location();
+            const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
             {
                 machine.set_error("bytecode local slot out of range");
@@ -5042,7 +5507,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     }
                 if (target_file)
                 {
-                    const size_t argument = input_slot(instruction.input_count - 1);
+                    const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                     const size_t computed = registers.size() - 2;
                     const size_t conversion = registers.size() - 1;
                     size_t value_slot = argument;
@@ -5070,8 +5535,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 const auto* existing = scopes.back().find(name);
                 if (existing == nullptr || (existing->file == active_locals && existing->slot == instruction.operand))
                 {
-                    const size_t argument = input_slot(instruction.input_count - 1);
-                    if (initialize_numeric(instruction.operand, registers, argument, binding))
+                    const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
+                    if (interp.initialize_numeric(instruction.operand, registers, argument, binding))
                     {
                         registers.clear(argument);
                         if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
@@ -5092,7 +5557,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 && instruction.write != WriteOperation::Assign)
             {
                 const auto operation = write_opcode(instruction.write);
-                const size_t argument = input_slot(instruction.input_count - 1);
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                 const size_t scratch = registers.size() - 2;
                 if (operation)
                 {
@@ -5113,7 +5578,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 }
             }
             if (instruction.write == WriteOperation::Assign && !binding.with_type && !active_aliases[instruction.operand]
-                && active_locals->assign_numeric(instruction.operand, registers, input_slot(instruction.input_count - 1)))
+                && active_locals->assign_numeric(instruction.operand, registers, interp.input_slot(instruction, instruction.input_count - 1)))
             {
                 if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
                 continue;
@@ -5124,7 +5589,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 const auto* position = scopes.back().find(name);
                 if (!position || (position->file == active_locals && position->slot == instruction.operand))
                 {
-                    const size_t argument = input_slot(instruction.input_count - 1);
+                    const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                     machine.bind_type(*active_locals, instruction.operand, declared_type, source);
                     if (!machine.should_stop()) machine.assign(*active_locals, instruction.operand, registers,
                         argument, registers.size() - 2, source);
@@ -5135,7 +5600,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
                     continue;
                 }
-                const size_t argument = input_slot(instruction.input_count - 1);
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                 machine.bind_type(*position->file, position->slot, declared_type, source);
                 if (!machine.should_stop()) machine.assign(*position->file, position->slot, registers,
                     argument, registers.size() - 2, source);
@@ -5147,7 +5612,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             if (instruction.write == WriteOperation::Assign && !binding.with_type && !active_aliases[instruction.operand])
             {
-                const size_t argument = input_slot(instruction.input_count - 1);
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                 machine.assign(*active_locals, instruction.operand, registers, argument, registers.size() - 2, source,
                     instruction.discard_result);
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
@@ -5160,7 +5625,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 const auto& name = active_owner->names[binding.name_id];
                 if (auto* alias = machine.find_slot(name))
                 {
-                    const size_t argument = input_slot(instruction.input_count - 1);
+                    const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                     const size_t computed = registers.size() - 2;
                     size_t value_slot = argument;
                     if (instruction.write != WriteOperation::Assign)
@@ -5180,8 +5645,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     continue;
                 }
             }
-            const auto target = alias_target(binding.name_id);
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const auto target = interp.alias_target(binding.name_id);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             size_t value_slot = argument;
             const size_t computed = registers.size() - 2;
             if (instruction.write != WriteOperation::Assign)
@@ -5216,7 +5681,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 }
                 if (!directly_bound)
                 {
-                    bind_local_storage(name, instruction.operand, site.with_type);
+                    interp.bind_local_storage(name, instruction.operand, site.with_type);
                 }
             }
             if (!instruction.discard_result) registers.copy(output, *target.file, target.slot);
@@ -5224,174 +5689,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Store:
         case Opcode::Increment:
-        {
-            const auto& source = current_location();
-            const bool increment = instruction.opcode == Opcode::Increment;
-            const bool member = instruction.member_site != 0;
-            const bool indexed = instruction.operand != 0;
-            const IndexSite* site = indexed ? &active_owner->index_sites[instruction.operand - 1] : nullptr;
-            const VariableSite* variable = instruction.variable_site != 0
-                ? &active_owner->variable_sites[instruction.variable_site - 1] : nullptr;
-            if (!member && !indexed && variable)
-            {
-                const auto& name = active_owner->names[variable->name_id];
-                RegisterSlots* target_file = nullptr;
-                size_t target_slot = 0;
-                for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope)
-                {
-                    if (auto* found = scope->find(name))
-                    {
-                        target_file = found->file;
-                        target_slot = found->slot;
-                        break;
-                    }
-                    if (increment && variable->with_type) break;
-                }
-                if (target_file)
-                {
-                    const auto& type = active_owner->names[variable->type_id];
-                    if (variable->with_type) machine.bind_type(*target_file, target_slot, type, active_owner->source(current_diagnostic().target_source));
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    const bool post = increment && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
-                    if (post) registers.copy(output, *target_file, target_slot);
-                    const size_t computed = registers.size() - 2;
-                    const size_t conversion = registers.size() - 1;
-                    const size_t argument = increment ? conversion : input_slot(instruction.input_count - 1);
-                    if (increment) registers.write_payload(argument, std::int64_t(1));
-                    size_t value_slot = argument;
-                    if (instruction.write != WriteOperation::Assign)
-                    {
-                        const auto operation = write_opcode(instruction.write);
-                        if (!operation) { machine.set_error("invalid bytecode write operation", &source); result = machine.error_result(); return true; }
-                        registers.copy(computed, *target_file, target_slot);
-                        registers.binary_fallback(*operation, computed, computed, argument, machine, source, false);
-                        value_slot = computed;
-                    }
-                    if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, value_slot, conversion, source);
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    registers.clear(argument);
-                    registers.clear(computed);
-                    registers.clear(conversion);
-                    if (!post) registers.copy(output, *target_file, target_slot);
-                    continue;
-                }
-            }
-            Machine::IndexedValueRef target;
-            if (indexed && !increment && instruction.write == WriteOperation::Assign && site->dimensions == 1)
-            {
-                const auto& name = active_owner->names[site->name_id];
-                if (auto* binding = machine.find_slot(name))
-                {
-                    auto* array = binding->file->resource_payload(binding->slot).resource<VmArray>();
-                    if (array != nullptr)
-                    {
-                        const size_t index_slot = input_slot(instruction.input_count - 2);
-                        std::int64_t offset = 0;
-                        if (!registers.integer(index_slot, offset))
-                            machine.conversion_error(registers, index_slot, "int", nullptr);
-                        if (offset < 0)
-                        {
-                            machine.set_error("array index is out of range");
-                            result = machine.error_result();
-                            return true;
-                        }
-                        const size_t index = static_cast<size_t>(offset);
-                        auto& values = array->values;
-                        if (index >= values.size()) values.resize(index + 1);
-                        const size_t argument = input_slot(instruction.input_count - 1);
-                        const size_t absolute = binding->file->base() + binding->slot;
-                        const auto& element_type = binding->file->type_pool[binding->file->slot_types[absolute]].element;
-                        if (element_type.empty())
-                        {
-                            values[index] = std::move(registers.resource_payload(argument));
-                            registers.clear(argument);
-                        }
-                        else
-                        {
-                            const size_t converted = registers.size() - 1;
-                            if (!machine.convert_type(registers, converted, registers, argument, element_type, source))
-                            {
-                                result = machine.error_result();
-                                return true;
-                            }
-                            registers.clear(argument);
-                            values[index] = std::move(registers.resource_payload(converted));
-                            registers.clear(converted);
-                        }
-                        registers.store_payload(output, values[index]);
-                        registers.set_name(output, name);
-                        continue;
-                    }
-                }
-            }
-            if (member)
-                target = machine.resolve_member(
-                    active_owner->names[active_owner->member_sites[instruction.member_site - 1].first],
-                    active_owner->names[active_owner->member_sites[instruction.member_site - 1].second]);
-            else if (indexed)
-                target = machine.indexed(
-                    active_owner->names[site->name_id], active_owner->names[site->type_id],
-                    site->dimensions, false, false, increment && site->with_type, registers,
-                    active_instructions->register_inputs.data() + instruction.input_offset + instruction.input_count
-                        - (increment ? 0 : 1) - site->dimensions);
-            else
-            {
-                const auto named = machine.assign_named(active_owner->names[variable->name_id], active_owner->names[variable->type_id],
-                    variable->with_type, increment && variable->with_type, active_owner->source(current_diagnostic().target_source));
-                target = {nullptr, nullptr, active_owner->names[variable->name_id], named.element_type, named.file, named.slot};
-            }
-            const bool post = increment && (instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract);
-            if (post) machine.read_indexed(registers, output, target, false);
-            const size_t computed = registers.size() - 2;
-            const size_t argument = increment ? registers.size() - 1 : input_slot(instruction.input_count - 1);
-            if (increment) registers.write_payload(argument, std::int64_t(1));
-            size_t value_slot = argument;
-            if (instruction.write != WriteOperation::Assign)
-            {
-                machine.read_indexed(registers, computed, target, false);
-                const auto operation = write_opcode(instruction.write);
-                if (!operation) machine.set_error("invalid bytecode write operation");
-                else registers.binary_fallback(*operation, computed, computed, argument, machine, source, false);
-                value_slot = computed;
-            }
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            if (target.file && !target.compact && !target.object)
-            {
-                const bool with_type = variable != nullptr ? variable->with_type : site != nullptr && site->with_type;
-                const std::string& type_name = variable != nullptr ? active_owner->names[variable->type_id]
-                    : site != nullptr ? active_owner->names[site->type_id] : std::string();
-                if (with_type) machine.bind_type(*target.file, target.slot, type_name, source);
-                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
-                    value_slot, registers.size() - 1, source);
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                if (argument != value_slot) registers.clear(argument);
-                if (!post) registers.copy(output, *target.file, target.slot);
-                continue;
-            }
-            Object value;
-            registers.export_argument(value_slot, value);
-            if (argument != value_slot) registers.clear(argument);
-            const bool with_type = variable != nullptr ? variable->with_type : site != nullptr && site->with_type;
-            const std::string& type_name = variable != nullptr ? active_owner->names[variable->type_id]
-                : site != nullptr ? active_owner->names[site->type_id] : std::string();
-            machine.assign_indexed(target, std::move(value), with_type, type_name, source);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            if (instruction.auxiliary != 0)
-            {
-                const size_t slot = instruction.auxiliary - 1;
-                if (slot >= active_locals->size())
-                {
-                    machine.set_error("bytecode local slot out of range");
-                    result = machine.error_result();
-                    return true;
-                }
-            }
-            if (!post) machine.read_indexed(registers, output, target, false);
+            if (!interp.op_store_increment(instruction)) return true;
             continue;
-        }
         case Opcode::Return:
         {
-            const size_t value_slot = input_slot(instruction.input_count - 1);
+            const size_t value_slot = interp.input_slot(instruction, instruction.input_count - 1);
             if (!frames.empty())
             {
                 auto& caller = frames.back();
@@ -5399,10 +5701,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 return_value.move(0, registers, value_slot);
                 const auto& states = return_states;
                 if (!states.empty() && !states.back().return_type.empty() && states.back().return_type != "void")
-                    machine.convert_type(return_value, 0, return_value, 0, states.back().return_type, current_location());
+                    machine.convert_type(return_value, 0, return_value, 0, states.back().return_type, interp.current_location());
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 if (return_states.empty()) return_states.emplace_back();
-                finish_call();
+                interp.finish_call();
                 continue;
             }
             if (return_states.empty()) return_states.emplace_back();
@@ -5423,13 +5725,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 const auto& name = active_owner->names[instruction.variable_site];
                 if (active_aliases[instruction.operand])
                 {
-                    read_alias(destination, instruction.variable_site, current_location());
-                    if (registers.empty(destination)) machine.set_error("variable '" + name + "' has not been initialized", &current_location());
+                    interp.read_alias(destination, instruction.variable_site, interp.current_location());
+                    if (registers.empty(destination)) machine.set_error("variable '" + name + "' has not been initialized", &interp.current_location());
                 }
                 else
                 {
                     if (active_locals->empty(instruction.operand))
-                        machine.set_error("variable '" + name + "' has not been initialized", &current_location());
+                        machine.set_error("variable '" + name + "' has not been initialized", &interp.current_location());
                     registers.copy(destination, *active_locals, instruction.operand);
                 }
             }
@@ -5511,13 +5813,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     ? active_instructions->register_capacity + operation.destination - 1 : output;
                 if (registers.binary_numbers(static_cast<Opcode>(operation.opcode), binary_destination,
                     left_integer, left_number, left_double, right_integer, right_number, right_double,
-                    machine, current_location()))
+                    machine, interp.current_location()))
                 {
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     continue;
                 }
             }
-            goto register_binary;
+            if (!interp.op_register_binary(instruction)) return true; continue;
         }
         case Opcode::NumericBinaryLocal:
         {
@@ -5552,13 +5854,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 && read_number(operation.left, 1, 2, left, left_number, left_double)
                 && read_number(operation.right, 4, 8, right, right_number, right_double)
                 && active_locals->binary_numbers(static_cast<Opcode>(operation.opcode), slot,
-                    left, left_number, left_double, right, right_number, right_double, machine, current_location(), !binding.with_type))
+                    left, left_number, left_double, right, right_number, right_double, machine, interp.current_location(), !binding.with_type))
             {
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 if (binding.with_type)
                 {
                     if (double_target && !active_locals->cast_numeric(slot, *active_locals, slot,
-                        RegisterSlots::NumericBinding::Double)) goto register_binary;
+                        RegisterSlots::NumericBinding::Double)) { if (!interp.op_register_binary(instruction)) return true; continue; }
                     active_locals->bind_numeric(slot, double_target ? RegisterSlots::NumericBinding::Double : RegisterSlots::NumericBinding::Int);
                     if (!existing) scopes.back().bind(active_owner->names[binding.name_id], active_locals, slot);
                 }
@@ -5568,223 +5870,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 continue;
             }
             if (machine.should_stop()) { result = machine.error_result(); return true; }
-            goto register_binary;
+            if (!interp.op_register_binary(instruction)) return true; continue;
         }
         case Opcode::RegisterBinary:
-        {
-        register_binary:
-            const auto& site = active_owner->register_binary_sites[instruction.operand];
-            const size_t binary_destination = site.temporary_destination != 0
-                ? active_instructions->register_capacity + site.temporary_destination - 1
-                : (site.code.flags & 1) != 0 ? registers.size() - 1 : output;
-            if (site.left_temporary && site.right_temporary)
-            {
-                const size_t left = active_instructions->register_capacity + site.code.left;
-                const size_t right = active_instructions->register_capacity + site.code.right;
-                if (!registers.binary(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, current_location()))
-                {
-                    registers.binary_fallback(static_cast<Opcode>(site.code.opcode), binary_destination, left, right, machine, current_location(), true);
-                }
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                if (site.code.destination != 0)
-                {
-                    const size_t slot = site.code.destination - 1;
-                    const auto& binding = active_owner->variable_sites[site.variable_site - 1];
-                    const auto& name = active_owner->names[binding.name_id];
-                    const bool initialized = initialize_numeric(slot, registers, binary_destination, binding);
-                    const bool assigned = !initialized && !binding.with_type && !active_aliases[slot]
-                        && active_locals->assign_numeric(slot, registers, binary_destination);
-                    if (initialized || assigned)
-                    {
-                        registers.clear(binary_destination);
-                        if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *active_locals, slot);
-                        continue;
-                    }
-                    register_assignment_source = site.assignment_source;
-                    current_source = &active_owner->source(site.assignment_source);
-                    const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
-                    const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
-                    auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
-                    const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
-                    const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
-                    if (direct)
-                    {
-                        if (binding.with_type) machine.bind_type(*target_file, target_slot,
-                            active_owner->names[binding.type_id], current_location());
-                        const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
-                        if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, binary_destination, conversion, current_location());
-                        if (machine.should_stop()) { result = machine.error_result(); return true; }
-                        registers.clear(binary_destination);
-                        if (binding.with_type)
-                        {
-                            if (!existing) scopes.back().bind(name, active_locals, slot);
-                            active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
-                        }
-                        if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
-                        register_assignment_source = {};
-                        continue;
-                    }
-                    const auto target = alias_target(binding.name_id);
-                    if (binding.with_type) machine.bind_type(*target.file, target.slot,
-                        active_owner->names[binding.type_id], current_location());
-                    const size_t conversion = binary_destination == registers.size() - 1 ? registers.size() - 2 : registers.size() - 1;
-                    if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
-                        binary_destination, conversion, current_location());
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    bind_local_storage(name, slot, false);
-                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
-                    register_assignment_source = {};
-                }
-                continue;
-            }
-            if ((site.left_constant || site.left_temporary || !active_aliases[site.code.left])
-                && (site.right_constant || site.right_temporary || !active_aliases[site.code.right]))
-            {
-                const size_t scratch_left = registers.size() - 2;
-                const auto read_number = [&](bool constant, bool temporary_value, size_t slot,
-                    std::int64_t& integer, double& floating, bool& is_double)
-                {
-                    if (temporary_value)
-                        return registers.number(active_instructions->register_capacity + slot, integer, floating, is_double);
-                    if (!constant) return active_locals->number(slot, integer, floating, is_double);
-                    const auto& value = active_owner->constants[slot].value;
-                    if (const auto* number = value_get_if<std::int64_t>(&value)) integer = *number;
-                    else if (const auto* number = value_get_if<bool>(&value)) integer = *number;
-                    else if (const auto* number = value_get_if<double>(&value)) { floating = *number; is_double = true; }
-                    else return false;
-                    return true;
-                };
-                std::int64_t left_integer = 0, right_integer = 0;
-                double left_number = 0, right_number = 0;
-                bool left_double = false, right_double = false;
-                if (read_number(site.left_constant, site.left_temporary, site.code.left, left_integer, left_number, left_double)
-                    && read_number(site.right_constant, site.right_temporary, site.code.right, right_integer, right_number, right_double)
-                    && registers.binary_numbers(static_cast<Opcode>(site.code.opcode), scratch_left,
-                        left_integer, left_number, left_double, right_integer, right_number, right_double, machine, current_location()))
-                {
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    if (site.code.destination == 0)
-                    {
-                        registers.move(binary_destination, registers, scratch_left);
-                        continue;
-                    }
-                    const size_t slot = site.code.destination - 1;
-                    const auto& binding = active_owner->variable_sites[site.variable_site - 1];
-                    const bool initialized = initialize_numeric(slot, registers, scratch_left, binding);
-                    const bool assigned = !initialized && !binding.with_type && !active_aliases[slot]
-                        && active_locals->assign_numeric(slot, registers, scratch_left);
-                    if (initialized || assigned)
-                    {
-                        if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *active_locals, slot);
-                        registers.clear(scratch_left);
-                        continue;
-                    }
-                    const auto& name = active_owner->names[binding.name_id];
-                    register_assignment_source = site.assignment_source;
-                    current_source = &active_owner->source(site.assignment_source);
-                    const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
-                    const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
-                    auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
-                    const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
-                    const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
-                    if (direct)
-                    {
-                        if (binding.with_type) machine.bind_type(*target_file, target_slot,
-                            active_owner->names[binding.type_id], current_location());
-                        if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, scratch_left, registers.size() - 1, current_location());
-                        if (machine.should_stop()) { result = machine.error_result(); return true; }
-                        registers.clear(scratch_left);
-                        if (binding.with_type)
-                        {
-                            if (!existing) scopes.back().bind(name, active_locals, slot);
-                            active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
-                        }
-                        if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
-                        register_assignment_source = {};
-                        continue;
-                    }
-                    const auto target = alias_target(binding.name_id);
-                    if (binding.with_type) machine.bind_type(*target.file, target.slot,
-                        active_owner->names[binding.type_id], current_location());
-                    if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
-                        scratch_left, registers.size() - 1, current_location());
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    bind_local_storage(name, slot, false);
-                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
-                    register_assignment_source = {};
-                    continue;
-                }
-                else
-                {
-                }
-                registers.clear(scratch_left);
-            }
-            const size_t left_slot = registers.size() - 2;
-            const size_t right_slot = registers.size() - 1;
-            const auto read_register = [&](size_t destination, bool constant, bool temporary_value,
-                size_t slot, size_t name_id, SourceRef reference)
-            {
-                if (constant) { registers.write_payload(destination, active_owner->constants[slot].value); return; }
-                if (temporary_value)
-                {
-                    registers.copy(destination, registers, active_instructions->register_capacity + slot);
-                    return;
-                }
-                const auto& name = active_owner->names[name_id];
-                if (active_aliases[slot])
-                    read_alias(destination, name_id, active_owner->source(reference));
-                else registers.copy(destination, *active_locals, slot);
-                if (registers.empty(destination))
-                    machine.set_error("variable '" + name + "' has not been initialized", &active_owner->source(reference));
-            };
-            read_register(left_slot, site.left_constant, site.left_temporary,
-                site.code.left, site.left_name, site.left_source);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            read_register(right_slot, site.right_constant, site.right_temporary,
-                site.code.right, site.right_name, site.right_source);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            registers.binary_fallback(static_cast<Opcode>(site.code.opcode), left_slot, left_slot, right_slot, machine, current_location(), true);
-            if (machine.should_stop()) { result = machine.error_result(); return true; }
-            if (site.code.destination != 0)
-            {
-                const size_t slot = site.code.destination - 1;
-                const auto& binding = active_owner->variable_sites[site.variable_site - 1];
-                const auto& name = active_owner->names[binding.name_id];
-                register_assignment_source = site.assignment_source;
-                current_source = &active_owner->source(site.assignment_source);
-                const auto* existing = binding.with_type && !scopes.empty() ? scopes.back().find(name) : nullptr;
-                const auto* alias = !binding.with_type && active_aliases[slot] ? machine.find_slot(name) : nullptr;
-                auto* target_file = binding.with_type && existing ? existing->file : alias ? alias->file : active_locals;
-                const size_t target_slot = binding.with_type && existing ? existing->slot : alias ? alias->slot : slot;
-                const bool direct = binding.with_type ? !scopes.empty() : !active_aliases[slot] || alias;
-                if (direct)
-                {
-                    if (binding.with_type) machine.bind_type(*target_file, target_slot,
-                        active_owner->names[binding.type_id], current_location());
-                    if (!machine.should_stop()) machine.assign(*target_file, target_slot, registers, left_slot, right_slot, current_location());
-                    if (machine.should_stop()) { result = machine.error_result(); return true; }
-                    registers.clear(left_slot);
-                    if (binding.with_type)
-                    {
-                        if (!existing) scopes.back().bind(name, active_locals, slot);
-                        active_aliases[slot] = existing && (existing->file != active_locals || existing->slot != slot);
-                    }
-                    if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target_file, target_slot);
-                    register_assignment_source = {};
-                    continue;
-                }
-                const auto target = alias_target(binding.name_id);
-                if (binding.with_type) machine.bind_type(*target.file, target.slot,
-                    active_owner->names[binding.type_id], active_owner->source(site.assignment_source));
-                if (!machine.should_stop()) machine.assign(*target.file, target.slot, registers,
-                    left_slot, right_slot, active_owner->source(site.assignment_source));
-                if (machine.should_stop()) { result = machine.error_result(); return true; }
-                bind_local_storage(name, slot, false);
-                if ((site.code.flags & 1) == 0 && !instruction.discard_result) registers.copy(output, *target.file, target.slot);
-            }
-            else registers.move(binary_destination, registers, left_slot);
+            if (!interp.op_register_binary(instruction)) return true;
             continue;
-        }
         case Opcode::LoadLocal:
         {
             if (instruction.operand >= active_locals->size())
@@ -5793,11 +5883,11 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 result = machine.error_result();
                 return true;
             }
-            const auto& location = current_location();
+            const auto& location = interp.current_location();
             const auto& name = active_owner->names[instruction.auxiliary];
             if (active_aliases[instruction.operand])
             {
-                read_alias(output, instruction.auxiliary, location);
+                interp.read_alias(output, instruction.auxiliary, location);
                 if (registers.empty(output)) machine.set_error("variable '" + name + "' has not been initialized", &location);
             }
             else
@@ -5812,7 +5902,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::Load:
         case Opcode::Peek:
         {
-            const auto& source = current_location();
+            const auto& source = interp.current_location();
             if (instruction.auxiliary == 1)
             {
                 const auto& name = active_owner->names[instruction.operand];
@@ -5834,7 +5924,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     if (machine.should_stop()) { result = machine.error_result(); return true; }
                     continue;
                 }
-                size_t linked = linked_global(instruction.operand);
+                size_t linked = interp.linked_global(instruction.operand);
                 const bool existed = linked != missing_global && machine.global_exists_at(linked);
                 if (!existed)
                 {
@@ -5862,7 +5952,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             {
                 const auto& name = active_owner->names[instruction.operand];
                 const auto value = machine.named_value(name);
-                const auto& location = active_owner->source(current_diagnostic().target_source);
+                const auto& location = active_owner->source(interp.current_diagnostic().target_source);
                 if (value.existed && value.empty())
                     machine.set_error("variable '" + name + "' has not been initialized", &location);
                 if (const auto size = value.size()) registers.write_payload(output, double(*size));
@@ -5870,7 +5960,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 continue;
             }
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             std::optional<size_t> length;
             if (const auto* text = input.resource<std::pmr::string>()) length = text->size();
@@ -5880,9 +5970,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (length) registers.write_payload(output, double(*length));
             else
             {
-                const auto target_source = current_diagnostic().target_source;
+                const auto target_source = interp.current_diagnostic().target_source;
                 const auto& location = target_source.id == 0
-                    ? current_location() : active_owner->source(target_source);
+                    ? interp.current_location() : active_owner->source(target_source);
                 machine.set_error("function 'size' requires a string, array, or map", &location);
                 result = machine.error_result();
                 return true;
@@ -5893,7 +5983,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         {
             const auto& call = active_owner->calls[instruction.operand];
             const auto& name = active_owner->names[call.name_id];
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             if (input.index() >= 1 && input.index() <= 3)
             {
@@ -5969,22 +6059,22 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 if (active_aliases[left_slot])
                 {
                     left_slot = registers.size() - 2;
-                    read_alias(left_slot, call.math_local_names[0], call.arguments[0]);
+                    interp.read_alias(left_slot, call.math_local_names[0], call.arguments[0]);
                     left_file = &registers;
                     scratch_left = true;
                 }
                 if (active_aliases[right_slot])
                 {
                     right_slot = registers.size() - 1;
-                    read_alias(right_slot, call.math_local_names[1], call.arguments[1]);
+                    interp.read_alias(right_slot, call.math_local_names[1], call.arguments[1]);
                     right_file = &registers;
                     scratch_right = true;
                 }
             }
             else
             {
-                right_slot = input_slot(instruction.input_count - 1);
-                left_slot = input_slot(instruction.input_count - 2);
+                right_slot = interp.input_slot(instruction, instruction.input_count - 1);
+                left_slot = interp.input_slot(instruction, instruction.input_count - 2);
             }
             if (call.math_local_operands && left_file->empty(left_slot))
             {
@@ -6036,7 +6126,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Positive:
         {
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             if (input.index() >= 1 && input.index() <= 3)
             {
@@ -6054,7 +6144,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Negative:
         {
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             if (input.index() >= 1 && input.index() <= 3)
             {
@@ -6072,13 +6162,13 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             const size_t zero = registers.size() - 1;
             registers.write_payload(zero, std::int64_t(0));
-            registers.binary_fallback(Opcode::Subtract, output, zero, argument, machine, current_location(), false);
+            registers.binary_fallback(Opcode::Subtract, output, zero, argument, machine, interp.current_location(), false);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
         case Opcode::LogicalNot:
         {
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             if (input.index() >= 1 && input.index() <= 3)
             {
@@ -6097,7 +6187,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::BitNot:
         {
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
             if (value_holds<std::int64_t>(input) || value_holds<bool>(input))
             {
@@ -6116,23 +6206,23 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Cast:
         {
-            const size_t argument = input_slot(instruction.input_count - 1);
+            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             machine.convert_type(registers, output, registers, argument, active_owner->names[instruction.operand],
-                current_location());
+                interp.current_location());
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (output != argument) registers.clear(argument);
             continue;
         }
         default:
         {
-            if (registers.binary(instruction.opcode, output, input_slot(instruction.input_count - 2), input_slot(instruction.input_count - 1),
-                machine, current_location()))
+            if (registers.binary(instruction.opcode, output, interp.input_slot(instruction, instruction.input_count - 2), interp.input_slot(instruction, instruction.input_count - 1),
+                machine, interp.current_location()))
             {
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 continue;
             }
-            registers.binary_fallback(instruction.opcode, output, input_slot(instruction.input_count - 2),
-                input_slot(instruction.input_count - 1), machine, current_location(), active_owner->host_function_version != 0);
+            registers.binary_fallback(instruction.opcode, output, interp.input_slot(instruction, instruction.input_count - 2),
+                interp.input_slot(instruction, instruction.input_count - 1), machine, interp.current_location(), active_owner->host_function_version != 0);
             break;
         }
         }
