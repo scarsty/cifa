@@ -150,11 +150,6 @@ struct Object
     int toInt() const
     {
         const auto number = toInt64();
-        if (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max())
-        {
-            report_conversion_error("C++ int");
-            return 0;
-        }
         return static_cast<int>(number);
     }
 
@@ -162,17 +157,7 @@ struct Object
     {
         if (const auto* integer = std::get_if<std::int64_t>(&value)) { return *integer; }
         if (const auto* boolean = std::get_if<bool>(&value)) { return *boolean ? 1 : 0; }
-        if (const auto* floating = std::get_if<double>(&value))
-        {
-            const double number = *floating;
-            if (!std::isfinite(number) || number >= 9223372036854775808.0
-                || number < -9223372036854775808.0)
-            {
-                report_conversion_error("int");
-                return 0;
-            }
-            return static_cast<std::int64_t>(number);
-        }
+        if (const auto* floating = std::get_if<double>(&value)) { return static_cast<std::int64_t>(*floating); }
         report_conversion_error("int");
         return 0;
     }
