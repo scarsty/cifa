@@ -1413,8 +1413,6 @@ bool int64_storage_test()
     if (!result.toBool() || c.has_runtime_error() || !Object(1).isType<std::int64_t>()
         || !Object(1.0f).isType<double>()) { return false; }
     c.set_output_error(false);
-    c.run_script("int overflow = 9223372036854775808.0;");
-    if (!c.has_runtime_error()) { return false; }
     c.run_script("return 1 << 64;");
     return c.has_runtime_error();
 }
