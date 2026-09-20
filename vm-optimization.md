@@ -1652,3 +1652,9 @@ MSVC 下 pi 对 Lua（同机 9.34ms）为 3.2 倍。
 22 个 handler 的强制 noinline 改为默认交给编译器决定（宏可覆盖）。MSVC 七轮
 交替对照：放开后 increment -6%、incrementf -4%、calls -2%，pi/strings 持平。
 2026-09-15 的"拆分后保持 noinline"结论基于当时的分派器结构，已由本轮取代。
+
+### noinline 策略（2026-09-20）
+
+22 个 handler 的强制 noinline 改为默认交给编译器决定（宏可覆盖）。MSVC 七轮
+交替对照：放开后 increment -6%、incrementf -4%、calls -2%，pi/strings 持平。
+2026-09-15 的"拆分后保持 noinline"结论基于当时的分派器结构，已由本轮取代。

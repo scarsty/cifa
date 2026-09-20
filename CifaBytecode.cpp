@@ -10,11 +10,10 @@
 #include <emscripten.h>
 #endif
 
-#if defined(_MSC_VER) && !defined(__clang__)
-#define CIFA_NOINLINE __declspec(noinline)
-#elif defined(__clang__) || defined(__GNUC__)
-#define CIFA_NOINLINE __attribute__((noinline))
-#else
+// 内联策略：默认交给编译器决定（MSVC 七轮交替 A/B：放开后五项负载全部持平
+// 或更好）。需要恢复强制不内联时用 -DCIFA_NOINLINE=__declspec(noinline)
+// （GCC/Clang 用 __attribute__((noinline))）覆盖。
+#if !defined(CIFA_NOINLINE)
 #define CIFA_NOINLINE
 #endif
 
