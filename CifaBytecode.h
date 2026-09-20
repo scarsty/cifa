@@ -456,6 +456,7 @@ class CifaBytecode : public Cifa
         bool cast_numeric(size_t destination, const RegisterSlots& source, size_t slot, const std::string& type);
         bool cast_numeric(size_t destination, const RegisterSlots& source, size_t slot, NumericBinding binding);
         void bind_numeric(size_t slot, NumericBinding binding);
+        NumericBinding numeric_binding(size_t slot) const { return bindings[window_base + slot]; }
         bool has_name(size_t slot) const { return slot_names[window_base + slot] != 0; }
         bool integer(size_t slot, std::int64_t& result) const;
         bool number(size_t slot, std::int64_t& integer, double& floating, bool& is_double) const;
@@ -809,8 +810,13 @@ class CifaBytecode : public Cifa
     size_t compile_traces = 0;
     FunctionCode* compiling_function = nullptr;
     std::pmr::vector<std::pmr::unordered_map<std::string, size_t>> compile_local_scopes{allocation_resource.get()};
-    std::pmr::unordered_map<const CalUnit*, bool> compile_scope_effects{allocation_resource.get()};
+    // 块级"frame 效应"：true 表示该块必须保留运行时作用域帧；false 表示声明可
+    // 抬升进父帧槽位，块的 ScopeEnter/ScopeLeave 与 LoopMark 可省略。
+    std::pmr::unordered_map<const CalUnit*, bool> compile_frame_effects{allocation_resource.get()};
     std::pmr::vector<size_t> compile_local_scope_bases{allocation_resource.get()};
+    // 抬升块弹出的编译期槽位回收池：同名兄弟块复用同一槽位，避免运行时
+    // 名字绑定（ConstantLocal 等）指向不同槽而报错。
+    std::pmr::vector<std::pair<std::pmr::string, size_t>> lifted_slot_pool{allocation_resource.get()};
     std::pmr::unordered_set<std::string> compile_array_locals{allocation_resource.get()};
     const std::unordered_map<std::string, FunctionOverloads>* compile_script_functions = nullptr;
     bool compile_allows_script_constant_folding = false;
@@ -829,7 +835,7 @@ class CifaBytecode : public Cifa
     SourceLocation& source(const SourceRef& reference) const;
     std::optional<size_t> local_slot(const CalUnit& node, bool declare, bool allow_untyped_declaration = false);
     size_t next_local_slot() const;
-    bool block_needs_runtime_scope(const CalUnit& node);
+    bool block_needs_runtime_frame(const CalUnit& node);
     void analyze_binding_scopes(const CalUnit& node, bool custom_conversions);
     static bool operation(const CalUnit& node, Opcode& opcode);
     bool try_fold_constant(const CalUnit& node, Object& value,
@@ -963,6 +969,11 @@ public:
     bool is_profiling_enabled() const;
     void reset_profile();
     std::string get_profile_json() const;
+    //诊断用：调整单次运行最多记录的指令数（默认 2,000,000），以及读取计数结果。
+    void set_profile_instruction_limit(size_t limit) { profile_state.instruction_limit = limit; }
+    const ProfileState& profile_metrics() const { return profile_state; }
+    //诊断用：输出密封后的指令流与数值操作表，便于核对优化结果。
+    std::string dump_instruction_listing() const;
     Object run(const std::string& entry_label = {});
     Object run_script(std::string script);
     Object run_file(const std::string& filename);

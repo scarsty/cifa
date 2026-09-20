@@ -3080,15 +3080,16 @@ bool bytecode_scope_elision_test()
         }
     }
     // A barrier on the backedge must also affect the first block in the next
-    // iteration. Compare equivalent syntax to check the scope decision itself.
+    // iteration: with the barrier the block keeps its runtime scope, without it
+    // the same block is provably liftable and must compile smaller.
     const std::pair<const char*, const char*> retained_scope_cases[] = {
-        { "a=1; barrier(); { a=9; } return a;", "a=1; barrier(); a=9; return a;" },
+        { "a=1; barrier(); { a=9; } return a;", "a=1; { a=9; } return a;" },
         { "a=1; int n=0; while(n<2) { { a=9; } barrier(); n++; } return a;",
-          "a=1; int n=0; while(n<2) { a=9; barrier(); n++; } return a;" },
+          "a=1; int n=0; while(n<2) { { a=9; } n++; } return a;" },
         { "a=1; int n=0; do { { a=9; } barrier(); n++; } while(n<2); return a;",
-          "a=1; int n=0; do { a=9; barrier(); n++; } while(n<2); return a;" },
+          "a=1; int n=0; do { { a=9; } n++; } while(n<2); return a;" },
         { "a=1; for(int n=0;n<2;n++) { { a=9; } barrier(); } return a;",
-          "a=1; for(int n=0;n<2;n++) { a=9; barrier(); } return a;" },
+          "a=1; for(int n=0;n<2;n++) { { a=9; } } return a;" },
     };
     for (const auto& [with_block, without_block] : retained_scope_cases)
     {

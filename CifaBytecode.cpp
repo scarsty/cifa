@@ -1143,6 +1143,17 @@ std::optional<size_t> CifaBytecode::local_slot(const CalUnit& node, bool declare
         if (const auto found = compile_local_scopes.back().find(node.str); found != compile_local_scopes.back().end())
             return found->second;
         if ((!node.with_type || node.type_name.empty()) && !allow_untyped_declaration) return {};
+        // 遮蔽外层可见名字时必须分配新槽位；否则优先复用回收池中的抬升槽位，
+        // 使同名兄弟块的运行时名字绑定保持一致。
+        const bool shadows = std::any_of(compile_local_scopes.begin(), compile_local_scopes.end(),
+            [&](const auto& frame) { return frame.contains(node.str); });
+        if (!shadows)
+            for (const auto& entry : lifted_slot_pool)
+                if (std::string_view(entry.first.data(), entry.first.size()) == node.str)
+                {
+                    compile_local_scopes.back().emplace(node.str, entry.second);
+                    return entry.second;
+                }
         const size_t slot = next_local_slot();
         if (slot >= compiling_function->local_slot_count) compiling_function->local_slot_count = slot + 1;
         compile_local_scopes.back().emplace(node.str, slot);
@@ -1153,10 +1164,10 @@ std::optional<size_t> CifaBytecode::local_slot(const CalUnit& node, bool declare
     return {};
 }
 
-bool CifaBytecode::block_needs_runtime_scope(const CalUnit& node)
+bool CifaBytecode::block_needs_runtime_frame(const CalUnit& node)
 {
-    const auto found = compile_scope_effects.find(&node);
-    return found == compile_scope_effects.end() || found->second;
+    const auto found = compile_frame_effects.find(&node);
+    return found == compile_frame_effects.end() || found->second;
 }
 
 void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conversions)
@@ -1168,11 +1179,19 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
     auto* resource = allocation_resource.get();
     State scopes(resource);
     scopes.emplace_back();
+    // 静态局部名字栈：记录所有带类型声明的名字，invalidate 不清除——
+    // 它们永远解析到编译期槽位，赋值不会建立动态绑定。与 scopes 同步
+    // 压栈/弹栈，供 frame 判定与遮蔽检测使用。
+    std::pmr::vector<std::pmr::unordered_set<std::string>> static_locals(resource);
+    static_locals.emplace_back();
     const auto numeric_type = [](const std::string& type)
         { return type == "int" || type == "double" || type == "float"; };
     if (compiling_function)
         for (const auto& parameter : compiling_function->parameters)
+        {
             scopes.back()[parameter.name] = numeric_type(parameter.type_name);
+            static_locals.back().insert(parameter.name);
+        }
     const auto copy = [&]() { return State(scopes, resource); };
     const auto invalidate = [&]() { for (auto& frame : scopes) frame.clear(); };
     const auto lookup = [&](const std::string& name) -> bool*
@@ -1180,6 +1199,20 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
         for (auto frame = scopes.rbegin(); frame != scopes.rend(); ++frame)
             if (auto found = frame->find(name); found != frame->end()) return &found->second;
         return nullptr;
+    };
+    const auto is_static_local = [&](const std::string& name)
+    {
+        for (const auto& frame : static_locals)
+            if (frame.contains(name)) return true;
+        return false;
+    };
+    // 声明遮蔽外层绑定时必须保留运行时帧：抬升会使同名声明落入父帧，
+    // 运行时名字绑定与编译期槽位不一致（ConstantLocal 视为错误）。
+    const auto shadows_outer = [&](const std::string& name)
+    {
+        for (size_t index = 0; index + 1 < static_locals.size(); ++index)
+            if (static_locals[index].contains(name)) return true;
+        return false;
     };
     const auto intersect = [](State& left, const State& right)
     {
@@ -1189,7 +1222,9 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
             for (auto& [name, numeric] : left[i]) numeric = numeric && right[i].at(name);
         }
     };
-    struct Effect { bool scope = false; bool numeric = false; };
+    // frame 表示该节点要求其所在块保留运行时作用域帧（遮蔽、未初始化声明、
+    // 标签、动态绑定建立等）；scope 仅用于数值事实的保守传播。
+    struct Effect { bool scope = false; bool numeric = false; bool frame = false; };
     const auto analyze = [&](auto&& self, const CalUnit& node) -> Effect
     {
         if (node.type == CalUnitType::Constant) return {false, true};
@@ -1197,7 +1232,7 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
         if (node.type == CalUnitType::Label || node.type == CalUnitType::Goto)
         {
             invalidate();
-            return {true, false};
+            return {true, false, true};
         }
         if (node.type == CalUnitType::Parameter && node.v.empty())
         {
@@ -1205,10 +1240,12 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
             {
                 const bool numeric = numeric_type(node.type_name);
                 scopes.back()[node.str] = numeric;
-                return {true, numeric};
+                static_locals.back().insert(node.str);
+                // 未初始化声明依赖 DeclareLocal 的别名/清空机制，保留运行时帧。
+                return {true, numeric, true};
             }
             const auto* binding = lookup(node.str);
-            return {!binding, binding && *binding};
+            return {!binding, binding && *binding, false};
         }
         const bool statement_block = node.type == CalUnitType::Union && node.str == "{}"
             && std::any_of(node.v.begin(), node.v.end(), [](const CalUnit& child)
@@ -1216,22 +1253,29 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
         if (node.type == CalUnitType::Union && (statement_block || node.str == "()"))
         {
             const bool block = statement_block;
-            if (block) scopes.emplace_back();
+            if (block)
+            {
+                scopes.emplace_back();
+                static_locals.emplace_back();
+            }
             Effect result;
             for (const auto& child : node.v)
             {
                 const auto effect = self(self, child);
                 result.scope |= effect.scope;
+                result.frame |= effect.frame;
                 result.numeric = effect.numeric;
             }
             if (block)
             {
                 scopes.pop_back();
+                static_locals.pop_back();
                 // A later loop iteration may require a more conservative decision.
-                compile_scope_effects[&node] |= result.scope;
+                compile_frame_effects[&node] |= result.frame;
                 // Effects owned by a nested block are contained by that block's
                 // own scope; they do not force its parent to allocate another.
                 result.scope = false;
+                result.frame = false;
                 result.numeric = false;
             }
             return result;
@@ -1249,7 +1293,8 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
             const auto no = ternary ? self(self, node.v[1].v[1])
                 : node.v.size() > 2 ? self(self, node.v[2]) : Effect{};
             intersect(scopes, yes_state);
-            return {condition.scope || yes.scope || no.scope, yes.numeric && no.numeric};
+            return {condition.scope || yes.scope || no.scope, yes.numeric && no.numeric,
+                condition.frame || yes.frame || no.frame};
         }
         const bool ordinary_for = node.type == CalUnitType::Key && node.str == "for"
             && node.v.size() == 2 && node.v[0].v.size() == 3;
@@ -1268,14 +1313,23 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
                 {
                     const auto condition = self(self, ordinary_for ? node.v[0].v[1] : node.v[0]);
                     result.scope |= condition.scope || !condition.numeric;
+                    result.frame |= condition.frame;
                     if (!condition.numeric) invalidate();
                 }
-                result.scope |= self(self, node.v[node.str == "do" ? 0 : 1]).scope;
-                if (ordinary_for) result.scope |= self(self, node.v[0].v[2]).scope;
+                const auto body = self(self, node.v[node.str == "do" ? 0 : 1]);
+                result.scope |= body.scope;
+                result.frame |= body.frame;
+                if (ordinary_for)
+                {
+                    const auto update = self(self, node.v[0].v[2]);
+                    result.scope |= update.scope;
+                    result.frame |= update.frame;
+                }
                 if (node.str == "do")
                 {
                     const auto condition = self(self, node.v[1].v[0]);
                     result.scope |= condition.scope || !condition.numeric;
+                    result.frame |= condition.frame;
                     if (!condition.numeric) invalidate();
                 }
                 intersect(scopes, entry);
@@ -1286,11 +1340,16 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
             return result;
         }
         if (node.type == CalUnitType::Key && (node.str == "true" || node.str == "false"))
-            return {false, true};
+            return {false, true, false};
         if (node.type == CalUnitType::Key && (node.str == "return" || node.str == "break" || node.str == "continue"))
         {
             Effect result;
-            for (const auto& child : node.v) result.scope |= self(self, child).scope;
+            for (const auto& child : node.v)
+            {
+                const auto value = self(self, child);
+                result.scope |= value.scope;
+                result.frame |= value.frame;
+            }
             invalidate(); // Exited paths contribute no fallthrough facts.
             return result;
         }
@@ -1313,7 +1372,35 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
                 || (target.type_name == "auto" && value.numeric) : binding && *binding;
             if (binding) *binding = numeric;
             else scopes.back()[target.str] = numeric;
-            return {target.with_type || !existing || value.scope || conversion, value.numeric && numeric};
+            if (target.with_type) static_locals.back().insert(target.str);
+            // 带初始化的声明在无遮蔽时可抬升；会建立动态绑定的未解析名字
+            // （静态局部除外——它们始终解析到编译期槽位）保守保留帧。
+            const bool frame = value.frame || conversion
+                || (target.with_type ? shadows_outer(target.str)
+                    : !existing && !is_static_local(target.str));
+            return {target.with_type || !existing || value.scope || conversion, value.numeric && numeric, frame};
+        }
+        if (node.type == CalUnitType::Operator && node.v.size() == 2 && node.str != "="
+            && write_operation(node.str) != WriteOperation::Invalid
+            && node.v[0].type == CalUnitType::Parameter && node.v[0].v.empty())
+        {
+            // 复合赋值等价于 X = X op Y：仅当目标与右值都是已知数值绑定时
+            // 才是纯数值效应，否则退回保守处理。
+            const auto& target = node.v[0];
+            const bool existing = lookup(target.str) != nullptr;
+            const bool known_numeric = existing && *lookup(target.str);
+            const auto value = self(self, node.v[1]);
+            const bool numeric = (target.with_type ? numeric_type(target.type_name) : known_numeric) && value.numeric;
+            if (!target.with_type)
+            {
+                if (bool* binding = lookup(target.str)) *binding = numeric;
+                else scopes.back()[target.str] = numeric;
+            }
+            if (!numeric) invalidate();
+            const bool frame = value.frame
+                || (!existing && !is_static_local(target.str))
+                || (target.with_type && shadows_outer(target.str));
+            return {!existing || value.scope || !numeric, numeric, frame};
         }
         if (node.type == CalUnitType::Operator)
         {
@@ -1321,13 +1408,14 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
             const bool increment = node.str == "++" || node.str == "--" || node.str == "()++" || node.str == "()--";
             if (operation(node, opcode) || increment || node.str == ",")
             {
-                Effect result{false, true};
+                Effect result{false, true, false};
                 const bool conditional = node.str == "&&" || node.str == "||";
                 State skipped(resource);
                 for (size_t i = 0; i < node.v.size(); ++i)
                 {
                     const auto child = self(self, node.v[i]);
                     result.scope |= child.scope;
+                    result.frame |= child.frame;
                     result.numeric &= child.numeric;
                     if (!child.numeric && node.str != ",") { invalidate(); result.scope = true; }
                     if (conditional && i == 0) skipped = copy();
@@ -1338,10 +1426,16 @@ void CifaBytecode::analyze_binding_scopes(const CalUnit& root, bool custom_conve
         }
         // Calls, casts, containers, switch and range constructs can invoke host
         // code or establish special bindings. Do not let child states leak into
-        // sibling alternatives or subsequent statements.
+        // sibling alternatives or subsequent statements. 它们本身不会改写调用方
+        // 的名字绑定，因此不再要求所在块保留运行时帧；子块的帧需求由子块自理。
         invalidate();
-        for (const auto& child : node.v) { self(self, child); invalidate(); }
-        return {true, false};
+        bool frames = false;
+        for (const auto& child : node.v)
+        {
+            frames |= self(self, child).frame;
+            invalidate();
+        }
+        return {true, false, frames};
     };
     if (compiling_function) analyze(analyze, root);
     else for (const auto& child : root.v) analyze(analyze, child);
@@ -1665,6 +1759,10 @@ size_t CifaBytecode::next_local_slot() const
     for (const auto& scope : compile_local_scopes)
         for (const auto& entry : scope)
             if (entry.second >= next) next = entry.second + 1;
+    // 抬升块弹出的回收槽位仍属于函数窗口（可能被同名声明复用或继续被
+    // 抬升声明占用），窗口尺寸计算必须包含它们。
+    for (const auto& entry : lifted_slot_pool)
+        if (entry.second >= next) next = entry.second + 1;
     return next;
 }
 
@@ -2385,6 +2483,43 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             {
                 if (const auto slot = local_slot(node.v[0], true))
                 {
+                    const auto compound_op = node.str == "=" ? std::nullopt : write_opcode(write_operation(node.str));
+                    if (compound_op)
+                    {
+                        const auto operand = [&](CalUnit& value) -> std::optional<size_t>
+                        {
+                            if (value.type != CalUnitType::Constant) return local_slot(value, false);
+                            Object number;
+                            if (!Cifa::parse_number_literal(value.str, number)) return {};
+                            constants.emplace_back(std::move(number), allocation_resource);
+                            return constants.size() - 1;
+                        };
+                        if (const auto right = operand(node.v[1]))
+                        {
+                            if (*slot < std::numeric_limits<std::uint32_t>::max() && *right < std::numeric_limits<std::uint32_t>::max())
+                            {
+                                instructions.push_back({Opcode::Enter, source_ref(&node)});
+                                const size_t site_index = module_data->register_binary_sites.size();
+                                RegisterBinarySite site{};
+                                site.code = {static_cast<std::uint16_t>(*compound_op), 0, 0,
+                                    static_cast<std::uint32_t>(*slot), static_cast<std::uint32_t>(*right)};
+                                site.left_name = intern_name(node.v[0].str);
+                                site.right_name = intern_name(node.v[1].str);
+                                site.left_source = source_ref(&node.v[0]);
+                                site.right_source = source_ref(&node.v[1]);
+                                site.left_constant = false;
+                                site.right_constant = node.v[1].type == CalUnitType::Constant;
+                                site.code.destination = static_cast<std::uint32_t>(*slot + 1);
+                                variable_sites.push_back({intern_name(node.v[0].str), intern_name(node.v[0].type_name), node.v[0].with_type});
+                                site.variable_site = variable_sites.size();
+                                site.assignment_source = source_ref(&node);
+                                module_data->register_binary_sites.push_back(site);
+                                instructions.push_back({Opcode::NumericBinary, source_ref(&node), site_index});
+                                instructions.push_back({Opcode::Leave, source_ref(&node)});
+                                return;
+                            }
+                        }
+                    }
                     instructions.push_back({Opcode::Enter, source_ref(&node)});
                     emit(node.v[1], instructions);
                     if (node.str == "=" && instructions.size() >= 2
@@ -2497,12 +2632,14 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
     if (node.type == CalUnitType::Union && !node.v.empty()
         && std::any_of(node.v.begin(), node.v.end(), [](CalUnit& child) { return child.is_statement() || child.type == CalUnitType::Label; }))
     {
-        // Keep the function/root binding frame. For nested blocks, elide only
-        // scopes proven to have no binding effects. Block/label bookkeeping
-        // remains below, so goto visibility and unwind targets are unchanged.
+        // Keep the function/root binding frame. For nested blocks, elide the
+        // runtime scope when the analyzer proved no frame effect: declarations
+        // then lift into parent-frame slots and execute like register writes.
+        // The compile-time slot frame is always pushed so visibility and
+        // shadowing slots behave exactly as before.
         const bool scope = node.str == "{}" && (!optimization_enabled
             || (compiling_function != nullptr && compile_local_scopes.size() <= 1)
-            || block_needs_runtime_scope(node));
+            || block_needs_runtime_frame(node));
         size_t scope_enter = 0;
         if (scope)
         {
@@ -2516,7 +2653,13 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
                 compile_local_scopes.emplace_back();
             }
         }
-        const bool has_child = std::any_of(node.v.begin(), node.v.end(), [](const CalUnit& child)
+        else if (compiling_function != nullptr)
+        {
+            // 抬升：无运行时帧，但保留编译期槽位与可见性边界。
+            compile_local_scope_bases.push_back(next_local_slot());
+            compile_local_scopes.emplace_back();
+        }
+        const bool has_child = std::any_of(node.v.begin(), node.v.end(), [](CalUnit& child)
             { return child.type != CalUnitType::Label; });
         if (!has_child) instructions.push_back({Opcode::Empty, source_ref(&node)});
         const size_t block_mark = instructions.size();
@@ -2553,6 +2696,15 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
                 compile_local_scope_bases.pop_back();
                 compile_local_scopes.pop_back();
             }
+        }
+        else if (compiling_function != nullptr)
+        {
+            // 抬升块弹出的声明槽位进入回收池：同名兄弟块/后续声明复用同一
+            // 槽位，保持运行时名字绑定与编译期槽位一致。
+            for (const auto& entry : compile_local_scopes.back())
+                lifted_slot_pool.emplace_back(entry.first, entry.second);
+            compile_local_scope_bases.pop_back();
+            compile_local_scopes.pop_back();
         }
         return;
     }
@@ -3521,6 +3673,51 @@ void CifaBytecode::reset_profile()
     profile_state.enabled = enabled;
 }
 
+std::string CifaBytecode::dump_instruction_listing() const
+{
+    const auto append_instructions = [](std::string& text, const Instructions& instr, const std::string& tag)
+    {
+        static constexpr const char* opcode_names[] = {
+            "Constant", "ConstantLocal", "Load", "LoadLocal", "DeclareLocal", "StoreLocal", "IncrementLocal",
+            "Enter", "Leave", "Add", "Subtract", "Multiply", "Divide", "Modulo", "Less", "Greater",
+            "LessEqual", "GreaterEqual", "Equal", "NotEqual", "BitAnd", "BitOr", "BitXor", "ShiftLeft", "ShiftRight",
+            "Positive", "Negative", "LogicalNot", "BitNot", "Cast", "Size", "MathUnary", "MathBinary", "Empty", "Jump", "Branch",
+            "AndBranch", "OrBranch", "LogicalAnd", "LogicalOr", "Return", "ScopeEnter", "ScopeLeave",
+            "PrepareStore", "Store", "Increment", "Unwind", "LoopMark", "SwitchMark", "SwitchCase", "SwitchDefault", "SwitchEnd",
+            "CallBegin", "Call", "CallEnd", "Peek", "Array", "Index", "IndexLocal", "RangeBegin", "RangeNext", "RangeEnd",
+            "MethodNoArgs", "BindArgument", "MethodBegin", "MethodValue", "MethodPush", "ArrayPushGlobal",
+            "ArrayPushGlobalLocal", "Member", "NumericBinary", "NumericBinaryLocal",
+            "NumericCompareBranch", "NumericForNext", "RegisterBinary", "RegisterSnapshot", "Exit", "Removed",
+        };
+        std::format_to(std::back_inserter(text), "--- {} ({} instructions, registers={} temporaries={}) ---\n",
+            tag, instr.code.size(), instr.register_capacity, instr.temporary_count);
+        for (size_t index = 0; index < instr.code.size(); ++index)
+        {
+            const auto& instruction = instr.code[index];
+            const auto opcode = static_cast<size_t>(instruction.opcode);
+            std::format_to(std::back_inserter(text), "{:>4}: {:<20} op={:<4} aux={:<3} dst={:<3} in={}/{} site={} var={} write={} plain={} discard={}\n",
+                index, opcode < std::size(opcode_names) ? opcode_names[opcode] : "?",
+                instruction.operand, instruction.auxiliary, instruction.destination,
+                instruction.input_offset, instruction.input_count, instruction.member_site,
+                instruction.variable_site, static_cast<int>(instruction.write),
+                static_cast<int>(instruction.plain_increment), static_cast<int>(instruction.discard_result));
+        }
+        for (size_t index = 0; index < instr.numeric_operations.size(); ++index)
+        {
+            const auto& operation = instr.numeric_operations[index];
+            const size_t site = index < instr.numeric_local_sites.size() ? instr.numeric_local_sites[index] : 0;
+            std::format_to(std::back_inserter(text), "numop[{}]: op={} flags={} dst={} left={} right={} site={}\n",
+                index, operation.opcode, operation.flags, operation.destination, operation.left, operation.right, site);
+        }
+    };
+    std::string text;
+    append_instructions(text, module_data->root_instructions, "root");
+    for (const auto& [name, versions] : module_data->function_code)
+        for (const auto& [arity, code] : versions)
+            append_instructions(text, code->instructions, std::format("{}/{}", name, arity));
+    return text;
+}
+
 void CifaBytecode::profile_enter_function(const std::string& id)
 {
     if (!profile_state.enabled || id.empty()) return;
@@ -3702,7 +3899,7 @@ bool CifaBytecode::register_native_function(const std::string& name, native_func
 
 void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, size_t host_native_function_version)
 {
-    compile_scope_effects.clear();
+    compile_frame_effects.clear();
     module_data->int_type_id = intern_name("int");
     module_data->double_type_id = intern_name("double");
     source_lines.reserve(compiler.compilation_source_line_infos.size());
@@ -3771,6 +3968,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                 auto saved_array_locals = std::move(compile_array_locals);
                 compiling_function = compiled.get();
                 compile_local_scopes.emplace_back();
+                // 抬升槽位回收池按函数隔离：槽位编号属于各自函数的局部窗口。
+                lifted_slot_pool.clear();
                 for (const auto& parameter : compiled->parameters)
                 {
                     const size_t slot = compiled->local_slot_count++;
@@ -3790,7 +3989,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             }
         }
         compile_script_functions = nullptr;
-        compile_scope_effects.clear();
+        compile_frame_effects.clear();
         compile_allows_script_constant_folding = false;
     }
     source_ids.clear();
@@ -4282,6 +4481,9 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             registers.enter(local_count);
             local_windows.emplace_back(registers, registers.base(), registers.size());
             auto* local_values = &local_windows.back();
+            // 调用窗口复用底层寄存器存储；进入时必须清空槽位，否则残留的
+            // 数值绑定会让声明存储绕过类型转换（如字符串存入 int 槽）。
+            for (size_t index = 0; index < local_values->size(); ++index) local_values->clear(index);
             for (size_t index = 0; index < call.arguments.size(); ++index)
             {
                 const auto& parameter = cached->parameters[index];
@@ -5165,54 +5367,82 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_register_snapshot(const Instruc
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_numeric_binary_local(const Instruction& instruction)
 {
     const size_t output = instruction.destination;
-        const auto& operation = active_instructions->numeric_operations[instruction.auxiliary];
-        const auto& site = active_owner->register_binary_sites[
-            active_instructions->numeric_local_sites[instruction.auxiliary]];
-        const size_t slot = site.code.destination - 1;
-        const auto& binding = active_owner->variable_sites[site.variable_site - 1];
-        const auto* existing = scopes.empty() ? nullptr : scopes.back().find(active_owner->names[binding.name_id]);
-        const bool double_target = binding.with_type && binding.type_id == active_owner->double_type_id;
-        const auto read_number = [&](std::uint32_t operand, std::uint16_t constant_flag,
-            std::uint16_t temporary_flag, std::int64_t& integer, double& floating, bool& is_double)
+    const auto& operation = active_instructions->numeric_operations[instruction.auxiliary];
+    const auto& site = active_owner->register_binary_sites[
+        active_instructions->numeric_local_sites[instruction.auxiliary]];
+    const size_t slot = site.code.destination - 1;
+    const auto& binding = active_owner->variable_sites[site.variable_site - 1];
+
+    const auto read_number = [&](std::uint32_t operand, std::uint16_t constant_flag,
+        std::uint16_t temporary_flag, std::int64_t& integer, double& floating, bool& is_double)
+    {
+        bool valid = false;
+        if ((operation.flags & constant_flag) != 0)
         {
-            bool valid = false;
-            if ((operation.flags & constant_flag) != 0)
-            {
-                const auto& value = active_owner->constants[operand].value;
-                if (const auto* number = value_get_if<std::int64_t>(&value)) { integer = *number; valid = true; }
-                else if (const auto* number = value_get_if<bool>(&value)) { integer = *number; valid = true; }
-                else if (const auto* number = value_get_if<double>(&value)) { floating = *number; is_double = true; valid = true; }
-            }
-            else if ((operation.flags & temporary_flag) != 0)
-                valid = registers.number(active_instructions->register_capacity + operand, integer, floating, is_double);
-            else if (!active_aliases[operand]) valid = active_locals->number(operand, integer, floating, is_double);
-            return valid;
-        };
+            const auto& value = active_owner->constants[operand].value;
+            if (const auto* number = value_get_if<std::int64_t>(&value)) { integer = *number; valid = true; }
+            else if (const auto* number = value_get_if<bool>(&value)) { integer = *number; valid = true; }
+            else if (const auto* number = value_get_if<double>(&value)) { floating = *number; is_double = true; valid = true; }
+        }
+        else if ((operation.flags & temporary_flag) != 0)
+            valid = registers.number(active_instructions->register_capacity + operand, integer, floating, is_double);
+        else if (!active_aliases[operand]) valid = active_locals->number(operand, integer, floating, is_double);
+        return valid;
+    };
+
+    const bool double_target = binding.with_type && binding.type_id == active_owner->double_type_id;
+    const auto expected_binding = double_target ? RegisterSlots::NumericBinding::Double : RegisterSlots::NumericBinding::Int;
+
+    // Fast path: local slot already has active binding matching variable's type and is unaliased
+    if (slot < active_locals->size() && !active_aliases[slot]
+        && binding.with_type && active_locals->numeric_binding(slot) == expected_binding)
+    {
         std::int64_t left = 0, right = 0;
         double left_number = 0, right_number = 0;
         bool left_double = false, right_double = false;
-        if (slot < active_locals->size() && !active_aliases[slot]
-            && (!existing || (existing->file == active_locals && existing->slot == slot))
-            && read_number(operation.left, 1, 2, left, left_number, left_double)
+        if (read_number(operation.left, 1, 2, left, left_number, left_double)
             && read_number(operation.right, 4, 8, right, right_number, right_double)
             && active_locals->binary_numbers(static_cast<Opcode>(operation.opcode), slot,
-                left, left_number, left_double, right, right_number, right_double, machine, current_location(), !binding.with_type))
+                left, left_number, left_double, right, right_number, right_double, machine, current_location(), false))
         {
             if (machine.should_stop()) { result = machine.error_result(); return false; }
-            if (binding.with_type)
-            {
-                if (double_target && !active_locals->cast_numeric(slot, *active_locals, slot,
-                    RegisterSlots::NumericBinding::Double)) return op_register_binary(instruction);
-                active_locals->bind_numeric(slot, double_target ? RegisterSlots::NumericBinding::Double : RegisterSlots::NumericBinding::Int);
-                if (!existing) scopes.back().bind(active_owner->names[binding.name_id], active_locals, slot);
-            }
-            active_aliases[slot] = false;
+            if (double_target && !active_locals->cast_numeric(slot, *active_locals, slot,
+                RegisterSlots::NumericBinding::Double)) return op_register_binary(instruction);
+            active_locals->bind_numeric(slot, expected_binding);
             if ((site.code.flags & 1) == 0 && !instruction.discard_result)
                 registers.copy(output, *active_locals, slot);
             return true;
         }
         if (machine.should_stop()) { result = machine.error_result(); return false; }
         return op_register_binary(instruction);
+    }
+
+    const auto* existing = scopes.empty() ? nullptr : scopes.back().find(active_owner->names[binding.name_id]);
+    std::int64_t left = 0, right = 0;
+    double left_number = 0, right_number = 0;
+    bool left_double = false, right_double = false;
+    if (slot < active_locals->size() && !active_aliases[slot]
+        && (!existing || (existing->file == active_locals && existing->slot == slot))
+        && read_number(operation.left, 1, 2, left, left_number, left_double)
+        && read_number(operation.right, 4, 8, right, right_number, right_double)
+        && active_locals->binary_numbers(static_cast<Opcode>(operation.opcode), slot,
+            left, left_number, left_double, right, right_number, right_double, machine, current_location(), !binding.with_type))
+    {
+        if (machine.should_stop()) { result = machine.error_result(); return false; }
+        if (binding.with_type)
+        {
+            if (double_target && !active_locals->cast_numeric(slot, *active_locals, slot,
+                RegisterSlots::NumericBinding::Double)) return op_register_binary(instruction);
+            active_locals->bind_numeric(slot, expected_binding);
+            if (!existing) scopes.back().bind(active_owner->names[binding.name_id], active_locals, slot);
+        }
+        active_aliases[slot] = false;
+        if ((site.code.flags & 1) == 0 && !instruction.discard_result)
+            registers.copy(output, *active_locals, slot);
+        return true;
+    }
+    if (machine.should_stop()) { result = machine.error_result(); return false; }
+    return op_register_binary(instruction);
 }
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_size(const Instruction& instruction)
@@ -5848,7 +6078,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             // copy, or diagnostic lookup is needed on this path.
             const auto slot = instruction.operand;
             if (instruction.plain_increment && slot < active_locals->size() && !active_aliases[slot])
-                if (auto* integer = active_locals->resource_payload(slot).get_if<std::int64_t>()) {
+            {
+                auto& payload = active_locals->resource_payload(slot);
+                if (auto* integer = payload.get_if<std::int64_t>()) {
                     const auto before = static_cast<std::uint64_t>(*integer);
                     const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
                     *integer = std::bit_cast<std::int64_t>(add ? before + 1 : before - 1);
@@ -5859,6 +6091,19 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     else pc = instruction.auxiliary;
                     continue;
                 }
+                // 浮点循环变量走同样的原位递增；整型上限提升为 double 后比较，
+                // 与条件指令的二元数值语义一致。
+                if (auto* floating = payload.get_if<double>()) {
+                    const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
+                    *floating += add ? 1.0 : -1.0;
+                    if (instruction.member_site != 0) {
+                        const auto& loop = active_instructions->integer_loops[instruction.member_site - 1];
+                        pc = *floating < static_cast<double>(loop.limit) ? loop.body : loop.exit;
+                    }
+                    else pc = instruction.auxiliary;
+                    continue;
+                }
+            }
             [[fallthrough]];
         }
         case Opcode::IncrementLocal:
@@ -5866,12 +6111,20 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const auto slot = instruction.operand;
             if (instruction.plain_increment && instruction.discard_result
                 && slot < active_locals->size() && !active_aliases[slot])
-                if (auto* integer = active_locals->resource_payload(slot).get_if<std::int64_t>()) {
+            {
+                auto& payload = active_locals->resource_payload(slot);
+                if (auto* integer = payload.get_if<std::int64_t>()) {
                     const auto before = static_cast<std::uint64_t>(*integer);
                     const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
                     *integer = std::bit_cast<std::int64_t>(add ? before + 1 : before - 1);
                     continue;
                 }
+                if (auto* floating = payload.get_if<double>()) {
+                    const bool add = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::PostAdd;
+                    *floating += add ? 1.0 : -1.0;
+                    continue;
+                }
+            }
             const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
             {
@@ -6266,8 +6519,71 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!interp.op_register_binary(instruction)) return true; continue;
         }
         case Opcode::NumericBinaryLocal:
+        {
+            // 整数/浮点本地槽直通路径：操作数均为本地槽、目标槽已绑定数值类型
+            // 且无别名时，直接在寄存器文件内完成运算。带错误路径的运算
+            // （除法、取模、移位）与需要结果寄存器的场合仍走通用实现。
+            const auto& operation = active_instructions->numeric_operations[instruction.auxiliary];
+            const auto operation_opcode = static_cast<Opcode>(operation.opcode);
+            if (operation.flags == 0 && instruction.discard_result)
+            {
+                const size_t slot = static_cast<size_t>(operation.destination) - 1;
+                if (slot < active_locals->size() && operation.left < active_locals->size()
+                    && operation.right < active_locals->size()
+                    && !active_aliases[slot] && !active_aliases[operation.left] && !active_aliases[operation.right])
+                {
+                    const auto slot_binding = active_locals->numeric_binding(slot);
+                    if (slot_binding == RegisterSlots::NumericBinding::Int)
+                    {
+                        const bool wraps = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                            || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::BitAnd
+                            || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor;
+                        const auto* left_integer = wraps ? active_locals->payload(operation.left).get_if<std::int64_t>() : nullptr;
+                        const auto* right_integer = wraps ? active_locals->payload(operation.right).get_if<std::int64_t>() : nullptr;
+                        if (left_integer != nullptr && right_integer != nullptr)
+                        {
+                            const auto unsigned_left = static_cast<std::uint64_t>(*left_integer);
+                            const auto unsigned_right = static_cast<std::uint64_t>(*right_integer);
+                            std::int64_t outcome = 0;
+                            switch (operation_opcode)
+                            {
+                            case Opcode::Add: outcome = std::bit_cast<std::int64_t>(unsigned_left + unsigned_right); break;
+                            case Opcode::Subtract: outcome = std::bit_cast<std::int64_t>(unsigned_left - unsigned_right); break;
+                            case Opcode::Multiply: outcome = std::bit_cast<std::int64_t>(unsigned_left * unsigned_right); break;
+                            case Opcode::BitAnd: outcome = *left_integer & *right_integer; break;
+                            case Opcode::BitOr: outcome = *left_integer | *right_integer; break;
+                            default: outcome = *left_integer ^ *right_integer; break;
+                            }
+                            active_locals->write_number(slot, outcome, true);
+                            continue;
+                        }
+                    }
+                    else if (slot_binding == RegisterSlots::NumericBinding::Double)
+                    {
+                        // 浮点槽的直通运算：Add/Sub/Mul/Div 在二元数值语义下无错误路径。
+                        const bool computes = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                            || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide;
+                        const auto* left_double = computes ? active_locals->payload(operation.left).get_if<double>() : nullptr;
+                        const auto* right_double = computes ? active_locals->payload(operation.right).get_if<double>() : nullptr;
+                        if (left_double != nullptr && right_double != nullptr)
+                        {
+                            double outcome = 0;
+                            switch (operation_opcode)
+                            {
+                            case Opcode::Add: outcome = *left_double + *right_double; break;
+                            case Opcode::Subtract: outcome = *left_double - *right_double; break;
+                            case Opcode::Multiply: outcome = *left_double * *right_double; break;
+                            default: outcome = *left_double / *right_double; break;
+                            }
+                            active_locals->write_number(slot, outcome, true);
+                            continue;
+                        }
+                    }
+                }
+            }
             if (!interp.op_numeric_binary_local(instruction)) return true;
             continue;
+        }
         case Opcode::RegisterBinary:
             if (!interp.op_register_binary(instruction)) return true;
             continue;
@@ -6714,17 +7030,30 @@ bool CifaBytecode::Machine::bind_type(RegisterSlots& values, size_t slot, const 
     if (type_name.empty()) return true;
     if (type_name == "void") { set_error("variable cannot have type void", &location); return false; }
     descriptor.declared = type_name;
-    if (type_name == "auto" && !values.empty(slot))
+    if (type_name == "auto")
     {
-        const auto& payload = values.payload(slot);
-        const auto* resource = value_get_if<std::any>(&payload);
-        descriptor.bound = payload.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
-            ? std::type_index(typeid(double)) : value_holds<bool>(payload)
-            ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
-        const auto name = host.type_names.find(descriptor.bound);
-        descriptor.declared = name == host.type_names.end() ? descriptor.bound.name() : name->second;
+        // auto 声明的类型由负载决定。身份推导链只认识标量/字符串/map/any；
+        // VmArray 等容器会落到 int64 兜底并错误标成数值绑定，必须跳过，
+        // 交给 assign 按实际负载处理。槽位可能残留过期数值绑定，一并清除。
+        values.bindings[index] = RegisterSlots::NumericBinding::None;
+        if (!values.empty(slot))
+        {
+            const auto& payload = values.payload(slot);
+            const auto* resource = value_get_if<std::any>(&payload);
+            const bool understood = value_holds<std::int64_t>(payload) || value_holds<double>(payload)
+                || value_holds<bool>(payload) || payload.resource<std::pmr::string>() != nullptr
+                || payload.resource<VmMap>() != nullptr || resource != nullptr;
+            if (understood)
+            {
+                descriptor.bound = payload.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
+                    ? std::type_index(typeid(double)) : value_holds<bool>(payload)
+                    ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
+                const auto name = host.type_names.find(descriptor.bound);
+                descriptor.declared = name == host.type_names.end() ? descriptor.bound.name() : name->second;
+            }
+        }
     }
-    else if (type_name != "auto")
+    else
     {
         const auto registered = host.registered_types.find(type_name);
         if (registered != host.registered_types.end()) descriptor.bound = registered->second.identity;
@@ -6828,6 +7157,13 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     assigned.declared = type.declared;
     destination.set_type(target, assigned);
     destination.slot_names[destination_index] = name_id;
+    // 数值绑定由最终负载与声明类型推导：源寄存器可能残留过期的绑定
+    // （寄存器窗口复用），直接继承会让后续声明存储把它当作 int/double。
+    const auto& final_payload = destination.payload(target);
+    destination.bindings[destination_index] =
+        assigned.declared == "int" && final_payload.holds<std::int64_t>() ? RegisterSlots::NumericBinding::Int
+        : assigned.declared == "double" && final_payload.holds<double>() ? RegisterSlots::NumericBinding::Double
+        : RegisterSlots::NumericBinding::None;
     if (value_slot != slot) source.clear(value_slot);
     return true;
 }
