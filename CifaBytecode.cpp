@@ -984,9 +984,9 @@ void CifaBytecode::seal(Instructions& instructions)
         if (diagnostic.target_source.id == 0 && pending_source != nullptr)
         {
             const auto& node = *pending_source;
-            if (instruction.opcode == Opcode::RangeBegin && node.v.size() > 1)
+            if (instruction.opcode == Opcode::Range && instruction.auxiliary == 0 && node.v.size() > 1)
                 diagnostic.target_source = source_ref(&node.v[1]);
-            else if (!node.v.empty() && (instruction.opcode == Opcode::RangeNext || instruction.opcode == Opcode::PrepareStore
+            else if (!node.v.empty() && ((instruction.opcode == Opcode::Range && instruction.auxiliary == 1) || instruction.opcode == Opcode::PrepareStore
                 || instruction.opcode == Opcode::Store || instruction.opcode == Opcode::Increment))
                 diagnostic.target_source = source_ref(&node.v[0]);
         }
@@ -1024,7 +1024,7 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
 {
     const auto compact_only = [](Opcode opcode)
     {
-        return opcode == Opcode::CallEnd || opcode == Opcode::Removed;
+        return opcode == Opcode::Removed;
     };
     const size_t original_size = instructions.code.size();
     std::pmr::vector<size_t> remap(original_size + 1, instructions.resource);
@@ -1057,17 +1057,6 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
         {
             instruction.auxiliary = remap[instruction.auxiliary];
         }
-        else if (instruction.opcode == Opcode::Unwind || instruction.opcode == Opcode::RangeNext
-            || instruction.opcode == Opcode::RangeEnd || instruction.opcode == Opcode::SwitchMark
-            || instruction.opcode == Opcode::SwitchCase || instruction.opcode == Opcode::SwitchDefault
-            || instruction.opcode == Opcode::SwitchEnd)
-        {
-            instruction.operand = remap[instruction.operand];
-        }
-        else if (instruction.opcode == Opcode::RangeBegin)
-        {
-            instruction.operand = remap[index];
-        }
         code.push_back(std::move(instruction));
         diagnostics.push_back(std::move(instructions.diagnostics[index]));
         diagnostic_frames.push_back(std::move(instructions.diagnostic_frames[index]));
@@ -1077,16 +1066,6 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     instructions.diagnostic_frames = std::move(diagnostic_frames);
     for (auto& event : instructions.diagnostic_frame_events)
         event.pc = remap[event.pc];
-    std::pmr::vector<size_t> loop_ids(instructions.code.size(), std::numeric_limits<size_t>::max(), instructions.resource);
-    for (size_t pc = 0; pc < instructions.code.size(); ++pc)
-        if (instructions.code[pc].opcode == Opcode::LoopMark)
-        {
-            loop_ids[pc] = instructions.loop_state_count++;
-            instructions.code[pc].auxiliary = loop_ids[pc];
-        }
-    for (auto& instruction : instructions.code)
-        if (instruction.opcode == Opcode::Unwind)
-            instruction.operand = loop_ids[instruction.operand];
     for (size_t pc = 0; pc + 1 < instructions.code.size(); ++pc)
     {
         auto& instruction = instructions.code[pc];
@@ -1272,6 +1251,14 @@ void CifaBytecode::emit_cleanup_to(std::pmr::vector<BuildInstruction>& instructi
     slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
     for (const size_t slot : slots)
         instructions.push_back({Opcode::ReleaseLocal, source, slot});
+}
+
+void CifaBytecode::emit_control_cleanup_to(std::pmr::vector<BuildInstruction>& instructions,
+    size_t cleanup_depth, SourceRef source)
+{
+    for (size_t depth = compile_control_cleanups.size(); depth > cleanup_depth; --depth)
+        instructions.push_back({compile_control_cleanups[depth - 1].opcode, source,
+            compile_control_cleanups[depth - 1].id, compile_control_cleanups[depth - 1].auxiliary});
 }
 
 bool CifaBytecode::operation(const CalUnit& node, Opcode& opcode)
@@ -1706,8 +1693,8 @@ void CifaBytecode::discard_statement_result(std::pmr::vector<BuildInstruction>& 
     for (size_t index = end.value_or(instructions.size()); index > begin; --index)
     {
         auto& instruction = instructions[index - 1];
-        if (instruction.opcode == Opcode::LoopMark || instruction.opcode == Opcode::SwitchEnd) continue;
-        if (instruction.opcode != Opcode::Jump && instruction.opcode != Opcode::Unwind
+        if (instruction.opcode == Opcode::Switch && instruction.auxiliary == 4) continue;
+        if (instruction.opcode != Opcode::Jump
             && instruction.opcode != Opcode::Return && instruction.opcode != Opcode::Exit)
             instruction.discard_result = true;
         break;
@@ -1788,15 +1775,15 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             end_diagnostic_frame(instructions, source_ref(&node));
             return;
         }
-        instructions.push_back({Opcode::MethodBegin, source_ref(&node), site});
         const size_t count = node.v[1].str == "push_back" ? call.arguments.size()
             : node.v[1].str == "insert" ? std::min<size_t>(2, call.arguments.size())
             : (call.arguments.empty() ? 0 : 1);
+        if (count != 0) instructions.push_back({Opcode::MethodCheck, source_ref(&node), site});
         for (size_t index = 0; index < count; ++index)
         {
             emit(*argument_nodes[index], instructions);
-            instructions.push_back({Opcode::MethodValue, source_ref(&node), site, index});
         }
+        instructions.push_back({Opcode::MethodCall, source_ref(&node), site, count});
         end_diagnostic_frame(instructions, source_ref(&node));
         return;
     }
@@ -1808,7 +1795,7 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
         {
             auto& block = compile_blocks[index - 1];
             if (!block.targets.contains(target)) continue;
-            instructions.push_back({Opcode::Unwind, source_ref(&node), block.mark});
+            emit_control_cleanup_to(instructions, block.control_cleanup_depth, source_ref(&node));
             block.jumps.emplace_back(instructions.size(), target);
             instructions.push_back({Opcode::Jump, source_ref(&node)});
             return;
@@ -1822,8 +1809,7 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
         const size_t site = calls.size();
         calls.emplace_back(source_ref(&node), allocation_resource.get());
         begin_diagnostic_frame(instructions, source_ref(&node));
-        instructions.push_back({Opcode::MethodNoArgs, source_ref(&node), site});
-        if (const auto slot = local_slot(node.v[0], false)) instructions.back().auxiliary = *slot + 1;
+        instructions.push_back({Opcode::MethodCall, source_ref(&node), site});
         end_diagnostic_frame(instructions, source_ref(&node));
         return;
     }
@@ -2077,19 +2063,9 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             else emit(argument, instructions);
         }
         instructions.push_back({Opcode::Call, source_ref(&node), index});
-        instructions.push_back({Opcode::CallEnd, source_ref(&node), index});
         end_diagnostic_frame(instructions, source_ref(&node));
         return;
     }
-    const size_t trace_before = compile_traces;
-    const bool traced = node.type != CalUnitType::Union;
-    if (traced) ++compile_traces;
-    struct RestoreDepth
-    {
-        size_t& register_top;
-        size_t previous;
-        ~RestoreDepth() { register_top = previous; }
-    } restore_depth{compile_traces, trace_before};
     if (node.type == CalUnitType::Key && (node.str == "break" || node.str == "continue"))
     {
         Loop* loop = compile_loops.empty() ? nullptr : &compile_loops.back();
@@ -2109,7 +2085,8 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             return;
         }
         emit_cleanup_to(instructions, loop->local_scope_depth, source_ref(&node));
-        instructions.push_back({Opcode::Unwind, source_ref(&node), loop->traces});
+        emit_control_cleanup_to(instructions, node.str == "break"
+            ? loop->break_cleanup_depth : loop->continue_cleanup_depth, source_ref(&node));
         instructions.push_back({Opcode::Jump, source_ref(&node)});
         (node.str == "break" ? loop->breaks : loop->continues).push_back(instructions.size() - 1);
         return;
@@ -2117,12 +2094,13 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
     if (node.type == CalUnitType::Key && node.str == "switch")
     {
         begin_diagnostic_frame(instructions, source_ref(&node));
-        const size_t mark = instructions.size();
-        instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_loops.emplace_back(mark, allocation_resource.get(), true);
+        const size_t switch_id = compile_next_switch_id++;
+        const size_t cleanup_depth = compile_control_cleanups.size();
+        compile_loops.emplace_back(cleanup_depth, cleanup_depth, allocation_resource.get(), true);
         compile_loops.back().local_scope_depth = compile_local_scopes.size();
         emit(node.v[0], instructions);
-        instructions.push_back({Opcode::SwitchMark, source_ref(&node), mark});
+        instructions.push_back({Opcode::Switch, source_ref(&node), switch_id});
+        compile_control_cleanups.push_back({Opcode::Switch, switch_id, 4});
         if (compiling_function != nullptr)
         {
             compile_local_scope_bases.push_back(next_local_slot());
@@ -2138,26 +2116,26 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
                 if (child.str == "case")
                 {
                     const size_t active = instructions.size();
-                    instructions.push_back({Opcode::SwitchCase, source_ref(&child), mark});
+                    instructions.push_back({Opcode::Switch, source_ref(&child), switch_id, 1});
                     instructions.push_back({Opcode::Branch, source_ref(&child)});
                     const size_t skip_test = instructions.size();
                     instructions.push_back({Opcode::Jump, source_ref(&child)});
                     instructions[active + 1].operand = instructions.size();
                     emit(child.v[0], instructions);
-                    instructions.push_back({Opcode::SwitchDefault, source_ref(&child), mark, 1});
+                    instructions.push_back({Opcode::Switch, source_ref(&child), switch_id, 3});
                     instructions.push_back({Opcode::Branch, source_ref(&child)});
                     pending_cases.push_back(instructions.size() - 1);
                     instructions[skip_test].operand = instructions.size();
                 }
                 else
                 {
-                    instructions.push_back({Opcode::SwitchDefault, source_ref(&child), mark});
+                    instructions.push_back({Opcode::Switch, source_ref(&child), switch_id, 2});
                 }
             }
             else
             {
                 const size_t active = instructions.size();
-                instructions.push_back({Opcode::SwitchCase, source_ref(&child), mark});
+                instructions.push_back({Opcode::Switch, source_ref(&child), switch_id, 1});
                 instructions.push_back({Opcode::Branch, source_ref(&child)});
                 discard_statement_result(instructions, emit_statement(child, instructions));
                 instructions[active + 1].operand = instructions.size();
@@ -2174,7 +2152,8 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
         const auto loop = std::move(compile_loops.back());
         compile_loops.pop_back();
         for (auto jump : loop.breaks) instructions[jump].operand = finish + 1;
-        instructions.push_back({Opcode::SwitchEnd, source_ref(&node), mark});
+        instructions.push_back({Opcode::Switch, source_ref(&node), switch_id, 4});
+        compile_control_cleanups.pop_back();
         instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
         constants.emplace_back(0);
         end_diagnostic_frame(instructions, source_ref(&node));
@@ -2190,14 +2169,14 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
         {
             begin_diagnostic_frame(instructions, source_ref(&node));
             emit(clause->v[1], instructions);
-            const size_t mark = instructions.size();
-            instructions.push_back({Opcode::RangeBegin, source_ref(clause), mark});
-            const size_t loop_mark = instructions.size();
-            instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-            compile_loops.emplace_back(loop_mark, allocation_resource.get());
+            const size_t range_id = compile_next_range_id++;
+            const size_t cleanup_depth = compile_control_cleanups.size();
+            instructions.push_back({Opcode::Range, source_ref(clause), range_id});
+            compile_control_cleanups.push_back({Opcode::Range, range_id, 2});
+            compile_loops.emplace_back(cleanup_depth, cleanup_depth + 1, allocation_resource.get());
             compile_loops.back().local_scope_depth = compile_local_scopes.size();
             const size_t next = instructions.size();
-            instructions.push_back({Opcode::RangeNext, source_ref(clause), mark});
+            instructions.push_back({Opcode::Range, source_ref(clause), range_id, 1});
             variable_sites.push_back({intern_name(clause->v[0].str), intern_name(clause->v[0].type_name), clause->v[0].with_type});
             instructions.back().variable_site = variable_sites.size();
             const size_t branch = instructions.size();
@@ -2208,7 +2187,7 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
                 compile_local_scopes.emplace_back();
                 if (const auto slot = local_slot(clause->v[0], true, true))
                 {
-                    instructions[next].auxiliary = *slot + 1;
+                    instructions[next].member_site = *slot + 1;
                 }
             }
             discard_statement_result(instructions, emit_statement(node.v[1], instructions));
@@ -2223,9 +2202,10 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             instructions[branch].operand = finish;
             const auto loop = std::move(compile_loops.back());
             compile_loops.pop_back();
-            for (auto jump : loop.breaks) instructions[jump].operand = finish;
+            for (auto jump : loop.breaks) instructions[jump].operand = finish + 1;
             for (auto jump : loop.continues) instructions[jump].operand = next;
-            instructions.push_back({Opcode::RangeEnd, source_ref(clause), mark});
+            instructions.push_back({Opcode::Range, source_ref(clause), range_id, 2});
+            compile_control_cleanups.pop_back();
             instructions.push_back({Opcode::Constant, source_ref(&node), constants.size()});
             constants.emplace_back(0);
             end_diagnostic_frame(instructions, source_ref(&node));
@@ -2235,9 +2215,8 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
     if (node.type == CalUnitType::Key && (node.str == "while" || node.str == "do" || ordinary_for))
     {
         begin_diagnostic_frame(instructions, source_ref(&node));
-        const size_t mark = instructions.size();
-        instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_loops.emplace_back(mark, allocation_resource.get());
+        const size_t cleanup_depth = compile_control_cleanups.size();
+        compile_loops.emplace_back(cleanup_depth, cleanup_depth, allocation_resource.get());
         compile_loops.back().local_scope_depth = compile_local_scopes.size();
         if (ordinary_for)
         {
@@ -2464,8 +2443,7 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             { return child.type != CalUnitType::Label; });
         if (!has_child) instructions.push_back({Opcode::Empty, source_ref(&node)});
         const size_t block_mark = instructions.size();
-        instructions.push_back({Opcode::LoopMark, source_ref(&node)});
-        compile_blocks.emplace_back(block_mark, allocation_resource.get());
+        compile_blocks.emplace_back(compile_control_cleanups.size(), allocation_resource.get());
         for (const auto& child : node.v)
             if (child.type == CalUnitType::Label) compile_blocks.back().targets[child.str] = 0;
         for (auto& child : node.v)
@@ -2475,16 +2453,12 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
                 compile_blocks.back().targets[child.str] = instructions.size();
                 continue;
             }
-            if (has_child && instructions.size() > block_mark + 1)
-                discard_statement_result(instructions, block_mark + 1);
+            if (has_child && instructions.size() > block_mark)
+                discard_statement_result(instructions, block_mark);
             emit_statement(child, instructions);
         }
         for (const auto& jump : compile_blocks.back().jumps)
             instructions[jump.first].operand = compile_blocks.back().targets.at(jump.second);
-        // With no runtime scope and no labels, this block has no unwind target
-        // to snapshot. Retain the compile-time block boundary for goto checks.
-        if (node.str == "{}" && compile_blocks.back().targets.empty())
-            instructions[block_mark].opcode = Opcode::Removed;
         compile_blocks.pop_back();
         if (compiling_local_slots != nullptr)
             emit_cleanup_to(instructions, compile_local_scopes.size() - 1, source_ref(&node));
@@ -2642,12 +2616,6 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     instructions.numeric_local_sites.clear();
     for (auto& instruction : instructions.code)
     {
-        if (instruction.opcode == Opcode::RegisterSnapshot)
-        {
-            if (instruction.auxiliary >= std::numeric_limits<std::uint32_t>::max())
-            { translation_error = "bytecode temporary register exceeds encoding range"; return false; }
-            instructions.temporary_count = (std::max)(instructions.temporary_count, instruction.auxiliary + 1);
-        }
         if ((instruction.opcode == Opcode::NumericBinary || instruction.opcode == Opcode::RegisterBinary)
             && instruction.operand < module_data->register_binary_sites.size())
         {
@@ -2742,14 +2710,12 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     struct State
     {
         explicit State(std::pmr::memory_resource* resource)
-            : diagnostics(resource), dynamic_bases(resource), calls(resource),
+                        : diagnostics(resource), calls(resource),
               methods(resource), ranges(resource), switches(resource) {}
         State(const State& other) : State(other.diagnostics.get_allocator().resource()) { *this=other; }
         State& operator=(const State&) = default;
         size_t register_top = 0;
         std::pmr::vector<std::pair<size_t, bool>> diagnostics;
-        size_t scopes = 0;
-        std::pmr::vector<size_t> dynamic_bases;
         std::pmr::vector<std::pair<size_t, bool>> calls;
         std::pmr::vector<std::pair<size_t, size_t>> methods;
         std::pmr::vector<size_t> ranges;
@@ -2808,7 +2774,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     {
         if (!apply_diagnostic_events(pc)) return false;
         const auto& instruction = instructions.code[pc];
-        if (instruction.opcode == Opcode::CallEnd)
+        if (instruction.opcode == Opcode::Call)
         {
             const auto frame = std::pair<size_t, bool>{instructions.diagnostics[pc].source.id, true};
             if (lexical_diagnostics.empty() || lexical_diagnostics.back() != frame)
@@ -2816,9 +2782,9 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                 translation_error = "bytecode call diagnostic frame mismatch at pc " + std::to_string(pc);
                 return false;
             }
-            lexical_diagnostics.pop_back();
         }
         instructions.diagnostic_frames[pc] = lexical_diagnostics;
+        if (instruction.opcode == Opcode::Call) lexical_diagnostics.pop_back();
         if (instruction.opcode == Opcode::CallBegin)
             lexical_diagnostics.emplace_back(instructions.diagnostics[pc].source.id, true);
     }
@@ -2861,8 +2827,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         auto& previous = states[target];
         if (previous.visited)
         {
-            if (previous.register_top != state.register_top || previous.diagnostics != state.diagnostics || previous.scopes != state.scopes
-                || previous.dynamic_bases != state.dynamic_bases
+            if (previous.register_top != state.register_top || previous.diagnostics != state.diagnostics
                 || previous.calls != state.calls || previous.methods != state.methods
                 || previous.ranges != state.ranges || previous.switches != state.switches)
             {
@@ -2881,20 +2846,18 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     for (const auto& instruction : instructions.code)
     {
         const size_t pc = static_cast<size_t>(&instruction - instructions.code.data());
-        if (instruction.opcode == Opcode::RangeBegin && instruction.operand != pc)
-        { translation_error = "invalid bytecode range identifier"; return false; }
-        if ((instruction.opcode == Opcode::RangeNext || instruction.opcode == Opcode::RangeEnd)
-            && (instruction.operand >= pc || instructions.code[instruction.operand].opcode != Opcode::RangeBegin))
-        { translation_error = "invalid bytecode range identifier"; return false; }
-        if (instruction.opcode == Opcode::Unwind && (instruction.operand >= instructions.code.size()
-            || instructions.code[instruction.operand].opcode != Opcode::LoopMark))
-        { translation_error = "invalid bytecode loop unwind target"; return false; }
-        if ((instruction.opcode == Opcode::SwitchMark || instruction.opcode == Opcode::SwitchCase
-            || instruction.opcode == Opcode::SwitchDefault || instruction.opcode == Opcode::SwitchEnd)
-            && (instruction.operand >= pc || instructions.code[instruction.operand].opcode != Opcode::LoopMark
-                || ((instruction.opcode == Opcode::SwitchCase || instruction.opcode == Opcode::SwitchDefault)
-                    && instruction.auxiliary > 1)))
-        { translation_error = "bytecode switch frame mismatch"; return false; }
+        if (instruction.opcode == Opcode::Range)
+        {
+            if (instruction.auxiliary > 2)
+            { translation_error = "bytecode range frame mismatch"; return false; }
+            instructions.range_count = (std::max)(instructions.range_count, instruction.operand + 1);
+        }
+        if (instruction.opcode == Opcode::Switch)
+        {
+            if (instruction.auxiliary > 4)
+            { translation_error = "bytecode switch frame mismatch"; return false; }
+            instructions.switch_count = (std::max)(instructions.switch_count, instruction.operand + 1);
+        }
         if (static_cast<unsigned>(instruction.opcode) > static_cast<unsigned>(Opcode::Removed))
         { translation_error = "invalid bytecode opcode"; return false; }
         if (instruction.opcode == Opcode::Constant && instruction.operand >= constants.size())
@@ -2933,16 +2896,13 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         { translation_error = "bytecode for jump out of range"; return false; }
         if (instruction.opcode == Opcode::ReleaseLocal && instruction.operand >= local_slot_count)
         { translation_error = "bytecode cleanup slot out of range"; return false; }
-        if (instruction.opcode == Opcode::CallBegin || instruction.opcode == Opcode::Call || instruction.opcode == Opcode::CallEnd)
+        if (instruction.opcode == Opcode::CallBegin || instruction.opcode == Opcode::Call)
         {
             if (instruction.operand >= calls.size())
             { translation_error = "invalid bytecode call index"; return false; }
             if (calls[instruction.operand].name_id >= names.size())
             { translation_error = "invalid bytecode name index"; return false; }
         }
-        if (instruction.opcode == Opcode::BindArgument && (instruction.auxiliary >= calls.size()
-            || instruction.operand >= calls[instruction.auxiliary].arguments.size()))
-        { translation_error = "invalid bytecode argument binding"; return false; }
         if (instruction.opcode == Opcode::Index && (instruction.operand == 0
             || instruction.auxiliary >= index_sites.size()
             || index_sites[instruction.auxiliary].dimensions != instruction.operand
@@ -2961,7 +2921,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         { translation_error = "invalid bytecode condition source"; return false; }
         if (diagnostic.target_source.id > sources.size())
         { translation_error = "invalid bytecode target source"; return false; }
-        if ((instruction.opcode == Opcode::RangeBegin || instruction.opcode == Opcode::RangeNext
+        if ((instruction.opcode == Opcode::Range && (instruction.auxiliary == 0 || instruction.auxiliary == 1)
             || instruction.opcode == Opcode::PrepareStore || instruction.opcode == Opcode::Store || instruction.opcode == Opcode::Increment)
             && diagnostic.target_source.id == 0)
         { translation_error = "invalid bytecode target source"; return false; }
@@ -2985,8 +2945,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             if ((increment && !valid_increment) || (!increment && instruction.write > WriteOperation::ShiftRight))
             { translation_error = "invalid bytecode write operation"; return false; }
         }
-        if (instruction.opcode == Opcode::MethodBegin || instruction.opcode == Opcode::MethodValue
-            || instruction.opcode == Opcode::MethodNoArgs || instruction.opcode == Opcode::MethodPush)
+        if (instruction.opcode == Opcode::MethodCheck || instruction.opcode == Opcode::MethodCall
+            || instruction.opcode == Opcode::MethodPush)
         {
             if (instruction.operand >= calls.size())
             { translation_error = "invalid method site"; return false; }
@@ -2996,7 +2956,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             if (site.name_id >= names.size() || site.base_name_id >= names.size()
                 || site.method_source.id == 0 || site.method_source.id > sources.size())
             { translation_error = "invalid bytecode method descriptor"; return false; }
-            if (instruction.opcode == Opcode::MethodValue && instruction.auxiliary >= site.arguments.size())
+            if (instruction.opcode == Opcode::MethodCall && instruction.auxiliary > site.arguments.size())
             { translation_error = "invalid bytecode method argument"; return false; }
         }
         if (instruction.opcode == Opcode::PrepareStore || instruction.opcode == Opcode::Store || instruction.opcode == Opcode::Increment)
@@ -3045,7 +3005,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         if (instruction.opcode == Opcode::StoreLocal || instruction.opcode == Opcode::IncrementLocal
             || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
             || instruction.opcode == Opcode::IntForNext
-            || instruction.opcode == Opcode::DeclareLocal || instruction.opcode == Opcode::RangeNext
+            || instruction.opcode == Opcode::DeclareLocal || (instruction.opcode == Opcode::Range && instruction.auxiliary == 1)
             || ((instruction.opcode == Opcode::Load || instruction.opcode == Opcode::Peek) && instruction.auxiliary != 1))
         {
             if (instruction.variable_site == 0 || instruction.variable_site - 1 >= variable_sites.size())
@@ -3054,9 +3014,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             if (site.name_id >= names.size() || site.type_id >= names.size())
             { translation_error = "invalid bytecode variable descriptor"; return false; }
         }
-        if ((instruction.opcode == Opcode::RangeNext || instruction.opcode == Opcode::MethodNoArgs
-            || instruction.opcode == Opcode::Store || instruction.opcode == Opcode::Increment)
-            && instruction.auxiliary != 0 && instruction.auxiliary - 1 >= local_slot_count)
+        if (instruction.opcode == Opcode::Range && instruction.auxiliary == 1
+            && instruction.member_site != 0 && instruction.member_site - 1 >= local_slot_count)
         {
             translation_error = "bytecode local slot out of range";
             return false;
@@ -3073,12 +3032,6 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         const size_t input_top = register_top;
         switch (instruction.opcode)
         {
-        case Opcode::RegisterSnapshot:
-            if ((instruction.write == WriteOperation::Assign && instruction.operand >= constants.size())
-                || (instruction.write == WriteOperation::Add && (instruction.operand >= local_slot_count || instruction.variable_site >= names.size()))
-                || (instruction.write != WriteOperation::Assign && instruction.write != WriteOperation::Add))
-            { translation_error = "invalid bytecode register snapshot"; return false; }
-            break;
         case Opcode::NumericCompareBranch:
         case Opcode::NumericBinary:
         case Opcode::NumericBinaryLocal:
@@ -3090,40 +3043,19 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             continue;
         case Opcode::Removed:
             break;
-        case Opcode::MethodBegin:
+        case Opcode::MethodCheck:
             if (instruction.operand >= calls.size()) { translation_error = "invalid method site"; return false; }
             if (calls[instruction.operand].local_slot != 0
                 && calls[instruction.operand].local_slot - 1 >= local_slot_count)
             { translation_error = "bytecode local slot out of range"; return false; }
-            if (!calls[instruction.operand].arguments.empty()) state.methods.emplace_back(instruction.operand, 0);
-            {
-                size_t argument_count = 0;
-                for (const auto& [site_index, received] : state.methods)
-                {
-                    const auto& site = calls[site_index];
-                    const auto& name = names[site.name_id];
-                    argument_count += name == "push_back" ? site.arguments.size()
-                        : name == "insert" ? std::min<size_t>(2, site.arguments.size()) : 1;
-                }
-                instructions.method_argument_count = (std::max)(instructions.method_argument_count, argument_count);
-            }
-            ++register_top;
-            if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
-        case Opcode::MethodValue:
-            if (register_top < 2 || instruction.operand >= calls.size()
-                || instruction.auxiliary >= calls[instruction.operand].arguments.size())
+        case Opcode::MethodCall:
+            if (instruction.operand >= calls.size() || instruction.auxiliary > calls[instruction.operand].arguments.size()
+                || register_top < instruction.auxiliary)
             { translation_error = "invalid method operand"; return false; }
-            if (state.methods.empty() || state.methods.back() != std::pair<size_t, size_t>{instruction.operand, instruction.auxiliary})
-            { translation_error = "bytecode method frame mismatch"; return false; }
-            {
-                const auto& site = calls[instruction.operand];
-                const auto& name = names[site.name_id];
-                const size_t count = name == "push_back" ? site.arguments.size()
-                    : name == "insert" ? std::min<size_t>(2, site.arguments.size()) : 1;
-                if (++state.methods.back().second == count) state.methods.pop_back();
-            }
-            --register_top;
+            instructions.method_scratch_count = (std::max)(instructions.method_scratch_count, instruction.auxiliary);
+            register_top = register_top - instruction.auxiliary + 1;
+            if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
         case Opcode::MethodPush:
             if (register_top == 0 || instruction.operand >= calls.size() || calls[instruction.operand].arguments.size() != 1)
@@ -3141,29 +3073,20 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             ++register_top;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
-        case Opcode::BindArgument:
-            if (register_top == 0 || instruction.auxiliary >= calls.size()
-                || instruction.operand >= calls[instruction.auxiliary].arguments.size())
-            { translation_error = "invalid bytecode argument binding"; return false; }
-            break;
-        case Opcode::RangeBegin:
-            if (instruction.operand != pc)
-            { translation_error = "invalid bytecode range identifier"; return false; }
+        case Opcode::Range:
+            if (instruction.auxiliary == 0)
+            {
             if (register_top == 0) { translation_error = "bytecode range register underflow"; return false; }
-            if (std::find(state.ranges.begin(), state.ranges.end(), pc) != state.ranges.end())
+            if (std::find(state.ranges.begin(), state.ranges.end(), instruction.operand) != state.ranges.end())
             { translation_error = "bytecode range frame mismatch"; return false; }
-            state.ranges.push_back(pc);
-            instructions.range_count = (std::max)(instructions.range_count, state.ranges.size());
+            state.ranges.push_back(instruction.operand);
             --register_top;
             break;
-        case Opcode::RangeEnd:
-        case Opcode::RangeNext:
-            if (instruction.operand >= pc || instructions.code[instruction.operand].opcode != Opcode::RangeBegin)
-            { translation_error = "invalid bytecode range identifier"; return false; }
+            }
             if (state.ranges.empty() || state.ranges.back() != instruction.operand)
             { translation_error = "bytecode range frame mismatch"; return false; }
-            if (instruction.opcode == Opcode::RangeEnd) state.ranges.pop_back();
-            if (instruction.opcode == Opcode::RangeNext) ++register_top;
+            if (instruction.auxiliary == 2) state.ranges.pop_back();
+            if (instruction.auxiliary == 1) ++register_top;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
         case Opcode::Index:
@@ -3196,60 +3119,40 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             state.calls.emplace_back(instruction.operand, false);
             state.diagnostics.emplace_back(instructions.diagnostics[pc].source.id, true);
             break;
-        case Opcode::CallEnd:
-            if (state.calls.empty() || state.calls.back() != std::pair<size_t, bool>{instruction.operand, true})
-            { translation_error = "bytecode call frame mismatch"; return false; }
-            state.calls.pop_back();
-            if (state.diagnostics.empty() || state.diagnostics.back() != std::pair<size_t, bool>{instructions.diagnostics[pc].source.id, true})
-            { translation_error = "bytecode diagnostic frame mismatch"; return false; }
-            state.diagnostics.pop_back();
-            break;
         case Opcode::Call:
             if (instruction.operand >= calls.size() || register_top < calls[instruction.operand].arguments.size())
             { translation_error = "invalid bytecode call stack"; return false; }
             if (state.calls.empty() || state.calls.back() != std::pair<size_t, bool>{instruction.operand, false})
             { translation_error = "bytecode call frame mismatch"; return false; }
-            state.calls.back().second = true;
+            state.calls.pop_back();
+            if (state.diagnostics.empty() || state.diagnostics.back() != std::pair<size_t, bool>{instructions.diagnostics[pc].source.id, true})
+            { translation_error = "bytecode diagnostic frame mismatch"; return false; }
+            state.diagnostics.pop_back();
             register_top = register_top - calls[instruction.operand].arguments.size() + 1;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
-        case Opcode::SwitchMark:
+        case Opcode::Switch:
+            if (instruction.auxiliary == 0)
+            {
             if (register_top == 0) { translation_error = "bytecode switch register underflow"; return false; }
-            if (instruction.operand >= pc || instructions.code[instruction.operand].opcode != Opcode::LoopMark
-                || std::find(state.switches.begin(), state.switches.end(), instruction.operand) != state.switches.end())
+            if (std::find(state.switches.begin(), state.switches.end(), instruction.operand) != state.switches.end())
             { translation_error = "bytecode switch frame mismatch"; return false; }
             state.switches.push_back(instruction.operand);
-            instructions.switch_count = (std::max)(instructions.switch_count, state.switches.size());
             --register_top;
             break;
-        case Opcode::SwitchCase:
-        case Opcode::SwitchDefault:
-            if (state.switches.empty() || state.switches.back() != instruction.operand || instruction.auxiliary > 1)
+            }
+            if (state.switches.empty() || state.switches.back() != instruction.operand)
             { translation_error = "bytecode switch frame mismatch"; return false; }
-            if (instruction.opcode == Opcode::SwitchCase)
+            if (instruction.auxiliary == 1)
             {
                 ++register_top;
                 if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             }
-            else if (instruction.auxiliary != 0)
+            else if (instruction.auxiliary == 3)
             {
                 if (register_top == 0) { translation_error = "bytecode case register underflow"; return false; }
             }
-            break;
-        case Opcode::SwitchEnd:
-            if (state.switches.empty() || state.switches.back() != instruction.operand)
-            { translation_error = "bytecode switch frame mismatch"; return false; }
-            state.switches.pop_back();
-            break;
-        case Opcode::LoopMark: break;
-        case Opcode::Unwind:
-            if (instruction.operand >= instructions.code.size() || !states[instruction.operand].visited
-                || instructions.code[instruction.operand].opcode != Opcode::LoopMark)
-            {
-                translation_error = "invalid bytecode loop unwind target";
-                return false;
-            }
-            state = states[instruction.operand];
+            else if (instruction.auxiliary == 4) state.switches.pop_back();
             break;
         case Opcode::PrepareStore:
             if (instruction.operand != 0 && instruction.operand - 1 >= index_sites.size())
@@ -3314,7 +3217,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                 return false;
             }
             [[fallthrough]];
-        case Opcode::Load: case Opcode::LoadLocal: case Opcode::DeclareLocal: case Opcode::Empty: case Opcode::Peek: case Opcode::MethodNoArgs: case Opcode::Member:
+        case Opcode::Load: case Opcode::LoadLocal: case Opcode::DeclareLocal: case Opcode::Empty: case Opcode::Peek: case Opcode::Member:
             ++register_top;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
@@ -3387,8 +3290,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         {
             switch (instruction.opcode)
             {
-            case Opcode::MethodPush: case Opcode::ArrayPushGlobal: case Opcode::MethodValue: case Opcode::BindArgument:
-            case Opcode::RangeBegin: case Opcode::SwitchMark: case Opcode::Return:
+            case Opcode::MethodPush: case Opcode::ArrayPushGlobal: case Opcode::Return:
             case Opcode::Branch: case Opcode::AndBranch: case Opcode::OrBranch:
             case Opcode::StoreLocal: case Opcode::MathUnary:
             case Opcode::Positive: case Opcode::Negative: case Opcode::LogicalNot:
@@ -3402,12 +3304,16 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                 return instruction.operand;
             case Opcode::Call:
                 return calls[instruction.operand].arguments.size();
+            case Opcode::MethodCall:
+                return instruction.auxiliary;
+            case Opcode::Range:
+                return instruction.auxiliary == 0 ? 1 : 0;
+            case Opcode::Switch:
+                return instruction.auxiliary == 0 || instruction.auxiliary == 3 ? 1 : 0;
             case Opcode::Store:
                 return instruction.operand == 0 ? 1 : index_sites[instruction.operand - 1].dimensions + 1;
             case Opcode::Increment:
                 return instruction.operand == 0 ? 0 : index_sites[instruction.operand - 1].dimensions;
-            case Opcode::SwitchDefault:
-                return instruction.auxiliary == 0 ? 0 : 1;
             case Opcode::MathBinary:
                 return calls[instruction.operand].math_local_operands ? 0 : 2;
             case Opcode::Add: case Opcode::Subtract: case Opcode::Multiply:
@@ -3435,19 +3341,16 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         { translation_error = "bytecode register count exceeds encoding range"; return false; }
         if (!merge(pc + 1, state)) return false;
     }
-    if (states.back().visited && (states.back().register_top > 1 || states.back().scopes != 0
-        || !states.back().calls.empty() || !states.back().methods.empty() || !states.back().ranges.empty() || !states.back().switches.empty()))
+    if (states.back().visited && (states.back().register_top > 1 || !states.back().calls.empty()
+        || !states.back().methods.empty() || !states.back().ranges.empty() || !states.back().switches.empty()))
     {
         translation_error = "bytecode expression has an invalid final register state";
         return false;
     }
     for (auto& instruction : instructions.code)
-    {
-        if (instruction.opcode != Opcode::CallBegin && instruction.opcode != Opcode::BindArgument) continue;
-        const size_t call_site = instruction.opcode == Opcode::CallBegin ? instruction.operand : instruction.auxiliary;
-        if (call_site < calls.size() && native_functions.contains(names[calls[call_site].name_id]))
+        if (instruction.opcode == Opcode::CallBegin && instruction.operand < calls.size()
+            && native_functions.contains(names[calls[instruction.operand].name_id]))
             instruction.opcode = Opcode::Removed;
-    }
     return true;
 }
 
@@ -3510,11 +3413,11 @@ std::string CifaBytecode::dump_instruction_listing() const
             "LessEqual", "GreaterEqual", "Equal", "NotEqual", "BitAnd", "BitOr", "BitXor", "ShiftLeft", "ShiftRight",
             "Positive", "Negative", "LogicalNot", "BitNot", "Cast", "Size", "MathUnary", "MathBinary", "Empty", "Jump", "Branch",
             "AndBranch", "OrBranch", "LogicalAnd", "LogicalOr", "Return", "ReleaseLocal",
-            "PrepareStore", "Store", "Increment", "Unwind", "LoopMark", "SwitchMark", "SwitchCase", "SwitchDefault", "SwitchEnd",
-            "CallBegin", "Call", "CallEnd", "Peek", "Array", "Index", "IndexLocal", "RangeBegin", "RangeNext", "RangeEnd",
-            "MethodNoArgs", "BindArgument", "MethodBegin", "MethodValue", "MethodPush", "ArrayPushGlobal",
+            "PrepareStore", "Store", "Increment", "Switch",
+            "CallBegin", "Call", "Peek", "Array", "Index", "IndexLocal", "Range",
+            "MethodCheck", "MethodCall", "MethodPush", "ArrayPushGlobal",
             "ArrayPushGlobalLocal", "Member", "NumericBinary", "NumericBinaryLocal",
-            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForNext", "RegisterBinary", "RegisterSnapshot", "Exit", "Removed",
+            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForNext", "RegisterBinary", "Exit", "Removed",
         };
         std::format_to(std::back_inserter(text), "--- {} ({} instructions, registers={} temporaries={}) ---\n",
             tag, instr.code.size(), instr.register_capacity, instr.temporary_count);
@@ -3744,9 +3647,10 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         compiling_local_slot_count = &module_data->local_slot_count;
         compile_local_scopes.emplace_back();
         lifted_slot_pool.clear();
-        const size_t mark = root_instructions.code.size();
-        root_instructions.build_code.push_back({Opcode::LoopMark, source_ref(&compiler.compilation_root)});
-        compile_blocks.emplace_back(mark, allocation_resource.get());
+        compile_control_cleanups.clear();
+        compile_next_range_id = 0;
+        compile_next_switch_id = 0;
+        compile_blocks.emplace_back(0, allocation_resource.get());
         for (const auto& child : compiler.compilation_root.v)
             if (child.type == CalUnitType::Label) compile_blocks.back().targets[child.str] = 0;
         bool has_root_statement = false;
@@ -3794,6 +3698,9 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                 compiling_function = compiled.get();
                 compiling_local_slots = &compiled->local_slots;
                 compiling_local_slot_count = &compiled->local_slot_count;
+                compile_control_cleanups.clear();
+                compile_next_range_id = 0;
+                compile_next_switch_id = 0;
                 compile_local_scopes.emplace_back();
                 // 抬升槽位回收池按函数隔离：槽位编号属于各自函数的局部窗口。
                 lifted_slot_pool.clear();
@@ -3832,20 +3739,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
     // 使大型 opcode handler 可以拆分为独立 noinline 函数而保持语义与命名不变。
     struct CifaBytecode::InterpState
     {
-        struct LoopState
-        {
-            std::pmr::vector<size_t> ranges; std::pmr::vector<size_t> switches;
-            LoopState(std::pmr::memory_resource* r) : ranges(r), switches(r) {}
-            LoopState(const LoopState& other) : LoopState(other.ranges.get_allocator().resource()) {
-                ranges=other.ranges; switches=other.switches;
-            }
-            LoopState(LoopState&&) = default;
-            LoopState& operator=(LoopState&&) = default;
-            LoopState& operator=(const LoopState&) = default;
-        };
         struct SwitchState { size_t condition_slot = 0; bool active = false; };
         struct RangeState { size_t snapshot_slot = 0; size_t index = 0; };
-        struct MethodArguments { size_t base = 0; size_t count = 0; size_t received = 0; };
         struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
         struct Frame
         {
@@ -3855,14 +3750,11 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             size_t call_pc;
             size_t return_register;
             RegisterSlots* locals;
-            std::pmr::vector<std::optional<LoopState>> loops;
-            std::pmr::unordered_map<size_t, SwitchState> switches;
+            std::pmr::vector<SwitchState> switches;
             const FunctionCode* function;
             const std::pmr::vector<FunctionCode::LocalSlot>* local_slots;
             const SourceLocation* call;
-            std::pmr::unordered_map<size_t, RangeState> ranges;
-            std::pmr::unordered_map<size_t, MethodArguments> method_arguments;
-            size_t method_argument_top;
+            std::pmr::vector<RangeState> ranges;
             const Module* owner;
             std::shared_ptr<const Module> module;
             size_t register_base;
@@ -3877,11 +3769,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         std::pmr::deque<Frame>& frames;
         std::pmr::deque<RegisterSlots>& local_windows;
         RegisterSlots*& active_locals;
-        std::pmr::vector<std::optional<LoopState>>& loop_states;
-        std::pmr::unordered_map<size_t, SwitchState>& switches;
-        std::pmr::unordered_map<size_t, RangeState>& ranges;
-        std::pmr::unordered_map<size_t, MethodArguments>& method_arguments;
-        size_t& method_argument_top;
+        std::pmr::vector<SwitchState>& switches;
+        std::pmr::vector<RangeState>& ranges;
         std::optional<RangeBinding>& range_binding;
         std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>>& global_links;
         std::pmr::vector<size_t>*& active_globals;
@@ -3973,11 +3862,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             active_locals = saved.locals;
             active_local_slots = saved.local_slots;
             registers.restore(saved.register_base, saved.register_size, saved.register_top);
-            loop_states = std::move(saved.loops);
             switches = std::move(saved.switches);
             ranges = std::move(saved.ranges);
-            method_arguments = std::move(saved.method_arguments);
-            method_argument_top = saved.method_argument_top;
             active_owner = saved.owner;
             active_globals = &link_globals(active_owner);
             active_module = std::move(saved.module);
@@ -3995,16 +3881,13 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         bool op_register_binary(const Instruction& instruction);
         bool op_method_push(const Instruction& instruction);
         bool op_array_push_global_local(const Instruction& instruction);
-        bool op_method_begin(const Instruction& instruction);
-        bool op_method_value(const Instruction& instruction);
-        bool op_method_no_args(const Instruction& instruction);
+        bool op_method_check(const Instruction& instruction);
+        bool op_method_call(const Instruction& instruction);
         bool op_range_next(const Instruction& instruction);
         bool op_array(const Instruction& instruction);
         bool op_call_begin(const Instruction& instruction);
-        bool op_unwind(const Instruction& instruction);
         bool op_prepare_store(const Instruction& instruction);
         bool op_return(const Instruction& instruction);
-        bool op_register_snapshot(const Instruction& instruction);
         bool op_numeric_binary_local(const Instruction& instruction);
         bool op_size(const Instruction& instruction);
         bool op_math_unary(const Instruction& instruction);
@@ -4260,8 +4143,8 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             }
             if (machine.should_stop()) { result = machine.error_result(); return false; }
             frames.push_back({active_instructions, active_node, pc, pc - 1, output,
-                active_locals, std::move(loop_states), std::move(switches), active_function, active_local_slots, active_call,
-                std::move(ranges), std::move(method_arguments), method_argument_top, active_owner, std::move(active_module),
+                active_locals, std::move(switches), active_function, active_local_slots, active_call,
+                std::move(ranges), active_owner, std::move(active_module),
                 caller_base, caller_size, caller_top});
             active_function = cached;
             active_local_slots = &cached->local_slots;
@@ -4275,13 +4158,10 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             active_instructions = &cached->instructions;
             registers.enter(active_instructions->register_capacity + active_instructions->temporary_count
                 + active_instructions->switch_count + active_instructions->range_count
-                + active_instructions->method_argument_count + 4);
+                + active_instructions->method_scratch_count + 4);
             active_locals = local_values;
-            loop_states.assign(active_instructions->loop_state_count, std::nullopt);
-            switches.clear();
-            ranges.clear();
-            method_arguments.clear();
-            method_argument_top = 0;
+            switches.assign(active_instructions->switch_count, {});
+            ranges.assign(active_instructions->range_count, {});
             return_states.emplace_back();
             return_states.back().return_type = cached->return_type;
             pc = 0;
@@ -4517,127 +4397,45 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_array_push_global_local(const I
         return true;
 }
 
-CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_begin(const Instruction& instruction)
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_check(const Instruction& instruction)
 {
-    const size_t output = instruction.destination;
-        const auto& site = active_owner->calls[instruction.operand];
-        const auto& method_name = active_owner->names[site.name_id];
-        auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-        alignas(std::max_align_t) std::byte argument_buffer[2048];
-        std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
-        std::pmr::vector<SourceLocation> arguments(&argument_scratch);
-        RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
-            + active_instructions->temporary_count + active_instructions->switch_count
-            + active_instructions->range_count + 1, 0);
-        if (!site.arguments.empty())
-        {
-            if (!receiver.size())
-            {
-                machine.set_error(method_name + "() requires an array or map",
-                    &active_owner->source(site.method_source));
-                result = machine.error_result();
-                return false;
-            }
-            const size_t count = method_name == "push_back" ? site.arguments.size()
-                : method_name == "insert" ? std::min<size_t>(2, site.arguments.size()) : 1;
-            method_arguments[instruction.operand] = MethodArguments{method_argument_top, count, 0};
-            method_argument_top += count;
-            registers.clear(output);
-            return true;
-        }
-        machine.call_method(registers, output, method_name, active_owner->source(site.method_source), receiver, arguments, values);
-        if (machine.exit_requested) { result = Object(); return false; }
-        if (machine.should_stop()) { result = machine.error_result(); return false; }
-        const size_t local_slot = active_owner->calls[instruction.operand].local_slot;
-        if (local_slot != 0)
-        {
-            if (local_slot - 1 >= active_locals->size())
-            {
-                machine.set_error("bytecode local slot out of range");
-                result = machine.error_result();
-                return false;
-            }
-        }
-        return true;
+    const auto& site = active_owner->calls[instruction.operand];
+    auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    if (!receiver.size())
+    {
+        machine.set_error(active_owner->names[site.name_id] + "() requires an array or map",
+            &active_owner->source(site.method_source));
+        result = machine.error_result();
+        return false;
+    }
+    return true;
 }
 
-CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_value(const Instruction& instruction)
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_call(const Instruction& instruction)
 {
     const size_t output = instruction.destination;
-        const auto& site = active_owner->calls[instruction.operand];
-        const auto& method_name = active_owner->names[site.name_id];
-        auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-        alignas(std::max_align_t) std::byte argument_buffer[2048];
-        std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
-        std::pmr::vector<SourceLocation> arguments(&argument_scratch);
-        RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
-            + active_instructions->temporary_count + active_instructions->switch_count
-            + active_instructions->range_count + 1, 0);
-        auto& pending = method_arguments[instruction.operand];
-        const size_t argument = active_instructions->register_capacity + active_instructions->temporary_count
-            + active_instructions->switch_count + active_instructions->range_count
-            + 1 + pending.base + pending.received++;
-        registers.move(argument, registers, input_slot(instruction, instruction.input_count - 1));
-        if (method_name == "insert" && pending.received < 2)
-        {
-            const auto size = receiver.size();
-            if (!size)
-            {
-                machine.set_error(method_name + "() requires an array or map",
-                    &active_owner->source(site.method_source));
-                result = machine.error_result();
-                return false;
-            }
-            registers.write_payload(output, double(*size));
-            return true;
-        }
-        values = RegisterSlots(registers, registers.base() + active_instructions->register_capacity
-            + active_instructions->temporary_count + active_instructions->switch_count
-            + active_instructions->range_count + 1 + pending.base, pending.count);
-        method_argument_top = pending.base;
-        method_arguments.erase(instruction.operand);
-        for (size_t index = 0; index < values.size(); ++index)
-            arguments.push_back(site.arguments[method_name == "insert" ? index : instruction.auxiliary]);
-        machine.call_method(registers, output, method_name, active_owner->source(site.method_source), receiver, arguments, values);
-        if (machine.exit_requested) { result = Object(); return false; }
-        if (machine.should_stop()) { result = machine.error_result(); return false; }
-        const size_t local_slot = active_owner->calls[instruction.operand].local_slot;
-        if (local_slot != 0)
-        {
-            if (local_slot - 1 >= active_locals->size())
-            {
-                machine.set_error("bytecode local slot out of range");
-                result = machine.error_result();
-                return false;
-            }
-        }
-        return true;
-}
-
-CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_no_args(const Instruction& instruction)
-{
-    const size_t output = instruction.destination;
-        const auto& site = active_owner->calls[instruction.operand];
-        auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
-        alignas(std::max_align_t) std::byte argument_buffer[2048];
-        std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer,sizeof(argument_buffer),persistent);
-        std::pmr::vector<SourceLocation> arguments(&argument_scratch);
-        RegisterSlots values(registers, registers.base() + active_instructions->register_capacity
-            + active_instructions->temporary_count + active_instructions->switch_count
-            + active_instructions->range_count + 1, 0);
-        machine.call_method(registers, output, active_owner->names[site.name_id],
-            active_owner->source(site.method_source), receiver, arguments, values);
-        if (machine.should_stop()) { result = machine.error_result(); return false; }
-        if (instruction.auxiliary != 0)
-        {
-            if (instruction.auxiliary - 1 >= active_locals->size())
-            {
-                machine.set_error("bytecode local slot out of range");
-                result = machine.error_result();
-                return false;
-            }
-        }
-        return true;
+    const auto& site = active_owner->calls[instruction.operand];
+    auto receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    alignas(std::max_align_t) std::byte argument_buffer[2048];
+    std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer, sizeof(argument_buffer), persistent);
+    std::pmr::vector<SourceLocation> arguments(&argument_scratch);
+    for (size_t index = 0; index < instruction.auxiliary; ++index) arguments.push_back(site.arguments[index]);
+    const size_t scratch_base = active_instructions->register_capacity + active_instructions->temporary_count
+        + active_instructions->switch_count + active_instructions->range_count;
+    RegisterSlots values(registers, registers.base() + scratch_base, instruction.auxiliary);
+    for (size_t index = 0; index < instruction.auxiliary; ++index)
+        values.copy(index, registers, input_slot(instruction, index));
+    machine.call_method(registers, output, active_owner->names[site.name_id],
+        active_owner->source(site.method_source), receiver, arguments, values);
+    if (machine.exit_requested) { result = Object(); return false; }
+    if (machine.should_stop()) { result = machine.error_result(); return false; }
+    for (size_t index = 0; index < instruction.auxiliary; ++index)
+    {
+        values.clear(index);
+        const size_t input = input_slot(instruction, index);
+        if (input != output) registers.clear(input);
+    }
+    return true;
 }
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_range_next(const Instruction& instruction)
@@ -4656,9 +4454,9 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_range_next(const Instruction& i
             registers.store_payload(value_slot, snapshot->values[state.index++]);
             if (!machine.bind_range(registers, value_slot, name, active_owner->names[site.type_id], parameter))
             { result = machine.error_result(); return false; }
-            if (instruction.auxiliary != 0)
+            if (instruction.member_site != 0)
             {
-                const size_t slot = instruction.auxiliary - 1;
+                const size_t slot = instruction.member_site - 1;
                 if (slot >= active_locals->size())
                 {
                     machine.set_error("bytecode local slot out of range");
@@ -4720,28 +4518,6 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call_begin(const Instruction& i
         return true;
 }
 
-CIFA_NOINLINE bool CifaBytecode::InterpState::op_unwind(const Instruction& instruction)
-{
-    const size_t output = instruction.destination;
-        const auto& state = loop_states.at(instruction.operand).value();
-        for (auto range = ranges.begin(); range != ranges.end();)
-            if (std::find(state.ranges.begin(), state.ranges.end(), range->first) == state.ranges.end())
-            {
-                registers.clear(range->second.snapshot_slot);
-                range = ranges.erase(range);
-            }
-            else ++range;
-        range_binding.reset();
-        for (auto current = switches.begin(); current != switches.end();)
-            if (std::find(state.switches.begin(), state.switches.end(), current->first) == state.switches.end())
-            {
-                registers.clear(current->second.condition_slot);
-                current = switches.erase(current);
-            }
-            else ++current;
-        return true;
-}
-
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_prepare_store(const Instruction& instruction)
 {
     const size_t output = instruction.destination;
@@ -4789,27 +4565,6 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_return(const Instruction& instr
         if (return_states.empty()) return_states.emplace_back();
         registers.export_argument(value_slot, result);
         return false;
-}
-
-CIFA_NOINLINE bool CifaBytecode::InterpState::op_register_snapshot(const Instruction& instruction)
-{
-    const size_t output = instruction.destination;
-        const size_t destination = active_instructions->register_capacity + instruction.auxiliary;
-        if (instruction.write == WriteOperation::Assign)
-        {
-            const auto& constant = active_owner->constants[instruction.operand];
-            registers.write_payload(destination, constant.value);
-            if (constant.continue_marker) registers.set_type(destination, {typeid(void), "", "", "__"});
-        }
-        else
-        {
-            const auto& name = active_owner->names[instruction.variable_site];
-            if (active_locals->empty(instruction.operand))
-                machine.set_error("variable '" + name + "' has not been initialized", &current_location());
-            else registers.copy(destination, *active_locals, instruction.operand);
-        }
-        if (machine.should_stop()) { result = machine.error_result(); return false; }
-        return true;
 }
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_numeric_binary_local(const Instruction& instruction)
@@ -5100,22 +4855,16 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ~RestoreRegisters() { registers.restore(base, size, top); }
     } restore_registers{registers, registers.base(), registers.size(), registers.top()};
     registers.enter(instructions.register_capacity + instructions.temporary_count + instructions.switch_count
-        + instructions.range_count + instructions.method_argument_count + 5);
+        + instructions.range_count + instructions.method_scratch_count + 5);
     const size_t result_base = registers.base();
     ++registers.window_base;
     --registers.window_size;
-    using LoopState = InterpState::LoopState;
     using SwitchState = InterpState::SwitchState;
     using RangeState = InterpState::RangeState;
-    using MethodArguments = InterpState::MethodArguments;
     using RangeBinding = InterpState::RangeBinding;
     using Frame = InterpState::Frame;
-    std::pmr::vector<std::optional<LoopState>> loop_states(instructions.loop_state_count, persistent);
-    if (start != 0 && !loop_states.empty()) loop_states[0] = LoopState{persistent};
-    std::pmr::unordered_map<size_t, SwitchState> switches(persistent);
-    std::pmr::unordered_map<size_t, RangeState> ranges(persistent);
-    std::pmr::unordered_map<size_t, MethodArguments> method_arguments(persistent);
-    size_t method_argument_top = 0;
+    std::pmr::vector<SwitchState> switches(instructions.switch_count, persistent);
+    std::pmr::vector<RangeState> ranges(instructions.range_count, persistent);
     std::optional<RangeBinding> range_binding;
     std::pmr::deque<RegisterSlots> local_windows(persistent);
     local_windows.emplace_back(module.local_slot_count, machine.host.allocation_resource);
@@ -5190,8 +4939,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ~RestoreReturns() { states.resize(size); }
     } restore_returns{return_states, return_base};
     InterpState interp{machine, interpreter, registers, result, frames, local_windows,
-        active_locals, loop_states, switches, ranges, method_arguments,
-        method_argument_top, range_binding, global_links, active_globals, active_owner, active_module,
+        active_locals, switches, ranges, range_binding, global_links, active_globals, active_owner, active_module,
         active_instructions, active_node, active_function, active_local_slots, active_call, current_source, return_states,
         register_assignment_source, error_pc, pc, missing_global, persistent, execution_scratch};
     while (true)
@@ -5236,7 +4984,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         {
             const auto& constant = active_owner->constants[instruction.operand];
             registers.write_payload(output, constant.value);
-            if (constant.continue_marker) registers.set_type(output, {typeid(void), "", "", "__"});
             continue;
         }
         case Opcode::ConstantLocal:
@@ -5302,14 +5049,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::ReleaseLocal:
             active_locals->release_scope_slot(instruction.operand);
             continue;
-        case Opcode::LoopMark:
-        {
-            auto& state = loop_states[instruction.auxiliary];
-            state = LoopState{persistent};
-            for (const auto& entry : ranges) state->ranges.push_back(entry.first);
-            for (const auto& entry : switches) state->switches.push_back(entry.first);
-            continue;
-        }
         case Opcode::Member:
         {
             const auto member = machine.resolve_member(active_owner->names[instruction.operand],
@@ -5360,37 +5099,35 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::ArrayPushGlobalLocal:
             if (!interp.op_array_push_global_local(instruction)) return true;
             continue;
-        case Opcode::MethodBegin:
-            if (!interp.op_method_begin(instruction)) return true;
+        case Opcode::MethodCheck:
+            if (!interp.op_method_check(instruction)) return true;
             continue;
-        case Opcode::MethodValue:
-            if (!interp.op_method_value(instruction)) return true;
+        case Opcode::MethodCall:
+            if (!interp.op_method_call(instruction)) return true;
             continue;
-        case Opcode::BindArgument:
-            continue;
-        case Opcode::MethodNoArgs:
-            if (!interp.op_method_no_args(instruction)) return true;
-            continue;
-        case Opcode::RangeBegin:
+        case Opcode::Range:
         {
-            RangeState state;
-            const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
-            state.snapshot_slot = active_instructions->register_capacity + active_instructions->temporary_count
-                + active_instructions->switch_count + ranges.size();
-            if (!machine.range(registers, argument, active_owner->source(interp.current_diagnostic().target_source),
-                registers, state.snapshot_slot))
-            { result = machine.error_result(); return true; }
-            registers.clear(interp.input_slot(instruction, instruction.input_count - 1));
-            ranges[instruction.operand] = std::move(state);
-            continue;
-        }
-        case Opcode::RangeNext:
-            if (!interp.op_range_next(instruction)) return true;
-            continue;
-        case Opcode::RangeEnd:
-        {
-            registers.clear(ranges.at(instruction.operand).snapshot_slot);
-            ranges.erase(instruction.operand);
+            if (instruction.auxiliary == 0)
+            {
+                RangeState state;
+                const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
+                state.snapshot_slot = active_instructions->register_capacity + active_instructions->temporary_count
+                    + active_instructions->switch_count + instruction.operand;
+                if (!machine.range(registers, argument, active_owner->source(interp.current_diagnostic().target_source),
+                    registers, state.snapshot_slot))
+                { result = machine.error_result(); return true; }
+                registers.clear(argument);
+                ranges[instruction.operand] = std::move(state);
+            }
+            else if (instruction.auxiliary == 1)
+            {
+                if (!interp.op_range_next(instruction)) return true;
+            }
+            else
+            {
+                registers.clear(ranges[instruction.operand].snapshot_slot);
+                ranges[instruction.operand] = {};
+            }
             continue;
         }
         case Opcode::Index:
@@ -5408,23 +5145,24 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         case Opcode::Call:
             if (!interp.op_call(instruction)) return true;
             continue;
-        case Opcode::SwitchMark:
+        case Opcode::Switch:
         {
             auto& state = switches[instruction.operand];
-            state.condition_slot = active_instructions->register_capacity + active_instructions->temporary_count + switches.size() - 1;
-            registers.move(state.condition_slot, registers, interp.input_slot(instruction, instruction.input_count - 1));
-            state.active = false;
-            continue;
-        }
-        case Opcode::SwitchCase:
-        {
-            registers.write_payload(output, switches.at(instruction.operand).active);
-            continue;
-        }
-        case Opcode::SwitchDefault:
-        {
-            auto& state = switches.at(instruction.operand);
-            if (instruction.auxiliary != 0)
+            if (instruction.auxiliary == 0)
+            {
+                state.condition_slot = active_instructions->register_capacity + active_instructions->temporary_count + instruction.operand;
+                registers.move(state.condition_slot, registers, interp.input_slot(instruction, instruction.input_count - 1));
+                state.active = false;
+            }
+            else if (instruction.auxiliary == 1)
+            {
+                registers.write_payload(output, state.active);
+            }
+            else if (instruction.auxiliary == 2)
+            {
+                state.active = true;
+            }
+            else if (instruction.auxiliary == 3)
             {
                 const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
                 if (!registers.binary_payloads(Opcode::Equal, output, registers.payload(state.condition_slot),
@@ -5439,19 +5177,14 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 if (machine.should_stop()) { result = machine.error_result(); return true; }
                 registers.write_payload(output, state.active);
             }
-            else state.active = true;
+            else
+            {
+                registers.clear(state.condition_slot);
+                state = {};
+            }
             if (interpreter.should_stop_execution()) { result = Object(); return true; }
             continue;
         }
-        case Opcode::SwitchEnd:
-        {
-            registers.clear(switches.at(instruction.operand).condition_slot);
-            switches.erase(instruction.operand);
-            continue;
-        }
-        case Opcode::Unwind:
-            if (!interp.op_unwind(instruction)) return true;
-            continue;
         case Opcode::PrepareStore:
             if (!interp.op_prepare_store(instruction)) return true;
             continue;
@@ -5637,9 +5370,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             continue;
         case Opcode::Return:
             if (!interp.op_return(instruction)) return true;
-            continue;
-        case Opcode::RegisterSnapshot:
-            if (!interp.op_register_snapshot(instruction)) return true;
             continue;
         case Opcode::NumericCompareBranch:
         {

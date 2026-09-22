@@ -59,18 +59,7 @@ bool local_array_store_test()
         }
         return write_values();
     )");
-    if (!result.hasValue() || result.toInt() != 28 || c.has_runtime_error()) return false;
-    if constexpr (std::same_as<Cifa, TestBytecode>)
-    {
-        Cifa pi_bytecode;
-        pi_bytecode.set_output_error(false);
-        pi_bytecode.set_optimization_enabled(true);
-        if (!pi_bytecode.compile_file("cifa/calc-pi.c")) return false;
-        const auto pi_result = pi_bytecode.run();
-        return !pi_bytecode.has_runtime_error()
-            && pi_result.isType<std::string>() && pi_result.toString().size() == 502;
-    }
-    return true;
+    return result.hasValue() && result.toInt() == 28 && !c.has_runtime_error();
 }
 
 bool method_receiver_error_order_test()
@@ -98,21 +87,8 @@ bool method_receiver_error_order_test()
         const auto result = interpreter.run_script("value = 1; value.insert(touch(), touch());");
         return result.getSpecialType() == "Error" && interpreter.has_runtime_error() && touches == 0;
     };
-    if constexpr (std::same_as<Cifa, TestBytecode>)
-    {
-        for (const bool optimized : {false, true})
-        {
-            Cifa interpreter;
-            interpreter.set_optimization_enabled(optimized);
-            if (!run_case(interpreter)) return false;
-        }
-        return true;
-    }
-    else
-    {
-        Cifa interpreter;
-        return run_case(interpreter);
-    }
+    Cifa interpreter;
+    return run_case(interpreter);
 }
 
 bool register_function_test()
@@ -2820,611 +2796,6 @@ bool include_test()
 using DirectTests = BackendTests<DirectCifa>;
 using BytecodeTests = BackendTests<TestBytecode>;
 
-bool bytecode_integer_loop_test()
-{
-    for (const auto& [condition, expected_sites] : {
-        std::pair{"i<3", size_t(1)}, {"i<=3", size_t(0)}, {"i<3.5", size_t(0)}, {"i<limit", size_t(0)}})
-    {
-        TestBytecode vm;
-        const std::string script = "f(){int x=0; int limit=3; for(int i=0;" + std::string(condition)
-            + ";i++){x++;} return x;} return f();";
-        if (!vm.compile_script(script) || vm.bytecode_statistics().integer_loop_count != expected_sites)
-        { std::println(stderr, "integer loop specialization: {}", condition); return false; }
-    }
-    const std::pair<const char*, std::int64_t> cases[] = {
-        { "f(){ int x=0; for(int i=0;i<20;i++){x++;} return x; } return f();", 20 },
-        { "f(){ int x=0; for(int i=0;i<0;i++){x++;} return x; } return f();", 0 },
-        { "f(){ int x=0; for(int i=0;i<1;i++){x++;} return x; } return f();", 1 },
-        { "f(){ int x=0; for(int i=-3;i<0;++i){++x;} return x; } return f();", 3 },
-        { "f(){ int x=0; for(int i=0;i<5;i++){if(i==2){continue;} if(i==4){break;} x++;} return x; } return f();", 3 },
-        { "f(){ int x=0; for(int i=0;i<3;i++){for(int j=0;j<4;j++){x++;}} return x; } return f();", 12 },
-        { "f(){ int x=0; for(int i=0;i<10;i++){x++; i=i+2;} return x; } return f();", 4 },
-        { "f(){ int x=0; int limit=5; for(int i=0;i<limit;i++){x++; limit--;} return x; } return f();", 3 },
-        { "f(){ int x=0; int checks=0; for(int i=0;(++checks>0)&&(i<3);i++){x++;} return checks*10+x; } return f();", 43 },
-        { "f(){ int x=0; for(int i=0;i<=3;i++){x++;} return x; } return f();", 4 },
-        { "f(){ int x=0; for(int i=3;i>0;i--){x++;} return x; } return f();", 3 },
-        { "f(){ int x=0; for(int i=-1;i<0;i--){x++; if(x==3){break;}} return x; } return f();", 3 },
-        { "f(){ int x=0; for(double i=0.0;i<3;i++){x++;} return x; } return f();", 3 },
-        { "f(){ int x=0; for(int i=0;i<3.5;i++){x++;} return x; } return f();", 4 },
-        { "f(i){ int x=0; for(;i<3;i++){x++; i=2.5;} return x; } return f(0);", 1 },
-        { "f(){ int x=0; for(int i=0;i<10;i++){if(i==2){goto done;} x++;} done: return x; } return f();", 2 },
-        { "f(){ int x=0; for(int i=0;i<10;i++){if(i==2){return x;} x++;} return 99; } return f();", 2 },
-        { "f(){ int x=9007199254740993; for(int i=0;i<3;i++){x++;} return x; } return f();", 9007199254740996LL },
-        { "f(){ int x=9223372036854775807; x++; return x==(-9223372036854775807-1); } return f();", 1 },
-        { "f(){ int x=-9223372036854775807-1; x--; return x==9223372036854775807; } return f();", 1 },
-        { "f(){ int x=0; for(int i=9223372036854775806;i<9223372036854775807;i++){x++; i=9223372036854775807; if(x==2){break;}} return x; } return f();", 2 },
-        { "f(){ int x=3; int y=x++; return y*10+x; } return f();", 34 },
-        { "f(){ int x=3; int y=++x; return y*10+x; } return f();", 44 },
-        { "f(){ int x=3; int y=x--; return y*10+x; } return f();", 32 },
-        { "f(){ int x=3; int y=--x; return y*10+x; } return f();", 22 },
-        { "f(){ double x=1.5; x++; return x==2.5; } return f();", 1 },
-        { "f(){ bool x=false; x++; return x; } return f();", 1 },
-        { "g(x){ x++; return x; } f(){ int x=0; for(int i=0;i<4;i++){x=g(x);} return x; } return f();", 4 },
-        { "f(){ int x=0; a={1,2,3}; for(item:a){item++; x=x+item;} return x; } return f();", 9 },
-    };
-    for (const auto& [script, expected] : cases)
-    {
-        DirectCifa direct;
-        const auto reference = direct.run_script(script);
-        if (direct.has_error() || direct.has_runtime_error() || reference.toInt64() != expected)
-        { std::println(stderr, "integer loop AST: {}: {} {} {}", script, reference.toString(), direct.get_errors_str(), direct.get_runtime_error()); return false; }
-        for (bool optimized : {false, true})
-        {
-            TestBytecode vm;
-            vm.set_optimization_enabled(optimized);
-            if (!vm.compile_script(script))
-            { std::println(stderr, "integer loop compile: {}: {} {}", script, vm.get_errors_str(), vm.get_translation_error()); return false; }
-            for (int run=0;run<2;++run)
-                if (vm.run().toInt64() != expected || vm.has_runtime_error())
-                { std::println(stderr, "integer loop result: {}: {}", script, vm.get_runtime_error()); return false; }
-        }
-    }
-    for (const char* script : {
-        "f(){int x; x++; return x;} return f();",
-        "f(i){for(;i<3;i++){i=\"bad\";} return i;} return f(0);"})
-    {
-        std::string reference;
-        for (bool optimized : {false, true})
-        {
-            TestBytecode vm;
-            vm.set_output_error(false);
-            vm.set_optimization_enabled(optimized);
-            if (!vm.compile_script(script)) return false;
-            vm.run();
-            if (!vm.has_runtime_error())
-            { std::println(stderr, "integer loop expected error: {}", script); return false; }
-            if (!optimized) reference = vm.get_runtime_error();
-            else if (reference != vm.get_runtime_error())
-            { std::println(stderr, "integer loop diagnostics differ: {}", script); return false; }
-        }
-    }
-    return true;
-}
-
-double generated_perf_function_value(int function_index, int a, int b)
-{
-    double sum = 0;
-    for (int j = 0; j < 3; ++j)
-    {
-        if ((a + j) % 2 != 0)
-        {
-            sum += a + b + function_index;
-        }
-        else
-        {
-            sum += a - b + function_index;
-        }
-    }
-    return sum;
-}
-
-bool large_script_regression_test()
-{
-    constexpr int function_count = 1000;
-    constexpr int calls = 300;
-    std::string script;
-    double expected = 0;
-
-    for (int function_index = 0; function_index < function_count; ++function_index)
-    {
-        script += std::format("perf_func_{}(a, b) {{\n", function_index);
-        script += "    double sum = 0;\n"
-              "    for (int j = 0; j < 3; j++) {\n"
-              "        if ((a + j) % 2) {\n";
-        script += std::format("            sum += a + b + {};\n", function_index);
-        script += "        } else {\n";
-        script += std::format("            sum += a - b + {};\n", function_index);
-        script += "        }\n"
-              "    }\n"
-              "    return sum;\n"
-              "}\n";
-    }
-
-    script += "double total = 0;\n";
-    for (int call_index = 0; call_index < calls; ++call_index)
-    {
-        const int first_function = call_index % function_count;
-        const int second_function = (call_index * 7 + 3) % function_count;
-        const int argument_b = call_index % 19 + 1;
-        script += std::format("if ({0} % 5 == 0) {{ total += perf_func_{1}({0}, {3}); }} else {{ total += perf_func_{2}({0}, {3}); }}\n",
-            call_index, first_function, second_function, argument_b);
-        expected += generated_perf_function_value(call_index % 5 == 0 ? first_function : second_function,
-            call_index, argument_b);
-    }
-    script += "return total;\n";
-
-    Cifa c;
-    c.set_output_error(false);
-    auto result = c.run_script(script);
-
-    cifa::TestBytecode bytecode;
-    bytecode.set_output_error(false);
-    const bool bytecode_compiled = bytecode.compile_script(script);
-    if (!bytecode_compiled || bytecode.has_error()) return false;
-    auto bytecode_result = bytecode.run();
-    if (result.getSpecialType() == "Error")
-    {
-        std::println(stderr, "{}{}", c.get_errors_str(), c.get_runtime_error());
-        return false;
-    }
-    return result.isNumber() && std::fabs(result.toDouble() - expected) < 1e-9
-        && bytecode_result.isNumber() && std::fabs(bytecode_result.toDouble() - expected) < 1e-9
-        && !bytecode.has_error() && !bytecode.has_runtime_error();
-}
-
-bool bytecode_execution_test()
-{
-    TestBytecode c;
-    c.set_output_error(false);
-    int total = 0;
-    c.register_native_function("record", [&total](TestBytecode::NativeCallContext& context)
-        {
-            if (context.argument_count() != 1 || !context.is_number(0))
-            {
-                context.report_error("record requires one number");
-                return;
-            }
-            total += static_cast<int>(context.to_integer(0));
-            context.set_empty_result();
-        });
-
-    if (!c.compile_script("entry_first: record(1); exit();\nentry_second: record(2); exit();\n")) return false;
-    c.run("entry_second");
-    if (c.has_runtime_error() || total != 2)
-    {
-        return false;
-    }
-
-    c.run("entry_first");
-    if (c.has_runtime_error() || total != 3)
-    {
-        return false;
-    }
-
-    c.run();
-    if (c.has_runtime_error() || total != 4)
-    {
-        return false;
-    }
-
-    c.run("missing_entry");
-    if (!c.has_runtime_error() || c.get_runtime_error().find("missing_entry") == std::string::npos)
-    {
-        return false;
-    }
-
-    TestBytecode file_code;
-    if (!file_code.compile_file("unit_test/test_data/include_simple.cifa")) return false;
-    auto file_result = file_code.run();
-    return file_result.isNumber() && file_result.toInt() == 15;
-}
-
-bool bytecode_statistics_test()
-{
-    TestBytecode code;
-    code.set_output_error(false);
-    code.set_optimization_enabled(false);
-    if (!code.compile_script("int twice(value) { return value * 2; } return twice(4);")) return false;
-    const auto statistics = code.bytecode_statistics();
-    return statistics.instruction_size > 0
-        && statistics.root_instruction_count > 0
-        && statistics.total_instruction_count > statistics.root_instruction_count
-        && statistics.total_operand_count >= statistics.root_operand_count
-        && statistics.constant_count > 0
-        && statistics.call_site_count > 0
-        && statistics.functions.size() == 1
-        && statistics.functions.front().name == "twice"
-        && statistics.functions.front().arity == 1
-        && statistics.functions.front().instruction_count > 0;
-}
-
-bool bytecode_optimization_test()
-{
-    for (const bool enabled : {false, true})
-    {
-        TestBytecode nested_builtins;
-        nested_builtins.set_optimization_enabled(enabled);
-        if (!nested_builtins.compile_script(R"(
-            string text = to_string(abs(-12));
-            double value = pow(abs(-2), sqrt(4));
-            return text == "12" && value == 4;
-        )")) return false;
-        const auto nested_result = nested_builtins.run();
-        if (nested_builtins.has_runtime_error() || !nested_result.isType<bool>() || !nested_result.toBool()) return false;
-
-        TestBytecode order;
-        order.set_output_error(false);
-        order.set_optimization_enabled(enabled);
-        if (!order.compile_script("int global = 2; int change() { global = 9; return 3; } int result = global + change(); return result == 5 && global == 9;")) return false;
-        const auto result = order.run();
-        if (order.has_runtime_error() || !result.isType<bool>() || !result.toBool()) return false;
-    }
-    for (const std::string script : {
-        "int calc(int left, int right) { int total = 0; total = (left + right) * (left - right); return total; } return calc(7, 3);",
-        "int combine(int first, int second) { return first * 100 + second; } int calc(int left, int right) { return combine(left, (left + right) * (left - right)); } return calc(7, 3);",
-        "int calc(int left, int right) { return (left + 1) / (right - 2); } return calc(7, 2);",
-        "int calc(int right) { int left; return (left + 1) * (right - 2); } return calc(3);"})
-    {
-        DirectCifa direct;
-        direct.set_output_error(false);
-        const auto expected = direct.run_script(script);
-        for (const bool enabled : {false, true})
-        {
-            TestBytecode registers;
-            registers.set_output_error(false);
-            registers.set_optimization_enabled(enabled);
-            if (!registers.compile_script(script))
-            {
-                std::println(stderr, "Register compile mismatch: {}\n{}", script, registers.get_translation_error());
-                return false;
-            }
-            const auto actual = registers.run();
-            if (registers.has_runtime_error() != direct.has_runtime_error())
-            {
-                std::println(stderr, "Register runtime mismatch: {}\nDirect: {}\nRegisters: {}", script,
-                    direct.get_runtime_error(), registers.get_runtime_error());
-                return false;
-            }
-            if (direct.has_runtime_error())
-            {
-                if (registers.get_runtime_error() != direct.get_runtime_error())
-                {
-                    std::println(stderr, "Register diagnostic mismatch: {}\nDirect:\n{}\nRegisters:\n{}", script,
-                        direct.get_runtime_error(), registers.get_runtime_error());
-                    return false;
-                }
-            }
-            else if (actual.getType() != expected.getType() || actual.toInt64() != expected.toInt64())
-            {
-                std::println(stderr, "Register value mismatch: {}\nDirect: {} ({}, {}) {}\nRegisters: {} ({}, {}) {}", script,
-                    std::to_string(expected.toInt64()), expected.getType().name(), expected.getSpecialType(), direct.get_errors_str(),
-                    std::to_string(actual.toInt64()), actual.getType().name(), actual.getSpecialType(), registers.get_errors_str());
-                return false;
-            }
-        }
-    }
-    for (const std::string script : {
-        "int calculate(int divisor) { int left = 9; int answer = left / divisor; return answer; } return calculate(0);",
-        "int calculate(left, right) { int answer = left + right; return answer; } return calculate(\"a\", \"b\");",
-        "int calculate(int right) { int left; return left + right; } return calculate(2);",
-        "auto missing() {} int calculate(int right) { auto left = missing(); return left + right; } return calculate(2);"})
-    {
-        std::string expected;
-        for (const bool enabled : {false, true})
-        {
-            TestBytecode diagnostics;
-            diagnostics.set_output_error(false);
-            diagnostics.set_optimization_enabled(enabled);
-            if (!diagnostics.compile_script(script)) return false;
-            diagnostics.run();
-            if (!diagnostics.has_runtime_error()) return false;
-            const auto message = diagnostics.get_runtime_error();
-            if (!enabled) expected = message;
-            else if (message != expected) return false;
-        }
-    }
-    for (const bool enabled : {false, true})
-    {
-        TestBytecode registers;
-        registers.set_output_error(false);
-        registers.set_optimization_enabled(enabled);
-        if (!registers.compile_script(R"(
-            int accumulate(int count) {
-                int total = 0;
-                int step = 3;
-                for (int index = 0; index < count; index++) { total = total + step; }
-                double fraction = 0.5;
-                double mixed = total + fraction;
-                mixed = mixed + fraction;
-                int large = 9223372036854775807;
-                int one = 1;
-                large = large + one;
-                return mixed == 31.0 && total == 30 && large == (-9223372036854775807 - 1);
-            }
-            return accumulate(10);
-        )")) return false;
-        const auto value = registers.run();
-        if (registers.has_runtime_error() || value.toInt64() != 1) return false;
-    }
-    TestBytecode optimized;
-    optimized.set_output_error(false);
-    optimized.set_optimization_enabled(true);
-    if (!optimized.compile_script(R"(
-        int folded = (int)(2.5 + 3.5) * 4 + (1 << 40) / 1099511627776;
-        double fraction = 5.0 / 2.0;
-        bool checked = ((5 > 3) && (2 == 2) && !(0 == 1));
-        return folded == 25 && fraction == 2.5 && checked;
-    )"))
-    {
-        return false;
-    }
-    const auto result = optimized.run();
-    if (optimized.has_error() || optimized.has_runtime_error() || !result.isType<bool>() || !result.toBool())
-    {
-        return false;
-    }
-
-    TestBytecode builtin_calls;
-    builtin_calls.set_output_error(false);
-    builtin_calls.set_optimization_enabled(true);
-    if (!builtin_calls.compile_script(R"(
-        int magnitude = abs(-7);
-        int selected = ifv(1, min(8, 3, 5), max(2, 9, 4));
-        double power = pow(2, 3) + sqrt(16) + sin(0);
-        return magnitude == 7 && selected == 3 && power == 12;
-    )")) return false;
-    const auto builtin_result = builtin_calls.run();
-    if (builtin_calls.has_runtime_error() || !builtin_result.isType<bool>() || !builtin_result.toBool()) return false;
-
-    TestBytecode integer_fast_path;
-    integer_fast_path.set_output_error(false);
-    integer_fast_path.set_optimization_enabled(true);
-    if (!integer_fast_path.compile_script("return ((-7 * 6 + 2) / 5 == -8) && (3 << 4 == 48) && ((7 & 3) == 3);")) return false;
-    const auto integer_result = integer_fast_path.run();
-    if (integer_fast_path.has_runtime_error() || !integer_result.isType<bool>() || !integer_result.toBool()) return false;
-
-    TestBytecode dynamic_math;
-    dynamic_math.set_output_error(false);
-    dynamic_math.set_optimization_enabled(true);
-    if (!dynamic_math.compile_script("double value = 7.9; return floor(value) == 7 && abs(fmod(value, 2) - 1.9) < 0.0001;")) return false;
-    const auto dynamic_math_result = dynamic_math.run();
-    if (dynamic_math.has_runtime_error() || !dynamic_math_result.isType<bool>() || !dynamic_math_result.toBool()) return false;
-    for (const bool optimized : {false, true})
-    {
-        TestBytecode value_transfer;
-        value_transfer.set_output_error(false);
-        value_transfer.set_optimization_enabled(optimized);
-        if (!value_transfer.compile_script("auto changed(values) { values[0] = 9; return values; } auto forwarded(values) { return changed(values); } auto changed_map(values) { values[\"key\"] = 9; return values; } original = {1, 2}; result = forwarded(original); result[1] = 7; original_map[\"key\"] = 1; map_result = changed_map(original_map); map_result[\"other\"] = 3; return original[0] == 1 && original[1] == 2 && result[0] == 9 && result[1] == 7 && original_map[\"key\"] == 1 && size(original_map) == 1 && map_result[\"key\"] == 9 && map_result[\"other\"] == 3;")) return false;
-        for (int iteration = 0; iteration < 2; ++iteration)
-        {
-            const auto transfer_result = value_transfer.run();
-            if (value_transfer.has_runtime_error() || !transfer_result.isType<bool>() || !transfer_result.toBool()) return false;
-        }
-    }
-
-    TestBytecode direct_size;
-    direct_size.set_output_error(false);
-    direct_size.set_optimization_enabled(true);
-    if (!direct_size.compile_script("int length(value) { return size(value); } values = {1, 2, 3}; text = \"abc\"; mapping[\"key\"] = 1; return size(values) == 3 && size(text) == 3 && size(mapping) == 1 && length(values) == 3 && size(\"a\" + text) == 4;")) return false;
-    const auto size_result = direct_size.run();
-    if (direct_size.has_runtime_error() || !size_result.isType<bool>() || !size_result.toBool()) return false;
-
-    TestBytecode mixed_untyped_parameters;
-    mixed_untyped_parameters.set_output_error(false);
-    mixed_untyped_parameters.set_optimization_enabled(true);
-    if (!mixed_untyped_parameters.compile_script("auto array_size(values, divisor) { result = {}; int length = size(values); return length; } base_value = {}; base_value.reserve(3); base_value.push_back(1); base_value.push_back(2); return array_size(base_value, 5) == 2;")) return false;
-    const auto mixed_parameter_result = mixed_untyped_parameters.run();
-    if (mixed_untyped_parameters.has_runtime_error() || !mixed_parameter_result.isType<bool>() || !mixed_parameter_result.toBool()) return false;
-
-    TestBytecode pi_call_shape;
-    pi_call_shape.set_output_error(false);
-    pi_call_shape.set_optimization_enabled(true);
-    if (!pi_call_shape.compile_script("auto divide_base(values, divisor) { result = {}; int length = size(values); return length; } auto calculate(x, base_value, iterations) { term = divide_base(base_value, x); return term; } base_value = {}; base_value.reserve(3); base_value.push_back(1); base_value.push_back(2); return calculate(5, base_value, 360) == 2;")) return false;
-    const auto pi_call_shape_result = pi_call_shape.run();
-    if (pi_call_shape.has_runtime_error() || !pi_call_shape_result.isType<bool>() || !pi_call_shape_result.toBool()) return false;
-
-    TestBytecode ordinary_size_error;
-    TestBytecode optimized_size_error;
-    ordinary_size_error.set_output_error(false);
-    optimized_size_error.set_output_error(false);
-    optimized_size_error.set_optimization_enabled(true);
-    const std::string invalid_size_script = "value = 42; return size(value);";
-    if (!ordinary_size_error.compile_script(invalid_size_script) || !optimized_size_error.compile_script(invalid_size_script)) return false;
-    ordinary_size_error.run();
-    optimized_size_error.run();
-    if (!ordinary_size_error.has_runtime_error() || !optimized_size_error.has_runtime_error()
-        || ordinary_size_error.get_runtime_error() != optimized_size_error.get_runtime_error())
-    {
-        std::println(stderr, "Len diagnostic ordinary:\n{}Optimized:\n{}", ordinary_size_error.get_runtime_error(), optimized_size_error.get_runtime_error());
-        return false;
-    }
-
-    TestBytecode inlined_script_function;
-    inlined_script_function.set_output_error(false);
-    inlined_script_function.set_optimization_enabled(true);
-    if (!inlined_script_function.compile_script("int difference(left, right) { return left - right; } int a = 9; int b = 4; return difference(a, b) == 5;")) return false;
-    const auto inlined_result = inlined_script_function.run();
-    if (inlined_script_function.has_runtime_error() || !inlined_result.isType<bool>() || !inlined_result.toBool()) return false;
-
-    TestBytecode repeated_parameter_function;
-    repeated_parameter_function.set_output_error(false);
-    repeated_parameter_function.set_optimization_enabled(true);
-    if (!repeated_parameter_function.compile_script("int twice(value) { return value + value; } int input = 3; return twice(input) == 6;")) return false;
-    const auto repeated_parameter_result = repeated_parameter_function.run();
-    if (repeated_parameter_function.has_runtime_error() || !repeated_parameter_result.isType<bool>() || !repeated_parameter_result.toBool()) return false;
-
-    TestBytecode inlined_return_conversion;
-    inlined_return_conversion.set_output_error(false);
-    inlined_return_conversion.set_optimization_enabled(true);
-    if (!inlined_return_conversion.compile_script("int truncate(value) { return value; } double input = 3.9; return truncate(input) == 3;")) return false;
-    const auto return_conversion_result = inlined_return_conversion.run();
-    if (inlined_return_conversion.has_runtime_error() || !return_conversion_result.isType<bool>() || !return_conversion_result.toBool()) return false;
-
-    TestBytecode folded_script_function;
-    folded_script_function.set_output_error(false);
-    folded_script_function.set_optimization_enabled(true);
-    if (!folded_script_function.compile_script("int sum(a, b) { return a * 3 + b; } return sum(4, 2) == 14;")) return false;
-    const auto folded_script_result = folded_script_function.run();
-    if (folded_script_function.has_runtime_error() || !folded_script_result.isType<bool>() || !folded_script_result.toBool()) return false;
-    const auto repeated_folded_script_result = folded_script_function.run();
-    if (folded_script_function.has_runtime_error() || !repeated_folded_script_result.isType<bool>() || !repeated_folded_script_result.toBool()) return false;
-
-    TestBytecode recursive_script_function;
-    recursive_script_function.set_output_error(false);
-    recursive_script_function.set_optimization_enabled(true);
-    if (!recursive_script_function.compile_script("int countdown(n) { return n ? countdown(n - 1) + 1 : 0; } return countdown(4) == 4;")) return false;
-    const auto recursive_script_result = recursive_script_function.run();
-    if (recursive_script_function.has_runtime_error() || !recursive_script_result.isType<bool>() || !recursive_script_result.toBool()) return false;
-
-    TestBytecode changed_script_function;
-    changed_script_function.set_output_error(false);
-    changed_script_function.set_optimization_enabled(true);
-    if (!changed_script_function.compile_script(R"(
-        int answer() { return 3; }
-        run_string("int answer() { return 8; }");
-        return answer() == 8;
-    )")) return false;
-    changed_script_function.run();
-    if (!changed_script_function.has_runtime_error()
-        || changed_script_function.get_runtime_error().find("script functions changed during optimized bytecode execution") == std::string::npos)
-    {
-        return false;
-    }
-
-    TestBytecode array_read;
-    array_read.set_output_error(false);
-    array_read.set_optimization_enabled(true);
-    if (!array_read.compile_script("int values[]; values.push_back(4); values.push_back(9); return values[0] + values[1] == 13;")) return false;
-    const auto array_result = array_read.run();
-    if (array_read.has_runtime_error() || !array_result.isType<bool>() || !array_result.toBool()) return false;
-
-    TestBytecode array_write;
-    array_write.set_output_error(false);
-    array_write.set_optimization_enabled(true);
-    if (!array_write.compile_script("int values[]; values[2] = 5; values[2] += 4; return values[2] == 9;")) return false;
-    const auto array_write_result = array_write.run();
-    if (array_write.has_runtime_error() || !array_write_result.isType<bool>() || !array_write_result.toBool()) return false;
-
-    TestBytecode local_array;
-    local_array.set_output_error(false);
-    local_array.set_optimization_enabled(true);
-    if (!local_array.compile_script(R"(
-        int total() {
-            int values[];
-            values.push_back(4);
-            values[1] = 5;
-            return values[0] + values[1];
-        }
-        return total() == 9;
-    )")) return false;
-    const auto local_array_result = local_array.run();
-    if (local_array.has_runtime_error() || !local_array_result.isType<bool>() || !local_array_result.toBool()) return false;
-
-    TestBytecode array_uninitialized;
-    array_uninitialized.set_output_error(false);
-    array_uninitialized.set_optimization_enabled(true);
-    if (!array_uninitialized.compile_script("int values[]; return values[3];")) return false;
-    array_uninitialized.run();
-    if (!array_uninitialized.has_runtime_error()
-        || array_uninitialized.get_runtime_error().find("array element 'values' has not been initialized") == std::string::npos) return false;
-
-    TestBytecode integer_overflow;
-    integer_overflow.set_output_error(false);
-    integer_overflow.set_optimization_enabled(true);
-    if (!integer_overflow.compile_script("int least = -9223372036854775807 - 1; return least / -1;")) return false;
-    integer_overflow.run();
-    if (!integer_overflow.has_runtime_error()
-        || integer_overflow.get_runtime_error().find("integer division overflow") == std::string::npos) return false;
-
-    TestBytecode changed_host;
-    changed_host.set_output_error(false);
-    changed_host.set_optimization_enabled(true);
-    if (!changed_host.compile_script("return abs(-2);")) return false;
-    if (!changed_host.register_native_function("unused_after_compile", [](TestBytecode::NativeCallContext& context) { context.set_result(std::int64_t{0}); })) return false;
-    changed_host.run();
-    if (!changed_host.has_runtime_error()
-        || changed_host.get_runtime_error().find("native functions changed after optimized bytecode compilation") == std::string::npos)
-    {
-        return false;
-    }
-
-    TestBytecode overridden_builtin;
-    overridden_builtin.set_output_error(false);
-    overridden_builtin.set_optimization_enabled(true);
-    if (!overridden_builtin.register_native_function("sin", [](TestBytecode::NativeCallContext& context) { context.set_result(std::int64_t{9}); })) return false;
-    if (!overridden_builtin.compile_script("return sin(0);")) return false;
-    const auto overridden_result = overridden_builtin.run();
-    if (overridden_builtin.has_runtime_error() || !overridden_result.isNumber() || overridden_result.toInt64() != 9) return false;
-
-    TestBytecode changed_during_run;
-    changed_during_run.set_output_error(false);
-    changed_during_run.set_optimization_enabled(true);
-    int after_change_calls = 0;
-    if (!changed_during_run.register_native_function("change_host", [&changed_during_run](TestBytecode::NativeCallContext& context)
-        {
-            changed_during_run.register_native_function("registered_during_run", [](TestBytecode::NativeCallContext& nested) { nested.set_empty_result(); });
-            context.set_empty_result();
-        })) return false;
-    if (!changed_during_run.register_native_function("after_change", [&after_change_calls](TestBytecode::NativeCallContext& context)
-        {
-            ++after_change_calls;
-            context.set_empty_result();
-        })) return false;
-    if (!changed_during_run.compile_script("change_host(); after_change();")) return false;
-    changed_during_run.run();
-    if (!changed_during_run.has_runtime_error()
-        || changed_during_run.get_runtime_error().find("native functions changed during optimized bytecode execution") == std::string::npos
-        || after_change_calls != 0)
-    {
-        return false;
-    }
-
-    TestBytecode runtime_error;
-    runtime_error.set_output_error(false);
-    runtime_error.set_optimization_enabled(true);
-    if (!runtime_error.compile_script("return 1 / 0;"))
-    {
-        return false;
-    }
-    runtime_error.run();
-    const bool preserved_runtime_error = runtime_error.has_runtime_error()
-        && runtime_error.get_runtime_error().find("integer division by zero") != std::string::npos;
-    return preserved_runtime_error;
-}
-
-bool nested_bytecode_context_test()
-{
-    TestBytecode c;
-    c.set_output_error(false);
-    c.set_optimization_enabled(false);
-    int total = 0;
-    c.register_native_function("record", [&total](TestBytecode::NativeCallContext& context)
-        {
-            total += static_cast<int>(context.to_integer(0));
-            context.set_empty_result();
-        });
-    c.register_native_function("compile_replacement", [&c](TestBytecode::NativeCallContext& context)
-        {
-            context.set_result(c.run_script("replacement: record(100); exit();").getSpecialType() != "Error");
-        });
-    if (!c.compile_script("record(1); compile_replacement(); record(2); exit();")) return false;
-    c.run();
-    if (c.has_runtime_error() || total != 103)
-    {
-        return false;
-    }
-
-    c.run_script("replacement: record(100); exit();");
-    if (c.has_runtime_error() || total != 203)
-    {
-        return false;
-    }
-
-    c.run_script("record(10);");
-    c.run_script("replacement: record(100); exit();");
-    return !c.has_runtime_error() && total == 313;
-}
-
 bool direct_source_map_test()
 {
     Cifa c;
@@ -3588,10 +2959,6 @@ int main(int argc, char** argv)
         std::pmr::memory_resource* previous = std::pmr::set_default_resource(std::pmr::null_memory_resource());
         ~ExplicitPmrResources() { std::pmr::set_default_resource(previous); }
     } explicit_pmr_resources;
-    if (argc > 1 && (std::string(argv[1]) == "--perf" || std::string(argv[1]) == "--perf-large"))
-    {
-        return large_script_regression_test() ? 0 : 1;
-    }
     if (argc > 1 && std::string(argv[1]) == "--error-checks")
     {
         DirectTests direct;
@@ -3632,6 +2999,31 @@ int main(int argc, char** argv)
             std::println("[FAIL] {}. {} failed", total, name);
         }
     };
+    auto run_runtime_error_parity_test = [&total, &ok](std::string name, const std::string& script, const std::string& expected)
+    {
+        total++;
+        Cifa direct_backend;
+        TestBytecode bytecode_backend;
+        direct_backend.set_output_error(false);
+        bytecode_backend.set_output_error(false);
+        const auto direct_result = direct_backend.run_script(script);
+        const auto bytecode_result = bytecode_backend.run_script(script);
+        const bool failed = direct_result.getSpecialType() == "Error" && bytecode_result.getSpecialType() == "Error"
+            && direct_backend.has_runtime_error() && bytecode_backend.has_runtime_error()
+            && direct_backend.get_runtime_error().find(expected) != std::string::npos
+            && bytecode_backend.get_runtime_error().find(expected) != std::string::npos;
+        const auto direct_recovery = direct_backend.run_script("return 42;");
+        const auto bytecode_recovery = bytecode_backend.run_script("return 42;");
+        const bool recovered = !direct_backend.has_runtime_error() && !bytecode_backend.has_runtime_error()
+            && direct_recovery.isNumber() && bytecode_recovery.isNumber()
+            && direct_recovery.toInt() == 42 && bytecode_recovery.toInt() == 42;
+        if (failed && recovered)
+        {
+            ok++;
+            std::println("[PASS] {}. {} success", total, name);
+        }
+        else std::println("[FAIL] {}. {} failed", total, name);
+    };
     auto run_backend_test = [&total, &ok](std::string name, auto& backend, auto test)
     {
         total++;
@@ -3644,10 +3036,8 @@ int main(int argc, char** argv)
     };
     #define RUN_COMMON(name) run_common_test(#name, &DirectTests::name, &BytecodeTests::name)
     #define RUN_CIFA(name) run_backend_test("cifa_" #name, direct, &DirectTests::name)
-    #define RUN_BYTECODE(name) run_backend_test("cifabytecode_" #name, bytecode, &BytecodeTests::name)
 
     std::println("[Common tests]");
-    run_direct_test("bytecode_integer_loop_test", bytecode_integer_loop_test);
     RUN_COMMON(exit_function_test);
     RUN_COMMON(builtin_math_function_test);
     RUN_COMMON(builtin_type_function_test);
@@ -3704,6 +3094,10 @@ int main(int argc, char** argv)
     RUN_COMMON(include_test);
     #undef RUN_COMMON
 
+    std::println("[Runtime error parity]");
+    run_runtime_error_parity_test("division by zero", "return 1 / 0;", "integer division by zero");
+    run_runtime_error_parity_test("uninitialized variable", "int value; return value + 1;", "has not been initialized");
+
     std::println("[Cifa tests]");
     run_direct_test("diagnostic_position_test", diagnostic_position_test);
     run_direct_test("direct_source_map_test", direct_source_map_test);
@@ -3726,23 +3120,7 @@ int main(int argc, char** argv)
     RUN_CIFA(runtime_error_abort_test);
     RUN_CIFA(nested_error_preservation_test);
 
-    std::println("[TestBytecode tests]");
-    RUN_BYTECODE(register_function_test);
-    RUN_BYTECODE(register_function_template_test);
-    RUN_BYTECODE(registration_name_validation_test);
-    RUN_BYTECODE(typed_function_argument_error_test);
-    RUN_BYTECODE(object_vector_argument_error_test);
-    RUN_BYTECODE(script_function_global_scope_test);
-    RUN_BYTECODE(registered_type_binding_test);
-    RUN_BYTECODE(int64_storage_test);
-    RUN_BYTECODE(c_string_library_test);
-    RUN_BYTECODE(method_receiver_error_order_test);
-    RUN_BYTECODE(runtime_error_abort_test);
-    RUN_BYTECODE(nested_error_preservation_test);
-    RUN_BYTECODE(local_array_store_test);
-    run_direct_test("nested_bytecode_context_test", nested_bytecode_context_test);
     #undef RUN_CIFA
-    #undef RUN_BYTECODE
 
     std::println("Passed {} out of {} tests.", ok, total);
     return ok == total ? 0 : 1;

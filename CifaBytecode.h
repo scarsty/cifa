@@ -14,10 +14,10 @@ class CifaBytecode : public Cifa
         LessEqual, GreaterEqual, Equal, NotEqual, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight,
         Positive, Negative, LogicalNot, BitNot, Cast, Size, MathUnary, MathBinary, Empty, Jump, Branch,
         AndBranch, OrBranch, LogicalAnd, LogicalOr, Return, ReleaseLocal,
-        PrepareStore, Store, Increment, Unwind, LoopMark, SwitchMark, SwitchCase, SwitchDefault, SwitchEnd,
-        CallBegin, Call, CallEnd, Peek, Array, Index, IndexLocal, RangeBegin, RangeNext, RangeEnd, MethodNoArgs, BindArgument,
-        MethodBegin, MethodValue, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
-        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForNext, RegisterBinary, RegisterSnapshot, Exit, Removed };
+        PrepareStore, Store, Increment, Switch,
+        CallBegin, Call, Peek, Array, Index, IndexLocal, Range, MethodCheck,
+        MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
+        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForNext, RegisterBinary, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {
@@ -120,11 +120,9 @@ class CifaBytecode : public Cifa
         std::pmr::vector<DiagnosticFrameEvent> diagnostic_frame_events{resource};
         size_t register_capacity = 0;
         size_t temporary_count = 0;
-        size_t loop_state_count = 0;
         size_t switch_count = 0;
         size_t range_count = 0;
-        size_t method_argument_count = 0;
-        size_t scope_capacity = 0;
+        size_t method_scratch_count = 0;
     };
     struct CompactValue;
     // VM 内部数组；共享底层容器并在写入时复制，维持语言的按值隔离语义。
@@ -332,17 +330,15 @@ class CifaBytecode : public Cifa
         Storage value;
     };
     static_assert(sizeof(BytecodeValue) == sizeof(BytecodeValue::Storage));
-    // 常量池条目；continue_marker 仅用于编译期控制流归约。
+    // 常量池条目。
     struct ConstantValue
     {
         BytecodeValue::Storage value;
-        bool continue_marker = false;
         ConstantValue(Object object, const memory::Resource& resource) : value(std::move(object.value), resource) {}
         explicit ConstantValue(bool boolean) : value(boolean) {}
         explicit ConstantValue(int integer) : value(std::int64_t(integer)) {}
         ConstantValue(const std::string& text, const memory::Resource& resource) : value(VmString(text, resource)) {}
         ConstantValue(ObjectVector elements, const memory::Resource& resource) : value(std::any(std::move(elements)), resource) {}
-        ConstantValue(const char* text, bool marker) : value(std::any(std::string(text))), continue_marker(marker) {}
     };
     // 连续寄存器文件的一个窗口。函数参数、局部和临时值共享同一存储，通过 base/size 划分生命周期。
     struct RegisterSlots
@@ -784,9 +780,10 @@ class CifaBytecode : public Cifa
     decltype(Module::function_code)& function_code = module_data->function_code;
     struct Loop
     {
-        Loop(size_t trace_count, std::pmr::memory_resource* resource, bool switch_loop = false)
-            : traces(trace_count), breaks(resource), continues(resource), is_switch(switch_loop) {}
-        size_t traces;
+        Loop(size_t break_depth, size_t continue_depth, std::pmr::memory_resource* resource, bool switch_loop = false)
+            : break_cleanup_depth(break_depth), continue_cleanup_depth(continue_depth), breaks(resource), continues(resource), is_switch(switch_loop) {}
+        size_t break_cleanup_depth;
+        size_t continue_cleanup_depth;
         size_t local_scope_depth = 0;
         std::pmr::vector<size_t> breaks;
         std::pmr::vector<size_t> continues;
@@ -795,16 +792,25 @@ class CifaBytecode : public Cifa
     std::pmr::vector<Loop> compile_loops{allocation_resource.get()};
     struct LabelBlock
     {
-        LabelBlock(size_t value, std::pmr::memory_resource* resource) : mark(value), targets(resource), jumps(resource) {}
+        LabelBlock(size_t cleanup_depth, std::pmr::memory_resource* resource)
+            : control_cleanup_depth(cleanup_depth), targets(resource), jumps(resource) {}
         LabelBlock(const LabelBlock&) = delete;
         LabelBlock(LabelBlock&&) = default;
         LabelBlock& operator=(LabelBlock&&) = default;
-        size_t mark;
+        size_t control_cleanup_depth;
         std::pmr::unordered_map<std::string, size_t> targets;
         std::pmr::vector<std::pair<size_t, std::string>> jumps;
     };
     std::pmr::vector<LabelBlock> compile_blocks{allocation_resource.get()};
-    size_t compile_traces = 0;
+    struct ControlCleanup
+    {
+        Opcode opcode;
+        size_t id;
+        size_t auxiliary;
+    };
+    std::pmr::vector<ControlCleanup> compile_control_cleanups{allocation_resource.get()};
+    size_t compile_next_range_id = 0;
+    size_t compile_next_switch_id = 0;
     FunctionCode* compiling_function = nullptr;
     std::pmr::vector<FunctionCode::LocalSlot>* compiling_local_slots = nullptr;
     size_t* compiling_local_slot_count = nullptr;
@@ -836,6 +842,7 @@ class CifaBytecode : public Cifa
     size_t next_local_slot() const;
     void classify_local_slot(size_t slot, const CalUnit& node);
     void emit_cleanup_to(std::pmr::vector<BuildInstruction>& instructions, size_t local_scope_depth, SourceRef source);
+    void emit_control_cleanup_to(std::pmr::vector<BuildInstruction>& instructions, size_t cleanup_depth, SourceRef source);
     static bool operation(const CalUnit& node, Opcode& opcode);
     bool try_fold_constant(const CalUnit& node, Object& value,
         const std::pmr::unordered_map<std::string, Object>* parameters = nullptr,
