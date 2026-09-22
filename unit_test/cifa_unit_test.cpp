@@ -113,24 +113,16 @@ bool register_function_test()
     else
         c1.register_function("sin", [](ObjectVector& d) { return std::sin(d[0].toDouble()); });
 
-    std::string script_code = R"(
-    double PI = 3.141592653589793238462643383279;
-    double return_val = 0;
-    return_val += sin(0);
-    return_val += sin(PI * 0.5);
-    return_val += sin(PI);
-    return return_val;
-    )";
-
-    auto o = c1.run_script(script_code);
-    if (o.hasValue() && o.isNumber() && o.isType<double>())
-    {
-        return (std::fabs(o.ref<double>() - 1.0) <= std::numeric_limits<double>::epsilon());
-    }
-    else
-    {
-        return false;
-    }
+    const auto o = c1.run_script(R"(
+        double PI = 3.141592653589793238462643383279;
+        double return_val = 0;
+        return_val += sin(0);
+        return_val += sin(PI * 0.5);
+        return_val += sin(PI);
+        return return_val;
+    )");
+    return o.hasValue() && o.isNumber() && o.isType<double>()
+        && std::fabs(o.ref<double>() - 1.0) <= std::numeric_limits<double>::epsilon();
 }
 
 bool register_function_template_test()
@@ -155,7 +147,7 @@ bool register_function_template_test()
         c.register_function("set_flag", template_set_flag);
     }
 
-    auto o = c.run_script(R"(
+    const auto o = c.run_script(R"(
         set_flag(1);
         return square(3) + add(2, 4) + trunc(1.8);
     )");
@@ -175,7 +167,7 @@ bool registration_name_validation_test()
         else return c.register_function("valid_function", template_square);
     }();
     if (!valid_function || !c.register_parameter("valid_parameter", 1)
-        || !c.register_vector("valid_vector", std::vector<int>{ 1, 2 })
+        || !c.register_vector("valid_vector", std::vector<int>{1, 2})
         || !c.register_user_data("valid_context", &context))
     {
         return false;
@@ -197,16 +189,10 @@ bool registration_name_validation_test()
         && default_output.has_runtime_error()
         && default_output.get_runtime_error().find("invalid registration name 'bad-key'") != std::string::npos;
 
-    return Cifa::is_valid_key("valid_key")
-        && Cifa::is_valid_key("_value2")
-        && !Cifa::is_valid_key("1bad")
-        && !Cifa::is_valid_key("bad-key")
-        && !Cifa::is_valid_key("return")
-        && Cifa::revise_key("1bad-key") == "_bad_key"
-        && Cifa::revise_key("return") == "return_"
-        && Cifa::revise_key("") == "_"
-        && template_registration_failed
-        && standard_registration_failed;
+    return Cifa::is_valid_key("valid_key") && Cifa::is_valid_key("_value2")
+        && !Cifa::is_valid_key("1bad") && !Cifa::is_valid_key("bad-key") && !Cifa::is_valid_key("return")
+        && Cifa::revise_key("1bad-key") == "_bad_key" && Cifa::revise_key("return") == "return_"
+        && Cifa::revise_key("") == "_" && template_registration_failed && standard_registration_failed;
 }
 
 bool exit_function_test()
@@ -214,20 +200,14 @@ bool exit_function_test()
     {
         Cifa c;
         c.run_script("value = 1; exit(); value = 2;");
-        auto result = c.run_script("return value;");
-        if (!result.isNumber() || result.toDouble() != 1.0)
-        {
-            return false;
-        }
+        const auto result = c.run_script("return value;");
+        if (!result.isNumber() || result.toDouble() != 1.0) return false;
     }
     {
         Cifa c;
         c.run_script("count = 0; running = 1; while (running) { count++; exit(); count++; }");
-        auto result = c.run_script("return count;");
-        if (!result.isNumber() || result.toDouble() != 1.0)
-        {
-            return false;
-        }
+        const auto result = c.run_script("return count;");
+        if (!result.isNumber() || result.toDouble() != 1.0) return false;
     }
     return true;
 }
@@ -236,27 +216,17 @@ bool runtime_error_abort_test()
 {
     const std::vector<std::string> scripts = {
         "sum = 0; for (int i = 0; i < 10; i++) { sum += missing_value(i); } return sum;",
-        "for (int i = !missing_value(); i < 10; i++) { touch(); }",
-        "for (int i = 0; missing_value(); i++) { touch(); }",
-        "for (int i = 0; i < 10; i += !missing_value()) { }",
-        "while (missing_value()) { touch(); }",
-        "int i = 0; while (i < 10) { sum += !missing_value(); i++; }",
-        "do { sum += !missing_value(); } while (sum < 10);",
-        "do { } while (missing_value());",
-        "for (item : missing_value()) { touch(); }",
-        "values = {1, 2}; for (item : values) { sum += !missing_value(); touch(); }",
-        "bad() { sum += !missing_value(); touch(); } bad();",
-        "touch(!missing_value());",
-        "sum = !missing_value();",
-        "run_string(\"bad = {1}; return !bad;\");",
+        "for (int i = !missing_value(); i < 10; i++) { touch(); }", "for (int i = 0; missing_value(); i++) { touch(); }",
+        "for (int i = 0; i < 10; i += !missing_value()) { }", "while (missing_value()) { touch(); }",
+        "int i = 0; while (i < 10) { sum += !missing_value(); i++; }", "do { sum += !missing_value(); } while (sum < 10);",
+        "do { } while (missing_value());", "for (item : missing_value()) { touch(); }",
+        "values = {1, 2}; for (item : values) { sum += !missing_value(); touch(); }", "bad() { sum += !missing_value(); touch(); } bad();",
+        "touch(!missing_value());", "sum = !missing_value();", "run_string(\"bad = {1}; return !bad;\");",
         "for (int i = 0; i < 10; i++) { run_string(\"bad = {1}; return !bad;\"); touch(); }",
         "int i = 0; while (i < 10) { run_string(\"bad = {1}; return !bad;\"); i++; touch(); }",
         "do { run_string(\"bad = {1}; return !bad;\"); touch(); } while (1);",
-        "for (; run_string(\"bad = {1}; return !bad;\");) { touch(); }",
-        "while (run_string(\"bad = {1}; return !bad;\")) { touch(); }",
-        "do {} while (run_string(\"bad = {1}; return !bad;\"));",
-        "convert({1});"
-    };
+        "for (; run_string(\"bad = {1}; return !bad;\");) { touch(); }", "while (run_string(\"bad = {1}; return !bad;\")) { touch(); }",
+        "do {} while (run_string(\"bad = {1}; return !bad;\"));", "convert({1});"};
     for (const auto& script : scripts)
     {
         Cifa interpreter;
@@ -264,35 +234,17 @@ bool runtime_error_abort_test()
         int calls = 0;
         if constexpr (std::same_as<Cifa, TestBytecode>)
         {
-            interpreter.register_native_function("touch", [&calls](TestBytecode::NativeCallContext& context)
-                {
-                    ++calls;
-                    context.set_result(std::int64_t{0});
-                });
+            interpreter.register_native_function("touch", [&calls](TestBytecode::NativeCallContext& context) { ++calls; context.set_result(std::int64_t{0}); });
             interpreter.register_native_function("missing_value", [](TestBytecode::NativeCallContext& context) { context.set_empty_result(); });
             interpreter.register_native_function("convert", [&calls](TestBytecode::NativeCallContext& context)
-                {
-                    const auto value = context.to_number(0);
-                    if (!context.is_number(0)) return;
-                    ++calls;
-                    context.set_result(value);
-                });
+                { const auto value = context.to_number(0); if (!context.is_number(0)) return; ++calls; context.set_result(value); });
         }
         else
         {
-            interpreter.register_function("touch", [&calls](ObjectVector&) -> Object
-                {
-                    ++calls;
-                    return 0;
-                });
+            interpreter.register_function("touch", [&calls](ObjectVector&) -> Object { ++calls; return 0; });
             interpreter.register_function("missing_value", [](ObjectVector&) -> Object { return Object(); });
             interpreter.register_function("convert", [&calls, &interpreter](ObjectVector& arguments) -> Object
-                {
-                    auto value = arguments[0].toDouble();
-                    if (interpreter.has_runtime_error()) { return Object(); }
-                    ++calls;
-                    return value;
-                });
+                { const auto value = arguments[0].toDouble(); if (interpreter.has_runtime_error()) return Object(); ++calls; return value; });
         }
         auto result = interpreter.run_script("sum = 7; " + script + " touch();");
         if (result.getSpecialType() != "Error" || !interpreter.has_runtime_error() || calls != 0)
@@ -316,8 +268,7 @@ bool runtime_error_abort_test()
 
     Cifa interpreter;
     interpreter.set_output_error(false);
-    auto exit_result = interpreter.run_script(
-        "total = 0; for (int i = 0; i < 3; i++) { run_string(\"exit();\"); total++; } return total;");
+    const auto exit_result = interpreter.run_script("total = 0; for (int i = 0; i < 3; i++) { run_string(\"exit();\"); total++; } return total;");
     if (interpreter.has_error() || interpreter.has_runtime_error() || interpreter.is_exit_requested()
         || !exit_result.isNumber() || exit_result.toInt() != 3)
     {
@@ -444,13 +395,19 @@ bool builtin_math_function_test()
 bool builtin_type_function_test()
 {
     Cifa c;
+    c.set_output_error(false);
+    c.run_script("auto pending_value;");
+    if (!c.has_error() || c.get_errors_str().find("auto variable 'pending_value' requires an initializer") == std::string::npos)
+    {
+        return false;
+    }
     auto o = c.run_script(R"(
         int empty_value;
-        auto pending_value;
+        auto pending_value = 1;
         arr = {1, 2};
         m["x"] = 1;
         return type(empty_value) == "int"
-            && type(pending_value) == "empty"
+            && type(pending_value) == "int"
             && type(1) == "int"
             && type(1.0f) == "double"
             && type(1.0) == "double"
@@ -1188,37 +1145,33 @@ bool typed_numeric_storage_test()
 bool auto_type_inference_test()
 {
     Cifa c;
-    auto o = c.run_script(R"(
-        auto i = 1;
-        auto f = 1.5f;
-        auto d = 1.5;
-        auto b = true;
-        int first = 1, second = 2.9;
-        auto values = {1.5, 2.5};
-        auto last_type = "";
-        auto sum = 0.0;
-        auto pending;
-        pending = 2.5;
-        int source = 7;
-        untyped = source;
-        untyped = "changed";
-        for (auto value : values) {
-            last_type = type(value);
-            sum += value;
-        }
-        string s = "abc";
-        i = 3.9;
-        b = 0.0;
-        return type(i) == "int" && i == 3
-            && type(f) == "double" && type(d) == "double"
-            && type(b) == "bool" && !b
-            && first == 1 && second == 2
-            && last_type == "double" && sum == 4.0
-            && type(pending) == "double" && pending == 2.5
-            && untyped == "changed"
-            && type(s) == "string" && s + "d" == "abcd";
-    )");
-    return o.hasValue() && o.toBool();
+    c.set_output_error(false);
+    c.run_script("auto pending;");
+    if (!c.has_error() || c.get_errors_str().find("auto variable 'pending' requires an initializer") == std::string::npos)
+    {
+        return false;
+    }
+    c.run_script("empty() {} auto pending = empty();");
+    if (!c.has_runtime_error() || c.get_runtime_error().find("cannot infer type for auto variable from NoValue") == std::string::npos)
+    {
+        return false;
+    }
+    const std::pair<const char*, std::int64_t> cases[] = {
+        { "auto value = 1; value = 3.9; return type(value) == \"int\" && value == 3;", 1 },
+        { "auto value = 1.5; value = 3; return type(value) == \"double\" && value == 3.0;", 1 },
+        { "auto value = true; value = 0.0; return type(value) == \"bool\" && !value;", 1 },
+        { "auto value = \"abc\"; return type(value) == \"string\" && value + \"d\" == \"abcd\";", 1 },
+        { "auto values = {1.5, 2.5}; double sum = 0.0; for (auto value : values) sum += value; return sum == 4.0;", 1 },
+        { "int source = 7; value = source; value = \"changed\"; return value == \"changed\";", 1 },
+    };
+    for (const auto& [script, expected] : cases)
+    {
+        Cifa scenario;
+        scenario.set_output_error(false);
+        const auto result = scenario.run_script(script);
+        if (!result.hasValue() || result.toInt() != expected || scenario.has_runtime_error()) return false;
+    }
+    return true;
 }
 
 bool c_style_cast_test()
@@ -1360,20 +1313,24 @@ bool registered_type_binding_test()
         fixed(int value) { value = 3.9; return value; }
         loose(value) { value = 3.9; return value; }
         int source = 1;
-        auto pending;
-        empty_function() {}
-        pending = empty_function();
-        pending = 4;
-        pending = 5.9;
         dynamic = source;
         dynamic = "changed";
         Index index = 3.9;
-        return inspect_box(identity(copy)) == 7 && inspect_box(inferred) == 7
-            && type(inferred) == "Box" && type(index) == "int" && index == 3
-            && fixed(1) == 3 && loose(source) == 3.9 && pending == 5
-            && dynamic == "changed";
+        int checks = 0;
+        checks += inspect_box(identity(copy)) == 7;
+        checks += inspect_box(inferred) == 7;
+        checks += type(inferred) == "Box";
+        checks += type(index) == "int";
+        checks += index == 3;
+        checks += fixed(1) == 3;
+        checks += loose(source) == 3.9;
+        checks += dynamic == "changed";
+        return checks == 8;
     )");
-    if (!result.toBool() || c.has_runtime_error()) { return false; }
+    if (!result.toBool() || c.has_runtime_error())
+    {
+        return false;
+    }
     c.run_script("inferred = 1;");
     if (!c.has_runtime_error()) { return false; }
     Cifa named_type;
@@ -2933,215 +2890,6 @@ bool bytecode_integer_loop_test()
     return true;
 }
 
-bool bytecode_scope_elision_test()
-{
-    const std::pair<const char*, int> cases[] = {
-        { "f() { int value=0; for(int i=0;i<20;i++) { value++; } return value; } return f();", 20 },
-        { "f() { int value=0; while(value<10) { { value++; } if(value<5) { continue; } if(value==8) { break; } } return value; } return f();", 8 },
-        { "f() { int value=0; { again: value++; if(value<3) { goto again; } } return value; } return f();", 3 },
-        { "f() { int value=0; { value++; goto done; } done: return value; } return f();", 1 },
-        { "f() { int value=4; { int value=9; value++; } return value; } return f();", 4 },
-        { "f() { int value=4; { temporary=9; temporary++; } temporary=2; return value+temporary; } return f();", 6 },
-        { "f() { int value=0; for(int i=0;i<3;i++) { int temporary=i; { value++; continue; } } return value; } return f();", 3 },
-        { "f() { int value=0; a={1,2,3}; for(item:a) { value++; } return value; } return f();", 3 },
-        { "f() { int value=2; switch(value) { case 2: { value++; break; } default: value=9; } return value; } return f();", 3 },
-        { "f() { int value=3; { if(value>0) { return value; } } return 0; } return f();", 3 },
-        { "f(){ a=1; b=2; { a=9; b=8; } return a+b; } return f();", 17 },
-        { "f(){ a=1; { b=2; } { b=9; } b=3; return a+b; } return f();", 4 },
-        { "f(){ int n=0; if(n) { a=1; } { a=9; } a=3; return a; } return f();", 3 },
-        { "f(){ int n=0; a=0; if(n) a=1; else a=2; { a=9; } return a; } return f();", 9 },
-        { "f(){ int n=1; a=0; if(n) a=1; else a=2; { a=9; } return a; } return f();", 9 },
-        { "f(){ for(int i=0;i<0;i++) { a=1; } { a=9; } a=3; return a; } return f();", 3 },
-        { "f(){ int n=0; while(n) { a=1; } { a=9; } a=3; return a; } return f();", 3 },
-        { "f(){ int n=0; do { n++; } while(n<3); return n; } return f();", 3 },
-        { "f(){ int n=0; n && (a=1); { a=9; } a=3; return a; } return f();", 3 },
-        { "f(){ int n=1; n || (a=1); { a=9; } a=3; return a; } return f();", 3 },
-        { "f(){ int n=0; n ? (a=1) : (a=2); { a=9; } return a; } return f();", 9 },
-        { "f(){ int n=1; n ? (a=1) : (a=2); { a=9; } return a; } return f();", 9 },
-        { "g(){ return 0; } f(){ a=1; g(); { a=9; } return a; } return f();", 9 },
-    };
-    for (const auto& [script, expected] : cases)
-    {
-        DirectCifa direct;
-        const auto reference = direct.run_script(script);
-        if (direct.has_error() || direct.has_runtime_error() || reference.toInt() != expected)
-        {
-            std::println(stderr, "scope AST reference: {}: expected {}, got {}: {}", script, expected,
-                reference.toString(), direct.get_runtime_error());
-            return false;
-        }
-        for (bool optimized : {false, true})
-        {
-            TestBytecode vm;
-            vm.set_optimization_enabled(optimized);
-            if (!vm.compile_script(script))
-            {
-                std::println(stderr, "scope test compilation: {}: {}", script, vm.get_translation_error());
-                return false;
-            }
-            for (int run = 0; run < 2; ++run)
-            {
-                const auto result = vm.run();
-                if (vm.has_runtime_error() || !result.isNumber() || result.toInt() != expected)
-                {
-                    std::println(stderr, "scope test result: {}: {}", script, vm.get_runtime_error());
-                    return false;
-                }
-            }
-        }
-    }
-    // Compare final code for equivalent loop bodies. This catches a compiler
-    // regression even if both forms still return the right value.
-    const auto count = [](const char* body, bool optimized)
-    {
-        TestBytecode vm;
-        vm.set_optimization_enabled(optimized);
-        const std::string script = "f() { int value=0; for(int i=0;i<20;i++) " + std::string(body)
-            + " return value; } return f();";
-        if (!vm.compile_script(script)) return size_t(0);
-        for (const auto& function : vm.bytecode_statistics().functions)
-            if (function.name == "f") return function.instruction_count;
-        return size_t(0);
-    };
-    const auto braced = count("{ value++; }", true);
-    if (braced == 0 || braced != count("value++;", true)
-        || count("{ value++; }", false) <= count("value++;", false))
-    {
-        std::println(stderr, "scope code counts: optimized {}/{}; unoptimized {}/{}", braced,
-            count("value++;", true), count("{ value++; }", false), count("value++;", false));
-        return false;
-    }
-    const std::pair<const char*, const char*> bound_store_cases[] = {
-        { "temporary=1; { temporary=9; } return temporary;", "temporary=1; temporary=9; return temporary;" },
-        { "f(){ temporary=1; { temporary=9; } return temporary; } return f();",
-          "f(){ temporary=1; temporary=9; return temporary; } return f();" },
-        { "f(){ int temporary=1; { temporary=9; } return temporary; } return f();",
-          "f(){ int temporary=1; temporary=9; return temporary; } return f();" },
-        { "f(){ a=1; b=2; { a=9; b=8; } return a; } return f();",
-          "f(){ a=1; b=2; a=9; b=8; return a; } return f();" },
-        { "f(){ int a=1; int b=2; a=a+b; { a=b+7; } return a; } return f();",
-          "f(){ int a=1; int b=2; a=a+b; a=b+7; return a; } return f();" },
-        { "f(){ int n=0; a=0; if(n) a=1; else a=2; { a=9; } return a; } return f();",
-          "f(){ int n=0; a=0; if(n) a=1; else a=2; a=9; return a; } return f();" },
-        { "f(){ int n=1; n ? (a=1) : (a=2); { a=9; } return a; } return f();",
-          "f(){ int n=1; n ? (a=1) : (a=2); a=9; return a; } return f();" },
-        { "f(){ a=1; { b=2; } { a=9; } return a; } return f();",
-          "f(){ a=1; { b=2; } a=9; return a; } return f();" },
-        { "f(){ int a=0; for(int i=0;i<3;i++) { a=a+3; } return a; } return f();",
-          "f(){ int a=0; for(int i=0;i<3;i++) a=a+3; return a; } return f();" },
-        { "f(){ int a=9; { { int b=2; } } return a; } return f();",
-          "f(){ int a=9; { int b=2; } return a; } return f();" },
-    };
-    for (const auto& [with_block, without_block] : bound_store_cases)
-    {
-        size_t counts[2]{};
-        int index = 0;
-        for (const auto* script : {with_block, without_block})
-        {
-            TestBytecode vm;
-            if (!vm.compile_script(script))
-            { std::println(stderr, "bound store compile: {}: {} {}", script, vm.get_errors_str(), vm.get_translation_error()); return false; }
-            counts[index++] = vm.bytecode_statistics().total_instruction_count;
-            for (int run = 0; run < 2; ++run)
-                if (vm.run().toInt() != 9 || vm.has_runtime_error())
-                { std::println(stderr, "bound store result: {}: {}", script, vm.get_runtime_error()); return false; }
-        }
-        if (counts[0] != counts[1])
-        { std::println(stderr, "bound store scope counts differ: {} {}", counts[0], counts[1]); return false; }
-    }
-    // A syntactically visible name can still be absent at runtime. The first
-    // read of an absent name yields an empty value, not the closed block's 9.
-    const char* missing_binding_cases[] = {
-        "f(){ int n=0; n && (a=1); { a=9; } return a; } return f();",
-        "f(){ int n=1; n || (a=1); { a=9; } return a; } return f();",
-    };
-    const auto missing_binding = [](auto& interpreter, const char* script)
-    {
-        interpreter.set_output_error(false);
-        const auto result = interpreter.run_script(script);
-        if (interpreter.has_error() || interpreter.has_runtime_error() || !result.toString().empty())
-        {
-            std::println(stderr, "scope missing binding (bytecode={}): {}: value='{}' {} {}",
-                std::same_as<std::remove_cvref_t<decltype(interpreter)>, TestBytecode>, script, result.toString(),
-                interpreter.get_errors_str(), interpreter.get_runtime_error());
-            return false;
-        }
-        return true;
-    };
-    for (const auto* script : missing_binding_cases)
-    {
-        DirectCifa direct;
-        if (!missing_binding(direct, script)) return false;
-        for (bool optimized : {false, true})
-        {
-            TestBytecode vm;
-            vm.set_optimization_enabled(optimized);
-            if (!missing_binding(vm, script)) return false;
-        }
-    }
-    // A barrier on the backedge must also affect the first block in the next
-    // iteration: with the barrier the block keeps its runtime scope, without it
-    // the same block is provably liftable and must compile smaller.
-    const std::pair<const char*, const char*> retained_scope_cases[] = {
-        { "a=1; barrier(); { a=9; } return a;", "a=1; { a=9; } return a;" },
-        { "a=1; int n=0; while(n<2) { { a=9; } barrier(); n++; } return a;",
-          "a=1; int n=0; while(n<2) { { a=9; } n++; } return a;" },
-        { "a=1; int n=0; do { { a=9; } barrier(); n++; } while(n<2); return a;",
-          "a=1; int n=0; do { { a=9; } n++; } while(n<2); return a;" },
-        { "a=1; for(int n=0;n<2;n++) { { a=9; } barrier(); } return a;",
-          "a=1; for(int n=0;n<2;n++) { { a=9; } } return a;" },
-    };
-    for (const auto& [with_block, without_block] : retained_scope_cases)
-    {
-        size_t counts[2]{};
-        int index = 0;
-        for (const auto* script : {with_block, without_block})
-        {
-            TestBytecode vm;
-            if (!vm.compile_script(std::string("barrier(){ return 0; } ") + script))
-            { std::println(stderr, "scope barrier compile: {}: {} {}", script, vm.get_errors_str(), vm.get_translation_error()); return false; }
-            const auto result = vm.run();
-            if (result.toInt() != 9 || vm.has_runtime_error())
-            { std::println(stderr, "scope barrier result: {}: {} {}", script, result.toString(), vm.get_runtime_error()); return false; }
-            counts[index++] = vm.bytecode_statistics().total_instruction_count;
-        }
-        if (counts[0] <= counts[1])
-        { std::println(stderr, "scope barrier unexpectedly elided: {}", with_block); return false; }
-    }
-    // The preceding binding can be bypassed through a label. Retain the scope
-    // and preserve the existing entry-label behavior in both execution modes.
-    {
-        size_t count = 0;
-        for (bool optimized : {false, true})
-        {
-            TestBytecode vm;
-            vm.set_optimization_enabled(optimized);
-            if (!vm.compile_script("temporary=1; skip: { temporary=9; } return 0;")) return false;
-            const auto current_count = vm.bytecode_statistics().total_instruction_count;
-            if (!optimized) count = current_count;
-            else if (count != current_count) return false;
-            if (vm.run("skip").toInt() != 0 || vm.has_runtime_error()) return false;
-        }
-    }
-    // Error source and message must survive elision for an uninitialized local.
-    const std::string error_script = "f() { int value;\n { value++; }\n return 0; } return f();";
-    std::string error;
-    for (bool optimized : {false, true})
-    {
-        TestBytecode vm;
-        vm.set_output_error(false);
-        vm.set_optimization_enabled(optimized);
-        if (!vm.compile_script(error_script))
-        { std::println(stderr, "scope error compile: {} {}", vm.get_errors_str(), vm.get_translation_error()); return false; }
-        vm.run();
-        if (!vm.has_runtime_error()) { std::println(stderr, "scope expected error missing"); return false; }
-        if (!optimized) error = vm.get_runtime_error();
-        else if (error != vm.get_runtime_error())
-        { std::println(stderr, "scope error mismatch:\n{}\n{}", error, vm.get_runtime_error()); return false; }
-    }
-    return true;
-}
-
 double generated_perf_function_value(int function_index, int a, int b)
 {
     double sum = 0;
@@ -3873,7 +3621,6 @@ int main(int argc, char** argv)
     #define RUN_BYTECODE(name) run_backend_test("cifabytecode_" #name, bytecode, &BytecodeTests::name)
 
     std::println("[Common tests]");
-    run_direct_test("bytecode_scope_elision_test", bytecode_scope_elision_test);
     run_direct_test("bytecode_integer_loop_test", bytecode_integer_loop_test);
     RUN_COMMON(exit_function_test);
     RUN_COMMON(builtin_math_function_test);

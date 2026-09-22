@@ -2952,6 +2952,12 @@ Object& Cifa::assign_object_value(Object& target, Object value, const CalUnit& l
         return target;
     }
 
+    if (target.declared_type_name == "auto" && value.type1 == "NoValue")
+    {
+        set_runtime_error("cannot infer type for auto variable from NoValue", &value, location);
+        return target;
+    }
+
     if (target.isTyped() && target.bound_type == typeid(void) && value.hasValue() && value.type1 != "NoValue")
     {
         target.bound_type = value.getType();
@@ -3650,6 +3656,11 @@ void Cifa::check_cal_unit(CalUnit& c, CalUnit* father, std::unordered_map<std::s
         //带类型前缀的独立声明（如 int i;），注册变量到作用域
         if (c.with_type)
         {
+            if (c.type_name == "auto" && father != nullptr && father->type == CalUnitType::Union)
+            {
+                add_error(c, "auto variable '{}' requires an initializer", c.str);
+                return;
+            }
             const auto* struct_definition = find_struct_definition(c.type_name);
             if (struct_definition != nullptr)
             {

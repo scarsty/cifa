@@ -922,7 +922,7 @@ Cifa 没有使用 yacc/ANTLR 之类的生成器，也不是传统的递归下降
 
 - 未写类型的变量和形参是动态的，可以改变值的类型；写注册类型或 `auto` 的变量是静态的，后续赋值受绑定类型约束。赋值和传参不会继承源变量的静态约束。
 - 普通整数统一保存为 `std::int64_t`，浮点数统一保存为 `double`，布尔值保存为 `bool`。`float` 是 `double` 的兼容别名，`char` 是 `int` 的兼容别名，不保留独立的 float/char 数值表示。
-- `auto` 按右值真实类型绑定；`auto value;` 在首次有效赋值时推导，暂存 `NoValue` 不触发推导。未经初始化的变量在需要读取具体值时报告错误。
+- `auto` 必须在声明时提供可推导类型的初值，并按该右值的真实类型固定绑定；`auto value;` 是语法错误，`auto value = empty_function();` 也会因 `NoValue` 无法推导类型而报错。
 - 整数加减乘和左移按 64 位补码回绕，整数除零、除法溢出、非法移位数量和越界数值转换报告错误。整数之间的算术和比较不经过 double。
 
 ### 静态与动态类型
@@ -934,7 +934,6 @@ Cifa 区分**值的实际类型**和**变量的类型绑定**。每个值都有�
 | `value = 1;` | 不写类型，动态绑定 | 可以改为字符串、数组等其他类型 |
 | `int value = 1;` | 显式类型，静态绑定 | 按声明类型转换；不兼容时报告运行时错误 |
 | `auto value = 1;` | 从初始值推导为 `int`，静态绑定 | 与绑定为 `int` 的变量一样，不会随新值重新推导 |
-| `auto value;` | 等待首次有效赋值 | 推导后固定；暂存 `NoValue` 不触发推导 |
 
 ```cpp
 dynamic_value = 1;
@@ -949,8 +948,7 @@ inferred_value = 3.9;
 copy = fixed_value;
 copy = "independent";
 
-auto delayed_value;
-delayed_value = 2.5;
+auto delayed_value = 2.5;
 delayed_value = 3;
 ```
 

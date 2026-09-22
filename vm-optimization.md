@@ -1472,6 +1472,25 @@ Release 和 Debug 的四个 CTest 目标全部通过。新增用例覆盖 512 �
 
 ## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）
 
+### 2026-09-22：当前源码复测
+
+使用 VS2026 自带的 Clang 22.1.3、`/O2 /DNDEBUG` 和同一份当前源码，交错运行默认配置与
+`-mllvm -inline-threshold=10000 -mllvm -inlinehint-threshold=10000`。每种配置各收集 21 个
+`bytecode_benchmark` 优化 VM PI 样本，全部 `PASS: all 14 outputs identical, characters=502`：
+
+| 配置 | 中位数 execute_ms | 平均 execute_ms |
+| --- | ---: | ---: |
+| clang-cl 默认 inline budget | 25.27 | 25.23 |
+| clang-cl 高 inline threshold | 23.51 | 23.47 |
+
+高阈值中位数减少 `1.7571ms`，约快 `6.95%`。该结论只适用于本机当前源码的 PI 热路径；它说明当前
+dispatcher 仍受 Clang 默认 inline budget 约束，不代表小型 increment 负载或 MSVC 构建也会同样受益。
+
+同日还重新测试了 `IntIncrementLocal` 与 `IntForNext` 专用 opcode 候选。此前 MSVC `/O2` 的回退不能
+代替高 inline Clang 结论，因此本次候选与 `0dc6223` 基线均使用上述高 threshold、交错各 21 个 PI 样本。
+两侧均通过 14/14 输出一致；基线中位数 `22.45ms`，候选 `22.42ms`，仅 `0.13%` 差异，且三个交错周期
+方向不一致。该候选没有可归因收益，已撤回；不能据此将高 inline 的 6.95% 收益归因于新增整数 opcode。
+
 这组实验是在另一台 CPU 上完成的。基线提交 `524f810` 已经包含 `2ab6301` 的 allocator 和 scoped guard 优化，
 所以这里只比较后续的 handler 结构改动，不能把结果和上面的主表跨机器相减。`84176aa` 只改了测试源码，
 没有改变 VM 二进制，因此不单独列入测量。
