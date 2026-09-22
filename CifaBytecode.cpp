@@ -1189,8 +1189,7 @@ std::optional<size_t> CifaBytecode::local_slot(const CalUnit& node, bool declare
     if (declare)
     {
         if (!node.with_type && !allow_untyped_declaration) return local_slot(node, false);
-        if (const auto found = compile_local_scopes.back().find(node.str); found != compile_local_scopes.back().end())
-            return found->second;
+        if (const auto found = compile_local_scopes.back().find(node.str); found != compile_local_scopes.back().end()) return found->second;
         if ((!node.with_type || node.type_name.empty()) && !allow_untyped_declaration) return {};
         // 遮蔽外层可见名字时必须分配新槽位；否则优先复用回收池中的抬升槽位，
         // 使同名兄弟块的运行时名字绑定保持一致。
@@ -1226,9 +1225,12 @@ void CifaBytecode::classify_local_slot(size_t slot, const CalUnit& node)
     if (!node.with_type || node.type_name.empty())
     {
         descriptor.type_id = 0;
+        descriptor.has_type = false;
         descriptor.storage = FunctionCode::LocalStorage::StaticValue;
         return;
     }
+    const bool had_type = descriptor.has_type;
+    descriptor.has_type = true;
     if (node.type_name == "auto")
     {
         descriptor.type_id = intern_name(node.type_name);
@@ -1239,12 +1241,12 @@ void CifaBytecode::classify_local_slot(size_t slot, const CalUnit& node)
     const size_t type_id = intern_name(node.type_name);
     // A reused lifted slot remains fixed only when every declaration agrees
     // on its representation. Mixed declarations receive a fresh lexical slot.
-    if (numeric && (descriptor.type_id == 0 || descriptor.type_id == type_id))
+    if (numeric && (!had_type || descriptor.type_id == type_id))
     {
         descriptor.type_id = type_id;
         descriptor.storage = FunctionCode::LocalStorage::StaticNumeric;
     }
-    else if (!numeric && (descriptor.type_id == 0 || descriptor.type_id == type_id))
+    else if (!numeric && (!had_type || descriptor.type_id == type_id))
     {
         descriptor.type_id = type_id;
         descriptor.storage = FunctionCode::LocalStorage::Cleanup;
@@ -1972,7 +1974,8 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             if (argument->str != "," && argument->type != CalUnitType::None)
             {
                 begin_diagnostic_frame(instructions, source_ref(&node));
-                if (argument->type == CalUnitType::Parameter && argument->v.empty() && !argument->with_type)
+                if (argument->type == CalUnitType::Parameter && argument->v.empty() && !argument->with_type
+                    && !local_slot(*argument, false).has_value())
                     instructions.push_back({Opcode::Size, source_ref(&node), intern_name(argument->str), 1});
                 else
                 {
@@ -5578,12 +5581,24 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 return true;
             }
             const auto& binding = active_owner->variable_sites[instruction.variable_site - 1];
-            const size_t slot_type = binding.type_id;
+            const auto* local_slot = active_local_slots != nullptr && instruction.operand < active_local_slots->size()
+                ? &(*active_local_slots)[instruction.operand] : nullptr;
+            const bool has_declared_type = binding.with_type || (local_slot != nullptr && local_slot->has_type);
+            const size_t slot_type = binding.with_type ? binding.type_id : local_slot != nullptr ? local_slot->type_id : 0;
             static const std::string empty_declared_type;
-            const std::string& declared_type = slot_type == 0 ? empty_declared_type : active_owner->names[slot_type];
+            const std::string& declared_type = has_declared_type ? active_owner->names[slot_type] : empty_declared_type;
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             size_t value_slot = argument;
             const size_t computed = registers.size() - 2;
+            if (instruction.write == WriteOperation::Assign
+                && interp.is_static_numeric_slot(instruction.operand)
+                && active_locals->numeric_binding(instruction.operand) != RegisterSlots::NumericBinding::None
+                && active_locals->assign_numeric(instruction.operand, registers, argument))
+            {
+                registers.clear(argument);
+                if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
+                continue;
+            }
             if (instruction.write != WriteOperation::Assign)
             {
                 if (active_locals->empty(instruction.operand))

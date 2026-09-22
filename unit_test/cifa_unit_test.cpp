@@ -59,7 +59,18 @@ bool local_array_store_test()
         }
         return write_values();
     )");
-    return result.hasValue() && result.toInt() == 28 && !c.has_runtime_error();
+    if (!result.hasValue() || result.toInt() != 28 || c.has_runtime_error()) return false;
+    if constexpr (std::same_as<Cifa, TestBytecode>)
+    {
+        Cifa pi_bytecode;
+        pi_bytecode.set_output_error(false);
+        pi_bytecode.set_optimization_enabled(true);
+        if (!pi_bytecode.compile_file("cifa/calc-pi.c")) return false;
+        const auto pi_result = pi_bytecode.run();
+        return !pi_bytecode.has_runtime_error()
+            && pi_result.isType<std::string>() && pi_result.toString().size() == 502;
+    }
+    return true;
 }
 
 bool method_receiver_error_order_test()
@@ -3197,6 +3208,21 @@ bool bytecode_optimization_test()
     if (!direct_size.compile_script("int length(value) { return size(value); } values = {1, 2, 3}; text = \"abc\"; mapping[\"key\"] = 1; return size(values) == 3 && size(text) == 3 && size(mapping) == 1 && length(values) == 3 && size(\"a\" + text) == 4;")) return false;
     const auto size_result = direct_size.run();
     if (direct_size.has_runtime_error() || !size_result.isType<bool>() || !size_result.toBool()) return false;
+
+    TestBytecode mixed_untyped_parameters;
+    mixed_untyped_parameters.set_output_error(false);
+    mixed_untyped_parameters.set_optimization_enabled(true);
+    if (!mixed_untyped_parameters.compile_script("auto array_size(values, divisor) { result = {}; int length = size(values); return length; } base_value = {}; base_value.reserve(3); base_value.push_back(1); base_value.push_back(2); return array_size(base_value, 5) == 2;")) return false;
+    const auto mixed_parameter_result = mixed_untyped_parameters.run();
+    if (mixed_untyped_parameters.has_runtime_error() || !mixed_parameter_result.isType<bool>() || !mixed_parameter_result.toBool()) return false;
+
+    TestBytecode pi_call_shape;
+    pi_call_shape.set_output_error(false);
+    pi_call_shape.set_optimization_enabled(true);
+    if (!pi_call_shape.compile_script("auto divide_base(values, divisor) { result = {}; int length = size(values); return length; } auto calculate(x, base_value, iterations) { term = divide_base(base_value, x); return term; } base_value = {}; base_value.reserve(3); base_value.push_back(1); base_value.push_back(2); return calculate(5, base_value, 360) == 2;")) return false;
+    const auto pi_call_shape_result = pi_call_shape.run();
+    if (pi_call_shape.has_runtime_error() || !pi_call_shape_result.isType<bool>() || !pi_call_shape_result.toBool()) return false;
+
     TestBytecode ordinary_size_error;
     TestBytecode optimized_size_error;
     ordinary_size_error.set_output_error(false);

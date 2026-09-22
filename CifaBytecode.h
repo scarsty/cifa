@@ -542,6 +542,7 @@ class CifaBytecode : public Cifa
         struct LocalSlot
         {
             size_t type_id = 0;
+            bool has_type = false;
             LocalStorage storage = LocalStorage::StaticValue;
         };
         std::pmr::vector<Parameter> parameters;
