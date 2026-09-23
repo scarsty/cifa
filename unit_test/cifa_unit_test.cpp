@@ -1927,6 +1927,7 @@ bool loop_and_recursion_execution_test()
         { "for (; true;) { return 7; }", 7 },
         { "value = 0; while (value < 500) { value++; } return value;", 500 },
         { "total = 0; for (int index = 0; index < 500; index++) { total += index; } return total;", 124750 },
+        { "total = 0; for (int index = -2; index < 3; index++) { total += index; } return total;", 0 },
         { "value = 0; do { value++; } while (value < 500); return value;", 500 },
         { "values = {1, 2, 3, 4, 5}; total = 0; for (value : values) { total += value; } return total;", 15 },
         { "value = 0; again: value++; if (value < 500) goto again; return value;", 500 },

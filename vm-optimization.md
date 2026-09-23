@@ -38,10 +38,168 @@
 | `22.38 / 20.00 / 16.20 ms` | 协议重构快照相对 `HEAD` | 2026-09-23，3 轮交错、每轮 21 PI 样本的均值：MSVC `24.40` -> `22.38 ms`（`-8.3%`）、clang-cl `21.22` -> `20.00 ms`（`-5.5%`）、高 inline clang `17.79` -> `16.20 ms`（`-9.0%`）。覆盖完整协议重构集，不能归因到单个 opcode。 |
 | `22.5446 ms` | 当前静态 CFG / Method / Range / verify 优化后的 MSVC PI | 2026-09-23，MSVC v145 `/O2 /DNDEBUG /MD`，21 个样本；均值 `22.5644 ms`，范围 `22.2952--22.8785 ms`，PI 返回 502 字符。不同重构阶段无冻结 A/B，作为当前测量记录，不单独归因。 |
 | `19.80 / 15.53 ms` | 冷诊断 resolver、延迟错误格式化并删除 current_source 执行状态 | 2026-09-23，最终 MSVC/clang-cl 高 inline 单批 PI 中位数；两者均 `PASS: all 14 outputs identical, characters=502`。此前不含最后 current_source 删除的 3 轮交错 A/B 已测得 MSVC `20.85` -> `20.17 ms`、clang-cl `15.92` -> `15.10 ms`；最终代码在同一 harness 下继续单批降至此行数值。 |
+| `2.727 / 3.179 ms` | Lua 风格剩余迭代计数 | 2026-09-23，`IntForPrep` 首次计算剩余轮数，`IntForNext` 只递减计数并回跳，避免每轮重新读取常量上界并执行 `next < limit`。同一 MSVC `/O2` 大循环基线 `3.238 / 3.438 ms` 降至空循环/增量循环 `2.727 / 3.179 ms`；对应 Lua `1.819 / 2.393 ms`，Cifa/Lua 为 `1.50x / 1.33x`。PI 14 次输出一致、长度 502；Debug 回归通过。 |
+
+### 2026-09-23：完整 int32 隔离实验与循环/数值操作边际成本
+
+完整 `int32_t` VM 只在 `build/int32-experiment/` 隔离副本中进行，未迁移到生产源码，实验目录及生成物已撤回。副本曾完成编译、单元测试、大循环和 PI 验证：PI 14 次输出一致、长度 502；单元测试为 `75/76`，唯一失败是仍要求默认整数为 `int64` 的 `cifa_int64_storage_test`。
+
+大循环的 60 样本中位数如下：
+
+| 配置 | 空循环 | 增量循环 | 相对 Lua |
+| --- | ---: | ---: | ---: |
+| Lua 5.4 | `1.771 ms` | `2.395 ms` | 基线 |
+| int32 MSVC `/O2` | `3.011 ms` | `3.399 ms` | 空 `1.70x`，增量 `1.42x` |
+| int32 clang-cl 高 inline | `2.699 ms` | `3.034 ms` | 空 `1.52x`，增量 `1.26x` |
+
+PI 优化字节码执行中位数为 MSVC int32 `约 19.895 ms`、clang-cl 高 inline int32 `约 16.877 ms`；当前生产 `int64` clang-cl 高 inline 基线约 `16.863 ms`。因此完整 int32 对 PI 没有可见收益，不应迁移到生产。
+
+这组大循环数据不能直接证明 Cifa 的数值操作比 Lua 快。更合理的拆分是用“增量循环 - 空循环”估计每轮 `value++` 的边际成本：int32 MSVC 约 `0.388 ms`，Lua 约 `0.624 ms`；int32 clang-cl 高 inline 约 `0.335 ms`，Lua 约 `0.638 ms`。这说明在该特定 benchmark 中，Cifa 的局部整数更新边际成本可能低于 Lua，但差值仍混合了循环体取值/写回、opcode 分派、计时噪声和两套 benchmark 的语义差异，不能等同于“Cifa 的所有数值操作都比 Lua 快”。
+
+要验证数值操作本身，应继续加入独立的同语义 A/B：固定循环控制、分别测 `value++`、`value += i`、整数乘法/除法和 double 运算，并同时报告空循环基线、动态指令计数及结果校验。
+
+#### Clang high inline 测试配置
+
+工程现在提供独立的 `clang-high` CMake preset，使用 VS2026 自带 Clang 22.1.3、独立构建目录
+`build/cmake-clang-high`，并通过 `CIFA_CLANG_HIGH_INLINE=ON` 为 `cifa` 及其测试目标加入
+`/clang:-mllvm /clang:-inline-threshold=10000`。以后 Clang 高 inline 回归使用：
+
+```text
+cmake --preset clang-high
+cmake --build build/cmake-clang-high --config Release --parallel 2
+ctest --test-dir build/cmake-clang-high -C Release --output-on-failure
+```
+
+2026-09-23 已验证 `regression`、`regression_pool`、`pmr_any` 三项全部通过。高 inline 配置不覆盖
+现有 MSVC `build/cmake`，两套构建目录可以独立复现。
+
+#### Lua 数值 for 的剩余计数借鉴
+
+Lua 5.4 的整数 `OP_FORLOOP` 不在每轮重新读取上界并比较当前索引，而是在 `OP_FORPREP` 阶段把可执行的剩余迭代数准备好；循环尾部只检查计数是否为零、递减计数、更新内部索引和控制变量，然后回跳。Cifa 原有 `IntForNext` 已经把递增、比较和回跳合并，但仍重复使用 `next < limit`。
+
+当前实现对已有的“整数控制变量 + 整数常量上界”专用循环增加了 `IntegerLoopState::remaining`：入口按无符号差值计算首轮之后的剩余次数，尾部用 `remaining-- != 0` 决定回跳。这样没有扩展此前已证明不安全的动态局部上界识别，也保留通用循环回退路径。
+
+验证结果：Debug `regression` 和 `regression_pool` 全部通过；PI 14 次输出完全一致、长度 502。另增加负起点循环测试 `for (int index = -2; index < 3; index++)`，结果为 0，覆盖计数初始化的有符号起点场景。
+
+当前生产 `int64` 版本随后用同一 `increment_loop_benchmark` 重测一批 60 样本：空循环 Cifa/Lua 为
+`3.238/1.763 ms`，增量循环 Cifa/Lua 为 `3.438/2.653 ms`，对应总耗时比为 `1.84x/1.30x`。
+本批的“增量减空循环”分别为 Cifa `0.200 ms`、Lua `0.890 ms`，方向上仍支持“Cifa 的局部整数更新边际成本可能较低”，但 Lua 本批增量样本的离散范围明显变宽，必须用多批交错 A/B 和更稳定的绑核/重复设计后才能把它当作数值操作结论。
 
 注：2026-09-15 的 dispatcher handler 拆分是在另一台 CPU 上测量的，而且基线已经包含 `2ab6301`（allocator
 和省掉不必要的 scoped guard）等改动。因此，不能把这组结果和上表的数字跨机器直接相减；独立结果见文末
 `## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）`。
+
+#### IntForNext 循环状态缓存与局部上界字节码对照
+
+在剩余迭代计数基础上，`IntForPrep` 现在还把固定的 `body` 和 `exit` PC 保存到
+`IntegerLoopState`。`IntForNext` 每轮直接使用这两个状态字段，不再重新读取
+`active_integer_loops_data` 中的循环描述。该改动没有扩展动态上界识别，也没有改变默认
+`int64_t` 语义。
+
+同一份 `build/increment_loop_benchmark.cpp` 还加入了局部上界字节码对照：循环体仍由 Cifa/Lua
+执行器运行，但上界先保存到被调用函数的局部变量 `limit`，不再是编译期可识别的整数常量。
+因此 Cifa 不会命中 `IntForPrep/IntForNext` 专用路径，而是保留
+`NumericCompareBranch + Branch + NumericForNext` 的通用路径。结果如下，均为 60 个样本的中位数，
+每个样本包含 32 次运行：
+
+| 配置 | Cifa 常量空循环 | Cifa 常量增量循环 | Cifa 局部上界空循环 | Cifa 局部上界增量循环 | Lua 局部上界空循环 | Lua 局部上界增量循环 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MSVC `/O2` | `2.409 ms` | `2.961 ms` | `6.609 ms` | `8.175 ms` | `1.779 ms` | `2.291 ms` |
+| Clang high inline | `2.643 ms` | `3.173 ms` | `5.154 ms` | `7.023 ms` | `1.770 ms` | `2.295 ms` |
+
+局部上界相对于常量上界明显变慢，说明当前主要额外成本来自通用比较、分支、局部槽读取和
+通用 `NumericForNext`，而不是宿主 C++ 循环本身。两者是不同 opcode 路径，不能把局部上界
+数据当成 `IntForNext` 专用路径的 A/B 加速结论。
+
+本轮还实际运行了 Clang high inline 的 PI benchmark：7 次优化字节码执行结果全部一致，结果长度为
+`502`，中位数 `14.5851 ms`。MSVC Debug 全量 CTest 的 `regression`、`regression_pool`、
+`pmr_any` 也全部通过。Clang high 的循环 benchmark 和 PI benchmark 均已单独运行，不只是构建或
+CTest 验证。
+
+#### 安全的局部整数上界专用化
+
+此前局部上界形式：
+
+```text
+int limit = 1000000;
+for (int i = 0; i < limit; i++) { ... }
+```
+
+会保留 `NumericCompareBranch + Branch + NumericForNext`，因为 C 风格 `for` 默认允许循环体
+修改 `limit`。本轮增加了受限专用化：只有右操作数是已初始化的静态整数局部、比较严格为 `<`、
+循环体没有写入上界、没有调用或控制流指令时，才把它转换为现有的 `IntForPrep + IntForNext`。
+循环描述新增 `limit_slot`，入口只读取一次该局部上界并计算剩余迭代数；常量上界仍使用原来的
+常量 `limit`。这不是按 slot 编号猜测，而是由局部初始化、循环体写集合和控制流限制共同保护。
+
+同一份百万次循环 benchmark 的中位数：
+
+| 配置 | 局部上界专用化前空/增量 | 专用化后空/增量 | Lua 局部上界空/增量 |
+| --- | ---: | ---: | ---: |
+| MSVC `/O2` | `6.609 / 8.175 ms` | `2.453 / 2.828 ms` | `1.748 / 2.222 ms` |
+| Clang high inline | `5.154 / 7.023 ms` | `2.706 / 3.102 ms` | `1.747 / 2.566 ms` |
+
+专用化把局部上界路径从约 `5--8 ns/次` 降到约 `2.5--3.1 ns/次`，接近常量上界路径，
+证明此前的主要额外成本确实是每轮条件比较、Branch 和通用 NumericForNext，而不是 Cifa
+循环语义本身。MSVC Debug 全量 CTest 与 Clang high 全量 CTest 均通过；Clang high PI 7 次
+结果一致、长度 `502`、中位数 `14.5967 ms`。
+
+#### 局部化整数循环拆分 active 分支
+
+常量上界专用循环进一步把 `IntForNext` 拆为 `IntForNextLocal`。编译器已知循环体没有读取
+控制变量时，`localize=true`，新 opcode 只递增 `IntegerLoopState::value` 和剩余计数，省掉
+每轮的 `active` 分支、控制槽读取和不可能执行的槽写回路径；需要保持控制变量实时写回的循环
+仍使用原 `IntForNext`。该拆分不改变剩余计数、退出 flush 或 C 风格循环的可观察值。
+
+同一 benchmark 重复运行后的代表性中位数：MSVC 空/增量为 `2.31 / 2.74 ms`，Clang high
+inline 为空/增量 `2.70 / 2.97 ms`；此前对应约 `2.52 / 3.03 ms` 和 `2.70 / 3.06 ms`。
+首次 MSVC 增量样本出现一次 `3.98 ms` 的瞬时异常，随后三次重复为 `2.74 ms` 左右，因此不
+把单次异常纳入收益结论。MSVC Debug、Clang high 全量 CTest 和 Clang high PI 均通过。
+
+#### C++ 局部计数器下界与常量上界内联实验
+
+为估计当前 VM 循环的目标，benchmark 另测了不经过 VM 的普通 C++ 紧循环：计数器是局部变量，
+每轮与常量 `1000000` 比较并递增。MSVC `/O2` 下为 `0.179 ms/百万次`；Clang high 若不阻止
+代数化简会得到虚假的 `0 ms`，因此该值只作为保守机器下界参考，不能直接和 Cifa opcode
+执行成本等同。当前 Cifa `IntForNextLocal` 约 `2.3--2.7 ms/百万次`，差距主要来自解释器
+取指、分派和状态维护。
+
+另试验了把常量 `int64_t` 上界直接加入热 `Instruction`。技术上可行；该上界只在
+`IntForPrep` 入口读取一次，`IntForNextLocal` 每轮使用的是 `remaining`，不会读取它。当前
+实际 `Instruction` 为约 `32B`，候选变为约 `40B`。MSVC `/O2` 交错五轮中，40B 候选的
+常量空循环中位数约快 `1.5%`，但常量增量循环约慢 `2.6%`；真实 PI workload 三轮中位数
+约慢 `1.5%`。因此不能说它“没有收益”：它确实改变了不同指令流的代码生成和布局；但目前
+没有稳定的整体收益，默认仍使用 32B 旁表版本。常量上界继续保存在 `IntegerLoop` 旁表中，
+局部变量上界通过 `limit_slot` 在入口读取一次。
+
+#### ScriptEnd 哨兵与 Lua 取指模型
+
+此前 Cifa 的解释器主循环在每条指令前执行 `pc >= active_instructions->code.size()`，这个检查
+既承担代码段结束判断，也承担无显式 `return` 时的函数返回。Lua 5.4 的 `luaV_execute()` 不
+以 `code.size()` 作为热循环终止条件，而是由 `vmfetch()` 直接执行 `i = *(pc++)`；函数返回
+由字节码中的 `OP_RETURN` 显式处理，调用帧切换不依赖取指越界。
+
+Cifa 现在对每个 root/function code 段追加内部 `ScriptEnd` 哨兵。解释器无条件取指并进入
+`switch`；`ScriptEnd` 在有 caller 时清空隐式返回槽并执行 `finish_call()`，root code 遇到
+它则结束本次执行。显式 `Return` 的值移动、返回类型转换和错误语义保持不变。该哨兵没有
+源码位置，是唯一被 verifier 允许没有 diagnostic source 的内部指令。
+
+MSVC `/O2` 交错 A/B（传统 `pc >= code.size()` 对照，ScriptEnd 候选）结果：百万次常量空循环
+和增量循环均稳定约快 `3.8--4.0%`；真实 PI workload 三轮七样本中位数分别为对照
+`20.5735/19.7852/19.8596 ms`、候选 `19.4077/19.8104/19.6016 ms`，方向偏正但存在
+系统噪声。Release CTest `3/3` 通过，故保留 ScriptEnd。
+
+#### switch case 源码顺序实验
+
+Clang high 汇编显示 `execute_instructions()` 使用 opcode jump table，因此 `case` 在 C++ 源码
+中的排列顺序不等于运行时匹配顺序。仍对 `IntIncrementLocal`、`IntForPrep`、`IntForNext`
+和 `IntForNextLocal` 做了“热 case 前置”A/B，只改变 handler 的源码布局，不改变 opcode 数值。
+
+MSVC `/O2` 三轮循环 benchmark 基本持平；PI 三轮为基线 `19.3534/19.7728/19.7299 ms`、
+热 case 前置 `19.4634/19.1273/19.3382 ms`，波动方向不稳定。Clang high 三轮循环中增量
+路径只有约 `0.3%--0.4%` 的轻微变化，空循环基本持平；PI 三轮基线为
+`18.044/18.1839/17.8562 ms`，热 case 前置为 `18.6179/18.7112/18.6166 ms`，稳定慢约
+`2.5%--4.3%`。因此不保留该排序优化：当前性能关键是 opcode 数值到 jump table 的映射和
+最终机器码布局，不能靠调整 `case` 书写顺序可靠获得收益。
 
 未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用。
 它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。

@@ -10,14 +10,14 @@ class CifaBytecode : public Cifa
     memory::Resource allocation_resource;
     friend class Cifa;
     // 最终执行流的操作码；构建期标记会在 compact() 中移出执行流。
-    enum class Opcode { Constant, ConstantLocal, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
+    enum class Opcode : std::uint8_t { Constant, ConstantLocal, Load, LoadLocal, DeclareLocal, StoreLocal, IncrementLocal, Add, Subtract, Multiply, Divide, Modulo, Less, Greater,
         LessEqual, GreaterEqual, Equal, NotEqual, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight,
         Positive, Negative, LogicalNot, BitNot, Cast, Size, MathUnary, MathBinary, Empty, Jump, Branch,
         AndBranch, OrBranch, LogicalAnd, LogicalOr, Return, ReleaseLocal,
         PrepareStore, Store, Increment, Switch,
         CallBegin, Call, Peek, Array, Index, IndexLocal, Range, MethodCheck,
         MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
-        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForNext, RegisterBinary, Exit, Removed };
+        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, RegisterBinary, ScriptEnd, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {
@@ -39,23 +39,23 @@ class CifaBytecode : public Cifa
     };
     struct RegisterSlots;
     struct Machine;
-    enum class WriteOperation { Assign, Add, Subtract, Multiply, Divide, Modulo, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight, PostAdd, PostSubtract, Invalid };
+    enum class WriteOperation : std::uint8_t { Assign, Add, Subtract, Multiply, Divide, Modulo, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight, PostAdd, PostSubtract, Invalid };
     static WriteOperation write_operation(const std::string& symbol);
     static std::optional<Opcode> write_opcode(WriteOperation operation);
     // 密封后的热执行指令，只保存运行时必需的操作数和控制信息。
     struct Instruction
     {
         Opcode opcode;
-        size_t operand = 0;
-        size_t auxiliary = 0;
-        size_t member_site = 0;
         WriteOperation write = WriteOperation::Assign;
-        size_t variable_site = 0;
-        size_t destination = 0;
-        size_t input_offset = 0;
-        size_t input_count = 0;
         bool discard_result = false;
         bool plain_increment = false; // Compiled syntax fact; no declaration/type binding.
+        std::uint32_t operand = 0;
+        std::uint32_t auxiliary = 0;
+        std::uint32_t member_site = 0;
+        std::uint32_t variable_site = 0;
+        std::uint32_t destination = 0;
+        std::uint32_t input_offset = 0;
+        std::uint32_t input_count = 0;
     };
     // 编译期指令，额外携带 SourceRef，seal() 后投影为热 Instruction。
     struct BuildInstruction
@@ -72,8 +72,6 @@ class CifaBytecode : public Cifa
         size_t input_count = 0;
         bool discard_result = false;
     };
-    static_assert(sizeof(Instruction) == 80);
-    static_assert(sizeof(BuildInstruction) == 88);
     // 与最终 PC 一一对应的冷诊断表，按需取得条件和赋值目标位置。
     struct InstructionDiagnostic
     {
@@ -106,6 +104,9 @@ class CifaBytecode : public Cifa
             std::int64_t limit;
             size_t body;
             size_t exit;
+            size_t control_slot = 0;
+            size_t limit_slot = std::numeric_limits<size_t>::max();
+            bool localize = false;
         };
         std::pmr::memory_resource* resource;
         explicit Instructions(std::pmr::memory_resource* value = std::pmr::get_default_resource()) : resource(value) {}
@@ -943,6 +944,9 @@ public:
         size_t call_site_count = 0;
         size_t total_instruction_count = 0;
         size_t integer_loop_count = 0;
+        size_t numeric_for_next_count = 0;
+        size_t int_for_prep_count = 0;
+        size_t int_for_next_count = 0;
         size_t total_operand_count = 0;
         std::vector<Function> functions;
     };

@@ -1001,9 +1001,13 @@ void CifaBytecode::seal(Instructions& instructions)
     instructions.code.clear();
     instructions.code.reserve(instructions.build_code.size());
     for (const auto& instruction : instructions.build_code)
-        instructions.code.push_back({instruction.opcode, instruction.operand, instruction.auxiliary, instruction.member_site,
-            instruction.write, instruction.variable_site, instruction.destination, instruction.input_offset,
-            instruction.input_count, instruction.discard_result});
+        instructions.code.push_back({instruction.opcode, instruction.write, instruction.discard_result, false,
+            static_cast<std::uint32_t>(instruction.operand), static_cast<std::uint32_t>(instruction.auxiliary),
+            static_cast<std::uint32_t>(instruction.member_site), static_cast<std::uint32_t>(instruction.variable_site),
+            static_cast<std::uint32_t>(instruction.destination), static_cast<std::uint32_t>(instruction.input_offset),
+            static_cast<std::uint32_t>(instruction.input_count)});
+    instructions.code.push_back({Opcode::ScriptEnd});
+    instructions.diagnostics.emplace_back();
     instructions.build_code.clear();
 }
 
@@ -1089,6 +1093,17 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     // Other conditions (including side effects and mutable bounds) retain the
     // ordinary update followed by full condition evaluation.
     instructions.integer_loops.clear();
+    const auto writes_local_slot = [&](const Instruction& candidate, size_t slot)
+    {
+        if (candidate.opcode == Opcode::StoreLocal || candidate.opcode == Opcode::IncrementLocal
+            || candidate.opcode == Opcode::NumericForNext || candidate.opcode == Opcode::IntIncrementLocal
+            || candidate.opcode == Opcode::IntForNext || candidate.opcode == Opcode::IntForNextLocal)
+            return candidate.operand == slot;
+        if (candidate.opcode == Opcode::ConstantLocal) return candidate.auxiliary == slot + 1;
+        if (candidate.opcode == Opcode::NumericBinaryLocal && candidate.auxiliary < instructions.numeric_operations.size())
+            return instructions.numeric_operations[candidate.auxiliary].destination == slot + 1;
+        return false;
+    };
     for (auto& instruction : instructions.code)
     {
         if (instruction.opcode == Opcode::IncrementLocal || instruction.opcode == Opcode::NumericForNext)
@@ -1101,25 +1116,19 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
         if (compare.opcode != Opcode::NumericCompareBranch
             || instructions.code[condition + 1].opcode != Opcode::Branch) continue;
         const auto& operation = instructions.numeric_operations[compare.auxiliary];
-        // A local integer compared with an integer literal using '<'. The local
-        // may be changed by the body; its current value/type is checked at runtime.
+        // A local integer compared with an integer literal using '<'.
         if (operation.flags != 4 || operation.left != instruction.operand
             || static_cast<Opcode>(operation.opcode) != Opcode::Less) continue;
         const auto* limit = constants[operation.right].value.get_if<std::int64_t>();
         if (!limit) continue;
-        instructions.integer_loops.push_back({*limit, condition + 2, compare.member_site});
+        instructions.integer_loops.push_back({*limit, condition + 2, compare.member_site, instruction.operand,
+            std::numeric_limits<size_t>::max(), false});
         instruction.member_site = instructions.integer_loops.size();
+        auto& entry = instructions.code[condition];
+        entry.opcode = Opcode::IntForPrep;
+        entry.operand = instruction.operand;
+        entry.member_site = instruction.member_site;
     }
-    const auto writes_local_slot = [&](const Instruction& candidate, size_t slot)
-    {
-        if (candidate.opcode == Opcode::StoreLocal || candidate.opcode == Opcode::IncrementLocal
-            || candidate.opcode == Opcode::NumericForNext || candidate.opcode == Opcode::IntIncrementLocal
-            || candidate.opcode == Opcode::IntForNext) return candidate.operand == slot;
-        if (candidate.opcode == Opcode::ConstantLocal) return candidate.auxiliary == slot + 1;
-        if (candidate.opcode == Opcode::NumericBinaryLocal && candidate.auxiliary < instructions.numeric_operations.size())
-            return instructions.numeric_operations[candidate.auxiliary].destination == slot + 1;
-        return false;
-    };
     const auto initialized_as_integer = [&](size_t slot, size_t before)
     {
         for (size_t pc = before; pc > 0; --pc)
@@ -1136,23 +1145,73 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     for (size_t next_pc = 0; next_pc < instructions.code.size(); ++next_pc)
     {
         auto& next = instructions.code[next_pc];
-        if (next.opcode != Opcode::NumericForNext || next.member_site == 0) continue;
-        auto& loop = instructions.integer_loops[next.member_site - 1];
+        if (next.opcode != Opcode::NumericForNext) continue;
+        Instructions::IntegerLoop* loop = next.member_site == 0 ? nullptr
+            : &instructions.integer_loops[next.member_site - 1];
+        if (loop == nullptr)
+        {
+            const size_t condition = next.auxiliary;
+            if (condition + 1 >= instructions.code.size()) continue;
+            auto& compare = instructions.code[condition];
+            if (compare.opcode != Opcode::NumericCompareBranch
+                || instructions.code[condition + 1].opcode != Opcode::Branch)
+                continue;
+            const auto& operation = instructions.numeric_operations[compare.auxiliary];
+            if (operation.flags != 0 || operation.left != next.operand
+                || static_cast<Opcode>(operation.opcode) != Opcode::Less
+                || !initialized_as_integer(operation.right, condition))
+                continue;
+            bool limit_written = false;
+            bool complex_body = false;
+            for (size_t pc = condition + 2; pc < next_pc; ++pc)
+            {
+                const auto& candidate = instructions.code[pc];
+                if (writes_local_slot(candidate, operation.right)) limit_written = true;
+                if (candidate.opcode == Opcode::CallBegin || candidate.opcode == Opcode::Call
+                    || candidate.opcode == Opcode::Jump || candidate.opcode == Opcode::Branch
+                    || candidate.opcode == Opcode::Return || candidate.opcode == Opcode::Exit)
+                    complex_body = true;
+            }
+            if (limit_written || complex_body) continue;
+            instructions.integer_loops.push_back({0, condition + 2, compare.member_site, next.operand,
+                operation.right, false});
+            next.member_site = instructions.integer_loops.size();
+            compare.opcode = Opcode::IntForPrep;
+            compare.operand = next.operand;
+            compare.member_site = next.member_site;
+            loop = &instructions.integer_loops.back();
+        }
+        auto& loop_state = *loop;
         if (!initialized_as_integer(next.operand, next.auxiliary)) continue;
         bool induction_written = false;
-        for (size_t pc = loop.body; pc < next_pc; ++pc)
+        for (size_t pc = loop_state.body; pc < next_pc; ++pc)
             if (writes_local_slot(instructions.code[pc], next.operand)) { induction_written = true; break; }
         if (induction_written) continue;
+        bool control_observed = false;
+        for (size_t pc = loop_state.body; pc < next_pc; ++pc)
+        {
+            const auto& candidate = instructions.code[pc];
+            if (candidate.opcode == Opcode::LoadLocal && candidate.operand == loop_state.control_slot)
+            { control_observed = true; break; }
+            if (candidate.opcode == Opcode::NumericBinaryLocal
+                && candidate.auxiliary < instructions.numeric_operations.size())
+            {
+                const auto& numeric = instructions.numeric_operations[candidate.auxiliary];
+                if (numeric.left == loop_state.control_slot || numeric.right == loop_state.control_slot)
+                { control_observed = true; break; }
+            }
+        }
+        loop_state.localize = !control_observed;
         if (next.write != WriteOperation::Add && next.write != WriteOperation::PostAdd) continue;
-        next.opcode = Opcode::IntForNext;
-        for (size_t pc = loop.body; pc < next_pc; ++pc)
+        next.opcode = loop_state.localize ? Opcode::IntForNextLocal : Opcode::IntForNext;
+        for (size_t pc = loop_state.body; pc < next_pc; ++pc)
         {
             auto& increment = instructions.code[pc];
             if (increment.opcode != Opcode::IncrementLocal || !increment.discard_result
                 || (increment.write != WriteOperation::Add && increment.write != WriteOperation::PostAdd)
-                || !initialized_as_integer(increment.operand, loop.body)) continue;
+                || !initialized_as_integer(increment.operand, loop_state.body)) continue;
             bool written_elsewhere = false;
-            for (size_t other = loop.body; other < next_pc; ++other)
+            for (size_t other = loop_state.body; other < next_pc; ++other)
                 if (other != pc && writes_local_slot(instructions.code[other], increment.operand))
                 { written_elsewhere = true; break; }
             if (!written_elsewhere) increment.opcode = Opcode::IntIncrementLocal;
@@ -2856,13 +2915,13 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         {
             if (instruction.auxiliary > 2)
             { translation_error = "bytecode range frame mismatch"; return false; }
-            instructions.range_count = (std::max)(instructions.range_count, instruction.operand + 1);
+            instructions.range_count = (std::max)(instructions.range_count, static_cast<size_t>(instruction.operand) + 1);
         }
         if (instruction.opcode == Opcode::Switch)
         {
             if (instruction.auxiliary > 4)
             { translation_error = "bytecode switch frame mismatch"; return false; }
-            instructions.switch_count = (std::max)(instructions.switch_count, instruction.operand + 1);
+            instructions.switch_count = (std::max)(instructions.switch_count, static_cast<size_t>(instruction.operand) + 1);
         }
         if (static_cast<unsigned>(instruction.opcode) > static_cast<unsigned>(Opcode::Removed))
         { translation_error = "invalid bytecode opcode"; return false; }
@@ -2897,7 +2956,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             || instruction.opcode == Opcode::AndBranch || instruction.opcode == Opcode::OrBranch)
             && instruction.operand > instructions.code.size())
         { translation_error = "bytecode jump out of range"; return false; }
-        if ((instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntForNext)
+        if ((instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntForPrep
+            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
             && instruction.auxiliary > instructions.code.size())
         { translation_error = "bytecode for jump out of range"; return false; }
         if (instruction.opcode == Opcode::ReleaseLocal && instruction.operand >= local_slot_count)
@@ -2916,7 +2976,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             || index_sites[instruction.auxiliary].type_id >= names.size()))
         { translation_error = "invalid bytecode index descriptor"; return false; }
         const auto& diagnostic = instructions.diagnostics[pc];
-        if (diagnostic.source.id == 0 || diagnostic.source.id > sources.size())
+        if (instruction.opcode != Opcode::ScriptEnd
+            && (diagnostic.source.id == 0 || diagnostic.source.id > sources.size()))
         {
             translation_error = "bytecode instruction has no source";
             return false;
@@ -2940,12 +3001,13 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         { translation_error = "invalid bytecode variable name"; return false; }
         if (instruction.opcode == Opcode::Store || instruction.opcode == Opcode::StoreLocal
             || instruction.opcode == Opcode::Increment || instruction.opcode == Opcode::IncrementLocal
-            || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
-            || instruction.opcode == Opcode::IntForNext)
+            || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntForPrep
+            || instruction.opcode == Opcode::IntIncrementLocal
+            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
         {
             const bool increment = instruction.opcode == Opcode::Increment || instruction.opcode == Opcode::IncrementLocal
                 || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
-                || instruction.opcode == Opcode::IntForNext;
+                || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal;
             const bool valid_increment = instruction.write == WriteOperation::Add || instruction.write == WriteOperation::Subtract
                 || instruction.write == WriteOperation::PostAdd || instruction.write == WriteOperation::PostSubtract;
             if ((increment && !valid_increment) || (!increment && instruction.write > WriteOperation::ShiftRight))
@@ -3001,8 +3063,9 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         }
         if ((instruction.opcode == Opcode::LoadLocal || instruction.opcode == Opcode::DeclareLocal
             || instruction.opcode == Opcode::StoreLocal || instruction.opcode == Opcode::IncrementLocal
-            || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
-            || instruction.opcode == Opcode::IntForNext)
+            || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntForPrep
+            || instruction.opcode == Opcode::IntIncrementLocal
+            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
             && instruction.operand >= local_slot_count)
         {
             translation_error = "bytecode local slot out of range";
@@ -3010,7 +3073,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         }
         if (instruction.opcode == Opcode::StoreLocal || instruction.opcode == Opcode::IncrementLocal
             || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
-            || instruction.opcode == Opcode::IntForNext
+            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal
             || instruction.opcode == Opcode::DeclareLocal || (instruction.opcode == Opcode::Range && instruction.auxiliary == 1)
             || ((instruction.opcode == Opcode::Load || instruction.opcode == Opcode::Peek) && instruction.auxiliary != 1))
         {
@@ -3047,6 +3110,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             break;
         case Opcode::Exit:
             continue;
+        case Opcode::ScriptEnd:
+            continue;
         case Opcode::Removed:
             break;
         case Opcode::MethodCheck:
@@ -3059,7 +3124,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             if (instruction.operand >= calls.size() || instruction.auxiliary > calls[instruction.operand].arguments.size()
                 || register_top < instruction.auxiliary)
             { translation_error = "invalid method operand"; return false; }
-            instructions.method_scratch_count = (std::max)(instructions.method_scratch_count, instruction.auxiliary);
+            instructions.method_scratch_count = (std::max)(instructions.method_scratch_count, static_cast<size_t>(instruction.auxiliary));
             register_top = register_top - instruction.auxiliary + 1;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
@@ -3176,11 +3241,12 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                 register_top -= index_sites[instruction.operand - 1].dimensions;
             break;
         case Opcode::Increment: case Opcode::IncrementLocal: case Opcode::NumericForNext:
-        case Opcode::IntIncrementLocal: case Opcode::IntForNext:
+        case Opcode::IntIncrementLocal: case Opcode::IntForPrep: case Opcode::IntForNext: case Opcode::IntForNextLocal:
             if (instruction.opcode == Opcode::Increment && instruction.operand != 0 && instruction.operand - 1 >= index_sites.size())
             { translation_error = "invalid bytecode index descriptor"; return false; }
             if (instruction.opcode == Opcode::IncrementLocal || instruction.opcode == Opcode::NumericForNext
-                || instruction.opcode == Opcode::IntIncrementLocal || instruction.opcode == Opcode::IntForNext)
+                || instruction.opcode == Opcode::IntIncrementLocal || instruction.opcode == Opcode::IntForPrep
+                || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
             {
                 ++register_top;
                 if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
@@ -3302,6 +3368,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             case Opcode::Positive: case Opcode::Negative: case Opcode::LogicalNot:
             case Opcode::BitNot: case Opcode::Cast:
                 return 1;
+            case Opcode::IntForPrep:
+                return 0;
             case Opcode::Index:
                 return instruction.operand;
             case Opcode::PrepareStore:
@@ -3426,7 +3494,7 @@ std::string CifaBytecode::dump_instruction_listing() const
             "CallBegin", "Call", "Peek", "Array", "Index", "IndexLocal", "Range",
             "MethodCheck", "MethodCall", "MethodPush", "ArrayPushGlobal",
             "ArrayPushGlobalLocal", "Member", "NumericBinary", "NumericBinaryLocal",
-            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForNext", "RegisterBinary", "Exit", "Removed",
+            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForPrep", "IntForNext", "IntForNextLocal", "RegisterBinary", "ScriptEnd", "Exit", "Removed",
         };
         std::format_to(std::back_inserter(text), "--- {} ({} instructions, registers={} temporaries={}) ---\n",
             tag, instr.code.size(), instr.register_capacity, instr.temporary_count);
@@ -3750,6 +3818,15 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
     {
         struct SwitchState { size_t condition_slot = 0; bool active = false; };
         struct RangeState { size_t snapshot_slot = 0; size_t index = 0; };
+        struct IntegerLoopState
+        {
+            std::int64_t value = 0;
+            std::uint64_t remaining = 0;
+            size_t body = 0;
+            size_t exit = 0;
+            bool active = false;
+        };
+        static constexpr size_t inline_integer_loop_count = 4;
         struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
         struct Frame
         {
@@ -3764,6 +3841,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             const std::pmr::vector<FunctionCode::LocalSlot>* local_slots;
             const SourceLocation* call;
             std::pmr::vector<RangeState> ranges;
+            std::array<IntegerLoopState, inline_integer_loop_count> inline_integer_loops{};
+            std::pmr::vector<IntegerLoopState> integer_loops;
             const Module* owner;
             std::shared_ptr<const Module> module;
             size_t register_base;
@@ -3780,6 +3859,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         RegisterSlots*& active_locals;
         std::pmr::vector<SwitchState>& switches;
         std::pmr::vector<RangeState>& ranges;
+        std::array<IntegerLoopState, inline_integer_loop_count>& inline_integer_loops;
+        std::pmr::vector<IntegerLoopState>& integer_loop_states;
         std::optional<RangeBinding>& range_binding;
         std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>>& global_links;
         std::pmr::vector<size_t>*& active_globals;
@@ -3871,6 +3952,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             registers.restore(saved.register_base, saved.register_size, saved.register_top);
             switches = std::move(saved.switches);
             ranges = std::move(saved.ranges);
+            inline_integer_loops = saved.inline_integer_loops;
+            integer_loop_states = std::move(saved.integer_loops);
             active_owner = saved.owner;
             active_globals = &link_globals(active_owner);
             active_module = std::move(saved.module);
@@ -3882,6 +3965,24 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             active_function = std::move(saved.function);
             active_call = saved.call;
             pc = saved.pc;
+        }
+
+        void flush_integer_loop(size_t loop_site)
+        {
+            if (loop_site == 0 || loop_site > active_instructions->integer_loops.size()) return;
+            const size_t loop_index = loop_site - 1;
+            auto& state = loop_index < inline_integer_loop_count
+                ? inline_integer_loops[loop_index] : integer_loop_states[loop_index - inline_integer_loop_count];
+            const auto& loop = active_instructions->integer_loops[loop_site - 1];
+            if (!state.active || !loop.localize) return;
+            active_values_data[loop.control_slot].value.emplace<std::int64_t>(state.value);
+            state.active = false;
+        }
+
+        IntegerLoopState& integer_loop_state(size_t loop_index)
+        {
+            return loop_index < inline_integer_loop_count
+                ? inline_integer_loops[loop_index] : integer_loop_states[loop_index - inline_integer_loop_count];
         }
 
         bool op_index(const Instruction& instruction);
@@ -4156,7 +4257,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             if (machine.should_stop()) { result = machine.error_result(); return false; }
             frames.push_back({active_instructions, active_node, pc, pc - 1, output,
                 active_locals, std::move(switches), active_function, active_local_slots, active_call,
-                std::move(ranges), active_owner, std::move(active_module),
+                std::move(ranges), inline_integer_loops, std::move(integer_loop_states), active_owner, std::move(active_module),
                 caller_base, caller_size, caller_top});
             active_function = cached;
             active_local_slots = &cached->local_slots;
@@ -4175,6 +4276,9 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             active_locals = local_values;
             switches.assign(active_instructions->switch_count, {});
             ranges.assign(active_instructions->range_count, {});
+            inline_integer_loops = {};
+            integer_loop_states.assign(active_instructions->integer_loops.size() > InterpState::inline_integer_loop_count
+                ? active_instructions->integer_loops.size() - InterpState::inline_integer_loop_count : 0, {});
             return_states.emplace_back();
             return_states.back().return_type = cached->return_type;
             pc = 0;
@@ -4911,6 +5015,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     using Frame = InterpState::Frame;
     std::pmr::vector<SwitchState> switches(instructions.switch_count, persistent);
     std::pmr::vector<RangeState> ranges(instructions.range_count, persistent);
+    std::array<InterpState::IntegerLoopState, InterpState::inline_integer_loop_count> inline_integer_loops{};
+    std::pmr::vector<InterpState::IntegerLoopState> integer_loop_states(
+        instructions.integer_loops.size() > InterpState::inline_integer_loop_count
+            ? instructions.integer_loops.size() - InterpState::inline_integer_loop_count : 0, persistent);
     std::optional<RangeBinding> range_binding;
     std::pmr::deque<RegisterSlots> local_windows(persistent);
     local_windows.emplace_back(module.local_slot_count, machine.host.allocation_resource);
@@ -5027,7 +5135,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         ~RestoreReturns() { states.resize(size); }
     } restore_returns{return_states, return_base};
     InterpState interp{machine, interpreter, registers, result, frames, local_windows,
-        active_locals, switches, ranges, range_binding, global_links, active_globals, active_owner, active_module,
+        active_locals, switches, ranges, inline_integer_loops, integer_loop_states, range_binding, global_links, active_globals, active_owner, active_module,
         active_instructions, active_locals->values.data() + active_locals->base(), active_instructions->integer_loops.data(),
         active_node, active_function, active_local_slots, active_call, return_states,
         register_assignment_source, error_pc, pc, missing_global, persistent, execution_scratch};
@@ -5035,20 +5143,20 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     auto& active_integer_loops_data = interp.active_integer_loops_data;
     while (true)
     {
-        if (pc >= active_instructions->code.size())
-        {
-            if (frames.empty()) break;
-            auto& caller = frames.back();
-            RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
-            return_value.clear(0);
-            interp.finish_call();
-            continue;
-        }
         const auto& instruction = active_instructions->code[pc++];
         error_pc = pc - 1;
         const size_t output = instruction.destination;
         switch (instruction.opcode)
         {
+        case Opcode::ScriptEnd:
+            if (frames.empty()) return false;
+            {
+                auto& caller = frames.back();
+                RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
+                return_value.clear(0);
+            }
+            interp.finish_call();
+            continue;
         case Opcode::Exit:
             machine.exit_requested = true;
             result = Object();
@@ -5067,12 +5175,58 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             ++integer;
             continue;
         }
+        case Opcode::IntForPrep:
+        {
+            const std::int64_t integer = value_get<std::int64_t>(active_values_data[instruction.operand].value);
+            const size_t loop_index = instruction.member_site - 1;
+            const auto& loop = active_integer_loops_data[loop_index];
+            auto& loop_state = interp.integer_loop_state(loop_index);
+            const std::int64_t limit = loop.limit_slot == std::numeric_limits<size_t>::max()
+                ? loop.limit : value_get<std::int64_t>(active_values_data[loop.limit_slot].value);
+            loop_state.value = integer;
+            loop_state.remaining = integer < limit
+                ? static_cast<std::uint64_t>(limit) - static_cast<std::uint64_t>(integer) - 1 : 0;
+            loop_state.body = loop.body;
+            loop_state.exit = loop.exit;
+            loop_state.active = loop.localize;
+            pc = integer < limit ? loop.body : loop.exit;
+            if (pc == loop.exit) interp.flush_integer_loop(instruction.member_site);
+            continue;
+        }
         case Opcode::IntForNext:
         {
-            auto& integer = value_get<std::int64_t>(active_values_data[instruction.operand].value);
-            ++integer;
-            const auto& loop = active_integer_loops_data[instruction.member_site - 1];
-            pc = integer < loop.limit ? loop.body : loop.exit;
+            const size_t loop_index = instruction.member_site - 1;
+            auto& loop_state = interp.integer_loop_state(loop_index);
+            const std::int64_t integer = loop_state.active
+                ? loop_state.value : value_get<std::int64_t>(active_values_data[instruction.operand].value);
+            const std::int64_t next_integer = integer + 1;
+            if (loop_state.active)
+                loop_state.value = next_integer;
+            else active_values_data[instruction.operand]
+                .value.emplace<std::int64_t>(next_integer);
+            if (loop_state.remaining != 0)
+            {
+                --loop_state.remaining;
+                pc = loop_state.body;
+                continue;
+            }
+            pc = loop_state.exit;
+            interp.flush_integer_loop(instruction.member_site);
+            continue;
+        }
+        case Opcode::IntForNextLocal:
+        {
+            const size_t loop_index = instruction.member_site - 1;
+            auto& loop_state = interp.integer_loop_state(loop_index);
+            ++loop_state.value;
+            if (loop_state.remaining != 0)
+            {
+                --loop_state.remaining;
+                pc = loop_state.body;
+                continue;
+            }
+            pc = loop_state.exit;
+            interp.flush_integer_loop(instruction.member_site);
             continue;
         }
         case Opcode::Constant:
@@ -5297,7 +5451,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     else --*integer;
                     if (instruction.member_site != 0) {
                         const auto& loop = active_instructions->integer_loops[instruction.member_site - 1];
-                        pc = *integer < loop.limit ? loop.body : loop.exit;
+                        const std::int64_t limit = loop.limit;
+                        pc = *integer < limit ? loop.body : loop.exit;
                     }
                     else pc = instruction.auxiliary;
                     continue;
@@ -5309,7 +5464,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     *floating += add ? 1.0 : -1.0;
                     if (instruction.member_site != 0) {
                         const auto& loop = active_instructions->integer_loops[instruction.member_site - 1];
-                        pc = *floating < static_cast<double>(loop.limit) ? loop.body : loop.exit;
+                        const std::int64_t limit = loop.limit;
+                        pc = *floating < static_cast<double>(limit) ? loop.body : loop.exit;
                     }
                     else pc = instruction.auxiliary;
                     continue;
@@ -7326,6 +7482,17 @@ CifaBytecode::BytecodeStatistics CifaBytecode::bytecode_statistics() const
     statistics.total_instruction_count = statistics.root_instruction_count;
     statistics.integer_loop_count = module_data->root_instructions.integer_loops.size();
     statistics.total_operand_count = statistics.root_operand_count;
+    const auto count_loop_opcodes = [&](const Instructions& instructions)
+    {
+        for (const auto& instruction : instructions.code)
+        {
+            if (instruction.opcode == Opcode::NumericForNext) ++statistics.numeric_for_next_count;
+            else if (instruction.opcode == Opcode::IntForPrep) ++statistics.int_for_prep_count;
+            else if (instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
+                ++statistics.int_for_next_count;
+        }
+    };
+    count_loop_opcodes(module_data->root_instructions);
     for (const auto& [name, overloads] : module_data->function_code)
     {
         for (const auto& [arity, function] : overloads)
@@ -7335,6 +7502,7 @@ CifaBytecode::BytecodeStatistics CifaBytecode::bytecode_statistics() const
             statistics.total_instruction_count += function->instructions.code.size();
             statistics.integer_loop_count += function->instructions.integer_loops.size();
             statistics.total_operand_count += function->instructions.register_inputs.size();
+            count_loop_opcodes(function->instructions);
         }
     }
     std::ranges::sort(statistics.functions, {}, [](const BytecodeStatistics::Function& function)
