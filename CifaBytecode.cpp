@@ -16,6 +16,13 @@
 #if !defined(CIFA_NOINLINE)
 #define CIFA_NOINLINE
 #endif
+#if defined(_MSC_VER)
+#define CIFA_COLD_NOINLINE __declspec(noinline)
+#elif defined(__clang__) || defined(__GNUC__)
+#define CIFA_COLD_NOINLINE __attribute__((noinline, cold))
+#else
+#define CIFA_COLD_NOINLINE
+#endif
 
 namespace cifa
 {
@@ -3785,7 +3792,6 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         const FunctionCode*& active_function;
         const std::pmr::vector<FunctionCode::LocalSlot>*& active_local_slots;
         const SourceLocation*& active_call;
-        const SourceLocation*& current_source;
         std::pmr::vector<Machine::ReturnState>& return_states;
         SourceRef& register_assignment_source;
         size_t& error_pc;
@@ -3803,7 +3809,14 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         }
         const SourceLocation& current_location()
         {
+            machine.runtime_location_kind = Machine::RuntimeLocationKind::Instruction;
+            machine.runtime_location_pc = error_pc;
             return *active_node;
+        }
+        void mark_error_location(Machine::RuntimeLocationKind kind)
+        {
+            machine.runtime_location_kind = kind;
+            machine.runtime_location_pc = error_pc;
         }
         std::pmr::vector<size_t>& link_globals(const Module* owner)
         {
@@ -3892,6 +3905,7 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
     };
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_index(const Instruction& instruction)
 {
+    mark_error_location(Machine::RuntimeLocationKind::Condition);
     const size_t output = instruction.destination;
         const auto& site = active_owner->index_sites[instruction.auxiliary];
         const auto& name = active_owner->names[site.name_id];
@@ -3995,6 +4009,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_index(const Instruction& instru
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_index_local(const Instruction& instruction)
 {
+    mark_error_location(Machine::RuntimeLocationKind::Condition);
     const size_t output = instruction.destination;
         const auto& site = active_owner->index_sites[instruction.auxiliary];
         const auto& name = active_owner->names[site.name_id];
@@ -4172,7 +4187,8 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_store_increment(const Instruction& instruction)
 {
     const size_t output = instruction.destination;
-        const auto& source = current_location();
+        mark_error_location(Machine::RuntimeLocationKind::Target);
+        const auto& source = *active_node;
         const bool increment = instruction.opcode == Opcode::Increment;
         const bool member = instruction.member_site != 0;
         const bool indexed = instruction.operand != 0;
@@ -4263,7 +4279,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_register_binary(const Instructi
         const size_t slot = site.code.destination - 1;
         const auto& binding = active_owner->variable_sites[site.variable_site - 1];
         register_assignment_source = site.assignment_source;
-        current_source = &active_owner->source(site.assignment_source);
+        mark_error_location(Machine::RuntimeLocationKind::Assignment);
         if (binding.with_type)
             machine.bind_type(*active_locals, slot, active_owner->names[binding.type_id], current_location());
         if (!machine.should_stop()) machine.assign(*active_locals, slot, registers, value_slot, scratch, current_location());
@@ -4356,6 +4372,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_push(const Instruction& 
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_array_push_global_local(const Instruction& instruction)
 {
+    mark_error_location(Machine::RuntimeLocationKind::Condition);
     const size_t output = instruction.destination;
         const auto& site = active_owner->calls[instruction.operand];
         const size_t local_slot = instruction.auxiliary - 1;
@@ -4454,6 +4471,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_call(const Instruction& 
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_range_next(const Instruction& instruction)
 {
+    mark_error_location(Machine::RuntimeLocationKind::Target);
     const size_t output = instruction.destination;
         auto& state = ranges.at(instruction.operand);
         auto* snapshot = registers.resource_payload(state.snapshot_slot).resource<VmArray>();
@@ -4549,6 +4567,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call_begin(const Instruction& i
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_prepare_store(const Instruction& instruction)
 {
     const size_t output = instruction.destination;
+        mark_error_location(Machine::RuntimeLocationKind::Target);
         const auto& target = *active_node;
         if (instruction.member_site != 0)
         {
@@ -4698,6 +4717,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_numeric_binary_local(const Inst
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_size(const Instruction& instruction)
 {
+    mark_error_location(Machine::RuntimeLocationKind::Target);
     const size_t output = instruction.destination;
         if (instruction.auxiliary == 1)
         {
@@ -4721,7 +4741,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_size(const Instruction& instruc
         if (length) registers.write_payload(output, double(*length));
         else
         {
-            const auto& location = current_location();
+            const auto& location = *active_node;
             machine.set_error("function 'size' requires a string, array, or map", &location);
             result = machine.error_result();
             return false;
@@ -4907,7 +4927,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     const FunctionCode* active_function = nullptr;
     const std::pmr::vector<FunctionCode::LocalSlot>* active_local_slots = &module.local_slots;
     const SourceLocation* active_call = nullptr;
-    const SourceLocation* current_source = nullptr;
     size_t error_pc = start;
     size_t pc = start;
     SourceRef register_assignment_source;
@@ -4953,26 +4972,46 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             machine.runtime_location_marker = marker;
         }
     } restore_runtime_resolver{machine, std::move(previous_runtime_resolver), previous_runtime_marker};
-    machine.resolve_runtime_location = [&active_owner, &active_instructions, &active_node, &error_pc]() -> const SourceLocation*
+    machine.resolve_runtime_location = [&machine, &active_owner, &active_instructions, &active_node,
+        &register_assignment_source, &error_pc]() -> const SourceLocation*
     {
         if (active_instructions != nullptr && error_pc < active_instructions->diagnostics.size())
         {
-            const auto source = active_instructions->diagnostics[error_pc].source;
+            const auto& diagnostic = active_instructions->diagnostics[error_pc];
+            auto source = diagnostic.source;
+            if (machine.runtime_location_pc == error_pc)
+            {
+                if (machine.runtime_location_kind == Machine::RuntimeLocationKind::Condition
+                    && diagnostic.condition_source.id != 0)
+                    source = diagnostic.condition_source;
+                else if (machine.runtime_location_kind == Machine::RuntimeLocationKind::Target
+                    && diagnostic.target_source.id != 0)
+                    source = diagnostic.target_source;
+                else if (machine.runtime_location_kind == Machine::RuntimeLocationKind::Assignment
+                    && register_assignment_source.id != 0)
+                    source = register_assignment_source;
+            }
             if (source.id != 0) return &active_owner->source(source);
         }
         return active_node;
     };
     machine.runtime_location_marker = active_node;
-    Object::set_runtime_error_reporter([&machine, &active_owner, &active_instructions, &active_node, &current_source, &error_pc](const std::string& message, const Object* value)
+    const bool previous_defer_error_formatting = machine.defer_error_formatting;
+    machine.defer_error_formatting = true;
+    struct FinalizeDeferredError
+    {
+        Machine& machine;
+        bool previous;
+        ~FinalizeDeferredError()
         {
-            const auto* location = current_source;
-            if (location == nullptr && active_instructions != nullptr && error_pc < active_instructions->diagnostics.size())
-            {
-                const auto source = active_instructions->diagnostics[error_pc].source;
-                location = source.id != 0 ? &active_owner->source(source) : active_node;
-            }
-            if (value != nullptr && value->getSpecialType() == "NoValue") machine.set_no_value_error(*value, location);
-            else machine.set_error(message, location);
+            machine.finalize_error();
+            machine.defer_error_formatting = previous;
+        }
+    } finalize_deferred_error{machine, previous_defer_error_formatting};
+    Object::set_runtime_error_reporter([&machine](const std::string& message, const Object* value)
+        {
+            if (value != nullptr && value->getSpecialType() == "NoValue") machine.set_no_value_error(*value);
+            else machine.set_error(message);
         });
     struct RestoreObjectReporter
     {
@@ -4990,7 +5029,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     InterpState interp{machine, interpreter, registers, result, frames, local_windows,
         active_locals, switches, ranges, range_binding, global_links, active_globals, active_owner, active_module,
         active_instructions, active_locals->values.data() + active_locals->base(), active_instructions->integer_loops.data(),
-        active_node, active_function, active_local_slots, active_call, current_source, return_states,
+        active_node, active_function, active_local_slots, active_call, return_states,
         register_assignment_source, error_pc, pc, missing_global, persistent, execution_scratch};
     auto& active_values_data = interp.active_values_data;
     auto& active_integer_loops_data = interp.active_integer_loops_data;
@@ -5008,7 +5047,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         const auto& instruction = active_instructions->code[pc++];
         error_pc = pc - 1;
         const size_t output = instruction.destination;
-        current_source = nullptr;
         switch (instruction.opcode)
         {
         case Opcode::Exit:
@@ -5059,6 +5097,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::Branch:
         {
+            interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             registers.clear(interp.input_slot(instruction, instruction.input_count - 1));
@@ -5067,6 +5106,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::AndBranch:
         {
+            interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (!condition)
@@ -5078,6 +5118,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         case Opcode::OrBranch:
         {
+            interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             if (condition)
@@ -5838,11 +5879,16 @@ const CifaBytecode::SourceLocation* CifaBytecode::Machine::resolve_error_locatio
     return location;
 }
 
-void CifaBytecode::Machine::set_error(std::string message, const SourceLocation* location)
+CIFA_COLD_NOINLINE void CifaBytecode::Machine::finalize_error()
 {
-    if (!error.empty()) return;
-    location = resolve_error_location(location);
-    error = "Runtime Error: " + std::move(message) + "\n";
+    if (!error.empty() || pending_error_kind == PendingErrorKind::None) return;
+    const auto kind = pending_error_kind;
+    const auto* location = resolve_error_location(pending_error_location);
+    if (kind == PendingErrorKind::Message)
+        error = "Runtime Error: " + std::move(pending_error_message) + "\n";
+    else
+        error = "Runtime Error: function '" + pending_no_value_name
+            + "' has no return value\nNo return value originated at:\n" + pending_no_value_origin;
     std::pmr::vector<const SourceLocation*> frames(host.allocation_resource.get());
     std::pmr::vector<bool> function_frames(host.allocation_resource.get());
     decltype(call_stack) diagnostic_frames(call_stack, host.allocation_resource.get());
@@ -5852,7 +5898,10 @@ void CifaBytecode::Machine::set_error(std::string message, const SourceLocation*
         frames.push_back(frame.first);
         function_frames.push_back(frame.second);
     }
-    if (location != nullptr && (frames.empty() || frames.back() != location))
+    if (kind == PendingErrorKind::NoValue) error.push_back('\n');
+    if (location != nullptr
+        && (kind != PendingErrorKind::NoValue || format_frame(*location) != pending_no_value_origin)
+        && (frames.empty() || frames.back() != location))
     {
         frames.push_back(location);
         function_frames.push_back(false);
@@ -5878,6 +5927,30 @@ void CifaBytecode::Machine::set_error(std::string message, const SourceLocation*
         error += "  at " + (newline == std::string::npos ? formatted : formatted.substr(0, newline)) + "\n";
         if (newline != std::string::npos) error += "     " + formatted.substr(newline + 1) + "\n";
     }
+    pending_error_kind = PendingErrorKind::None;
+    pending_error_location = nullptr;
+    pending_error_message.clear();
+    pending_no_value_name.clear();
+    pending_no_value_origin.clear();
+}
+
+void CifaBytecode::Machine::clear_error()
+{
+    error.clear();
+    pending_error_kind = PendingErrorKind::None;
+    pending_error_location = nullptr;
+    pending_error_message.clear();
+    pending_no_value_name.clear();
+    pending_no_value_origin.clear();
+}
+
+void CifaBytecode::Machine::set_error(std::string message, const SourceLocation* location)
+{
+    if (has_error()) return;
+    pending_error_kind = PendingErrorKind::Message;
+    pending_error_message = std::move(message);
+    pending_error_location = location;
+    if (!defer_error_formatting) finalize_error();
 }
 
 CifaBytecode::Machine::IndexedValueRef CifaBytecode::Machine::resolve_member(
@@ -6229,36 +6302,12 @@ void CifaBytecode::Machine::set_no_value_error(const Object& value, const Source
 
 void CifaBytecode::Machine::set_no_value_error(const Object::NoValue* no_value, const SourceLocation* location)
 {
-    if (!error.empty()) return;
-    location = resolve_error_location(location);
-    const std::string name = no_value == nullptr ? "<unknown>" : no_value->function_name;
-    const std::string origin = no_value == nullptr ? "" : no_value->call_frame;
-    error = "Runtime Error: function '" + name + "' has no return value\nNo return value originated at:\n" + origin;
-    std::pmr::vector<std::pair<const SourceLocation*, bool>> frames(call_stack, host.allocation_resource.get());
-    if (append_diagnostic_frames) append_diagnostic_frames(frames);
-    if (location != nullptr && format_frame(*location) != origin
-        && (frames.empty() || frames.back().first != location)) frames.emplace_back(location, false);
-    if (frames.empty()) return;
-    error += "\nCall Stack (most recent call first):\n";
-    const SourceLocation* previous = nullptr;
-    bool previous_function = false;
-    for (size_t index = frames.size(); index > 0; --index)
-    {
-        const auto* frame = frames[index - 1].first;
-        const bool function = frames[index - 1].second;
-        if (frame == nullptr || (frame == previous && function == previous_function)) continue;
-        previous = frame;
-        previous_function = function;
-        if (function)
-        {
-            error += "  at func " + (frame->str.empty() ? "<unknown>" : frame->str) + "()\n";
-            continue;
-        }
-        const std::string formatted = format_frame(*frame);
-        const size_t newline = formatted.find('\n');
-        error += "  at " + (newline == std::string::npos ? formatted : formatted.substr(0, newline)) + "\n";
-        if (newline != std::string::npos) error += "     " + formatted.substr(newline + 1) + "\n";
-    }
+    if (has_error()) return;
+    pending_error_kind = PendingErrorKind::NoValue;
+    pending_error_location = location;
+    pending_no_value_name = no_value == nullptr ? "<unknown>" : no_value->function_name;
+    pending_no_value_origin = no_value == nullptr ? "" : no_value->call_frame;
+    if (!defer_error_formatting) finalize_error();
 }
 
 bool CifaBytecode::Machine::condition(RegisterSlots& source, size_t slot, const SourceLocation* location)
@@ -7123,7 +7172,7 @@ Object CifaBytecode::Session::run(CifaBytecode& code, const std::string& entry_l
     vm.returns.clear();
     vm.call_stack.clear();
     vm.append_diagnostic_frames = {};
-    vm.error.clear();
+    vm.clear_error();
     vm.exit_requested = false;
     active = true;
     struct RestoreNestedState

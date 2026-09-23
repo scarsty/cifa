@@ -37,13 +37,63 @@
 | `25.27 / 23.51 ms` | clang-cl inline budget 对照 | 2026-09-22，Clang 22.1.3、各 21 PI 样本：默认 / 高 inline threshold，中位数 `25.27` -> `23.51 ms`（约 `-6.95%`）；同源码、同机、仅改变 inline 阈值。 |
 | `22.38 / 20.00 / 16.20 ms` | 协议重构快照相对 `HEAD` | 2026-09-23，3 轮交错、每轮 21 PI 样本的均值：MSVC `24.40` -> `22.38 ms`（`-8.3%`）、clang-cl `21.22` -> `20.00 ms`（`-5.5%`）、高 inline clang `17.79` -> `16.20 ms`（`-9.0%`）。覆盖完整协议重构集，不能归因到单个 opcode。 |
 | `22.5446 ms` | 当前静态 CFG / Method / Range / verify 优化后的 MSVC PI | 2026-09-23，MSVC v145 `/O2 /DNDEBUG /MD`，21 个样本；均值 `22.5644 ms`，范围 `22.2952--22.8785 ms`，PI 返回 502 字符。不同重构阶段无冻结 A/B，作为当前测量记录，不单独归因。 |
+| `19.80 / 15.53 ms` | 冷诊断 resolver、延迟错误格式化并删除 current_source 执行状态 | 2026-09-23，最终 MSVC/clang-cl 高 inline 单批 PI 中位数；两者均 `PASS: all 14 outputs identical, characters=502`。此前不含最后 current_source 删除的 3 轮交错 A/B 已测得 MSVC `20.85` -> `20.17 ms`、clang-cl `15.92` -> `15.10 ms`；最终代码在同一 harness 下继续单批降至此行数值。 |
 
 注：2026-09-15 的 dispatcher handler 拆分是在另一台 CPU 上测量的，而且基线已经包含 `2ab6301`（allocator
 和省掉不必要的 scoped guard）等改动。因此，不能把这组结果和上表的数字跨机器直接相减；独立结果见文末
 `## 2026-09-15：clang-cl inline budget 实验与 dispatcher handler 拆分（独立测机）`。
 
-未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用、
-冷热诊断分离。它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
+未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用。
+它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
+
+## 2026-09-23：诊断完全冷化与延迟错误格式化
+
+执行器此前虽然把 `InstructionDiagnostic`、词法帧快照和源码文本放在了冷表，但仍在正常执行中读取诊断表：
+`Branch/AndBranch/OrBranch` 每次条件判断解析 `condition_source`，多个 opcode 在成功路径调用
+`current_location()` 或读取 `target_source`。另外，`Machine::set_error()` 和 `set_no_value_error()` 可从
+switch handler 直接构造调用栈、分配帧 vector、格式化源码文本和 caret，扩大了主解释器函数。
+
+最终方案将这些职责分离：
+
+- `Machine::set_error()` 和 `set_no_value_error()` 只记录 pending kind、消息/NoValue 来源与位置标记；
+	`should_stop()` 同时检查已格式化和 pending 错误。
+- `execute_instructions()` 安装当前 `{owner, instructions, error_pc, active_node}` 的冷 resolver，并由作用域收尾器
+	在退出解释器循环后调用强制 noinline 的 `finalize_error()`；该函数才读取 `InstructionDiagnostic`、展开
+	`diagnostic_frames`、调用 `format_frame()` 并构造最终调用栈文本。
+- 正常 `Branch` 传空位置给 `Machine::condition()`；只有条件实际失败，冷 resolver 才按当前 PC 查源码。
+	普通 `current_location()` 不再查表，直接返回当前函数节点作为 resolver marker。
+- 函数调用和返回只更新 resolver marker；它们不执行源码查找。NoValue formatter 保留 origin/call-stack 的换行和
+	去重规则，避免延迟格式化后重复打印 call origin。
+- 最终版本进一步删除 `current_source` 指针、每条指令的清空动作以及赋值快路对源码指针的保存；Object runtime
+	reporter 也只提交 pending 错误，由 resolver 按当前 PC 解析位置。这样正常执行只保留必要的 `error_pc` 标记，
+	不维护可变源码指针。
+
+Debug x64 完整回归为 `76/76`，其中 `diagnostic_position_test` 通过。最终 MSVC 与 clang-cl 高 inline PI 均验证
+14 个输出精确一致、最终字符串长度为 502。
+
+最终代码的同一份 `increment_loop_benchmark` 大循环对照为：MSVC 空循环 Cifa `3.81568 ms`、Lua `1.75473 ms`，
+慢 `2.17452x`；增量循环 Cifa `4.28886 ms`、Lua `2.24702 ms`，慢 `1.90869x`。Clang 高 inline 空循环
+Cifa `3.91426 ms`、Lua `1.76366 ms`，慢 `2.21939x`；增量循环 Cifa `4.38599 ms`、Lua `2.24012 ms`，
+慢 `1.95792x`。这些是 60 样本基准的中位数，说明诊断热路径已削减，但 Cifa 简单循环仍有约 1.9--2.2 倍
+固定解释器成本，后续需继续拆分取指/PC/分派与局部槽访问，不应再归因于常量表或错误格式化。
+
+本轮两个未保留的实验应与最终方案区分：仅以 `current_source_pc` 延迟清空 pointer 的版本虽然少一个 store，
+但 MSVC/Clang PI 分别稳定退化约 4.0%/3.8%；把数值条件快路直接内联进 Branch handler 的版本，clang-cl
+PI 稳定退化约 3.1%。这两者都在主解释器内新增状态或热代码；最终保留的方案把诊断解析和格式化整体移至循环外。
+
+### 空循环 switch 裁剪与 opcode 编号实验
+
+为隔离 switch case 数量，建立了 `build/pruned-empty-loop/` 独立副本。空循环实际动态路径为：
+`CallBegin/Call/Return`、`Constant/ConstantLocal`、`NumericCompareBranch`、`Branch`、`IntForNext`、
+`Jump`，以及退出后的常量和返回。副本主 switch 完全移除了未使用 opcode case，生产源码不变。
+
+同一空循环驱动三轮交错结果：MSVC 完整 switch 约 `3.83 ms`，裁剪副本约 `3.74 ms`，约快 `2.1%`；
+clang-cl 高 inline 完整 switch约 `3.92 ms`，裁剪副本约 `3.95 ms`，约慢 `0.8%`。因此未使用 case 会影响
+MSVC 的代码布局，但不是跨编译器稳定收益，也不足以解释 Cifa 简单循环相对 Lua 的 `1.9--2.2x` 差距。
+
+随后在同一裁剪副本中把上述热 opcode 的枚举编号移到最前，保留算术 opcode 连续区间和 `Removed` 边界。
+三轮交错的 MSVC 均值与完整 switch 均约 `3.83 ms`，Clang 高 inline 为 `3.95 ms` 对 `3.92 ms`，没有收益，
+因此不改变生产 opcode 编号。该实验确认影响不在 opcode 数字本身，而在实际执行路径的固定操作。
 
 ## 2026-09-23：静态生命周期与控制协议重构
 

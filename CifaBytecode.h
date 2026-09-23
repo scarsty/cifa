@@ -613,6 +613,16 @@ class CifaBytecode : public Cifa
         std::function<void(std::pmr::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
         std::function<const SourceLocation*()> resolve_runtime_location;
         const SourceLocation* runtime_location_marker = nullptr;
+        enum class RuntimeLocationKind : std::uint8_t { Instruction, Condition, Target, Assignment };
+        RuntimeLocationKind runtime_location_kind = RuntimeLocationKind::Instruction;
+        size_t runtime_location_pc = std::numeric_limits<size_t>::max();
+        enum class PendingErrorKind : std::uint8_t { None, Message, NoValue };
+        PendingErrorKind pending_error_kind = PendingErrorKind::None;
+        std::string pending_error_message;
+        const SourceLocation* pending_error_location = nullptr;
+        std::string pending_no_value_name;
+        std::string pending_no_value_origin;
+        bool defer_error_formatting = false;
         std::string error;
         Object error_placeholder;
         bool exit_requested = false;
@@ -674,6 +684,9 @@ class CifaBytecode : public Cifa
         const FunctionCode* find_cached_function(const CallSite& call, const std::string& name, size_t arity,
             std::shared_ptr<const Module>& owner);
         const SourceLocation* resolve_error_location(const SourceLocation* location) const;
+        void finalize_error();
+        void clear_error();
+        bool has_error() const { return !error.empty() || pending_error_kind != PendingErrorKind::None; }
         void set_error(std::string message, const SourceLocation* location = nullptr);
         static std::string format_frame(const SourceLocation& location);
         void set_no_value_error(const Object& value, const SourceLocation* location = nullptr);
@@ -714,7 +727,7 @@ class CifaBytecode : public Cifa
         bool assign_indexed(const IndexedValueRef& target, Object value, bool with_type,
             const std::string& type_name, const SourceLocation& location);
         Object make_no_value(const std::string& function_name, const SourceLocation& call_site) const;
-        bool should_stop() const { return exit_requested || !error.empty(); }
+        bool should_stop() const { return exit_requested || has_error(); }
     };
     // 兼容 Playground 的旧诊断接口：热指令保持不变，只在采样开启时记录。
     struct ProfileInstructionGuard
