@@ -611,6 +611,8 @@ class CifaBytecode : public Cifa
         std::pmr::vector<ReturnState> returns;
         std::pmr::vector<std::pair<const SourceLocation*, bool>> call_stack;
         std::function<void(std::pmr::vector<std::pair<const SourceLocation*, bool>>&)> append_diagnostic_frames;
+        std::function<const SourceLocation*()> resolve_runtime_location;
+        const SourceLocation* runtime_location_marker = nullptr;
         std::string error;
         Object error_placeholder;
         bool exit_requested = false;
@@ -671,6 +673,7 @@ class CifaBytecode : public Cifa
         const FunctionCode* find_function(const std::string& name, size_t arity, std::shared_ptr<const Module>& owner) const;
         const FunctionCode* find_cached_function(const CallSite& call, const std::string& name, size_t arity,
             std::shared_ptr<const Module>& owner);
+        const SourceLocation* resolve_error_location(const SourceLocation* location) const;
         void set_error(std::string message, const SourceLocation* location = nullptr);
         static std::string format_frame(const SourceLocation& location);
         void set_no_value_error(const Object& value, const SourceLocation* location = nullptr);

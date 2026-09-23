@@ -1,10 +1,12 @@
 # VM 优化记录
 
-## 成功优化摘要：约 300ms 到 40ms
+## 性能优化历史摘要：约 300ms 到当前 22ms
 
-下表只汇总最终保留的成功项。`阶段耗时`是当时可执行版本的 Release PI `execute_ms` 中位数或同批代表值，
-用于展示演进位置；不同日期、不同二进制之间不能直接相减。`同批证据`列中明确写有 A/B 的，才可据此认定该项
-提速。后文只保留必要的验证方式、结果和结论。
+下表汇总已保留的优化、关键版本快照及编译器对照。`阶段耗时`是当时可执行版本的 Release PI
+`execute_ms` 中位数或同批代表值，用于展示演进位置；不同日期、机器、二进制和 benchmark harness 不能直接
+相减。`同批证据`列明确写有 A/B、轮转或同版本交错的，才可据此认定该项提速；“阶段记录”只说明当时实际
+耗时，不归因给相邻改动。所有 PI 行均以脚本输出校验为前提，早期记录为 length=502/FNV 校验，近期记录为
+502 字符精确断言。
 
 | 阶段耗时 | 最终保留的主要优化 | 同批证据或记录结论 |
 | ---: | --- | --- |
@@ -28,6 +30,13 @@
 | `43.28 ms` | 二元数学调用的双局部操作数描述符 | 两轮 A/B：约 `44.54` -> `43.28 ms`，约快 `2.8%` |
 | `42.48 ms` | `ConstantLocal` 直接写目标局部槽 | A/B/B/A/A/B：`43.51` -> `42.48 ms`，约快 `2.37%` |
 | `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A：`41.442` -> `39.216/39.330 ms`，约快 `5.3%` |
+| `41.0412 ms` | 标准 PMR、栈上临时存储迁移 | 独立阶段记录：同机 MSVC Release PI `43.5414` -> `41.0412 ms`（约 `-5.7%`）；这是整次迁移结果，不能单独归因于栈缓冲区。 |
+| `36.33 ms` | 复合赋值作用域分析与整数/浮点 fast path | 阶段记录：`incrementf` 从 `182.95` 到 `9.49 ms`；百万次 `total += i` 独立 probe 从 `33.55` 到 `10.49 ms`。PI 只有修复后实测值，未做该项冻结 A/B。 |
+| `29.95 ms` | 循环体变量声明提升与已知局部保留 | 2026-09-20，`a4f2a93` 对当前、7 轮轮转：PI `36.06` -> `29.95 ms`（约 `-17%`）；calls `22.61` -> `21.77 ms`，increment `8.47` -> `7.74 ms`，incrementf `184.21` -> `9.75 ms`。 |
+| `29.95 ms` | 放开 handler 强制 noinline | 2026-09-20，MSVC 7 轮交替：increment `-6%`、incrementf `-4%`、calls `-2%`，PI 与 strings 持平；不计为 PI 收益。 |
+| `25.27 / 23.51 ms` | clang-cl inline budget 对照 | 2026-09-22，Clang 22.1.3、各 21 PI 样本：默认 / 高 inline threshold，中位数 `25.27` -> `23.51 ms`（约 `-6.95%`）；同源码、同机、仅改变 inline 阈值。 |
+| `22.38 / 20.00 / 16.20 ms` | 协议重构快照相对 `HEAD` | 2026-09-23，3 轮交错、每轮 21 PI 样本的均值：MSVC `24.40` -> `22.38 ms`（`-8.3%`）、clang-cl `21.22` -> `20.00 ms`（`-5.5%`）、高 inline clang `17.79` -> `16.20 ms`（`-9.0%`）。覆盖完整协议重构集，不能归因到单个 opcode。 |
+| `22.5446 ms` | 当前静态 CFG / Method / Range / verify 优化后的 MSVC PI | 2026-09-23，MSVC v145 `/O2 /DNDEBUG /MD`，21 个样本；均值 `22.5644 ms`，范围 `22.2952--22.8785 ms`，PI 返回 502 字符。不同重构阶段无冻结 A/B，作为当前测量记录，不单独归因。 |
 
 注：2026-09-15 的 dispatcher handler 拆分是在另一台 CPU 上测量的，而且基线已经包含 `2ab6301`（allocator
 和省掉不必要的 scoped guard）等改动。因此，不能把这组结果和上表的数字跨机器直接相减；独立结果见文末
@@ -35,6 +44,74 @@
 
 未列入的候选要么已撤回，要么没有稳定加速：例如局部赋值 copy-to-move、临时槽深度复用、原生内建调用、
 冷热诊断分离。它们的完整样本和原因仍在后文，以避免“最终约 40ms”掩盖负实验或把环境波动误记为优化收益。
+
+## 2026-09-23：静态生命周期与控制协议重构
+
+近期两组改动的共同原则是：词法层级、局部槽、清理边、控制协议编号和诊断范围均由编译器计算；VM 只保留
+语言可观察的值、容器快照和错误语义。它们改变了字节码 ABI 和执行器结构，当前应以 Cifa/CifaBytecode
+黑盒一致性验收，不能把不同提交、不同编译器的绝对耗时倒推出某一项的独立收益。
+
+### 第一组：静态局部槽与显式清理
+
+- 取消运行期 Scope/ScopeStack、动态局部绑定、别名解析和通用 unwind。参数与局部变量在 lowering 时取得固定
+	槽号；局部 opcode 直接访问当前函数的 `active_locals`，普通全局 opcode 只访问 `global_values`。
+- 编译器在普通块尾、`break`、`continue`、`goto` 和 `return` 的控制流边上发射精确的 `ReleaseLocal`；Range 与
+	Switch 的结束也作为静态 control-cleanup 边处理。诊断范围迁入 `DiagnosticFrameEvent` 冷表，`verify()` 预先
+	展开每个 PC 的诊断帧，`compact()` 与代码同步重映射。
+- `ReleaseLocal` 不能按“数值变量生命周期已知”而直接删除。`release_scope_slot()` 虽只析构字符串、数组、map
+	和 `any` payload，但还会清除名称、类型、数值 binding 与参数来源；调用窗口复用时遗漏这些元数据会使无类型
+	参数或后续声明错误继承旧 `int`/`double` 约束。因此它是静态已知的清理动作，不是可省略的运行期守护。
+- 已通过 Debug Cifa/CifaBytecode 黑盒回归及运行时报错/恢复对照；该组重构没有冻结的同批 A/B，不能单独声称
+	性能收益。
+
+### 第二组：Method、Range、Switch 协议收敛
+
+- Method 收敛为 `MethodCheck`、`MethodCall` 和单参数 `MethodPush`；Range 使用 begin/next/end 三阶段；Switch
+	使用 mark/active/default/compare/end 五阶段。旧的 begin/value/end 等平行 opcode 与运行期守护状态已删除。
+- `Range` 仍必须在入口创建数组快照：AST 语义规定循环体修改原数组时，迭代序列保持入口时的值副本。它的
+	index、快照槽和结束释放不能由“循环形状静态”推导为零成本。
+- `Switch` 的 condition 也必须保留一次求值和与 case 比较的值语义；不过“已经命中则后续语句直落、尚未命中
+	则继续寻找”的 `active` 布尔状态是编译器已知控制流的编码冗余，见下一节的首要候选。
+- 当前树的 Debug 回归为 76/76；Release 对 `HEAD` 的交错测量中，PI 在 MSVC、clang-cl 默认和 clang-cl 高
+	inline 下均更快，百万次整数循环未见回退。但这些测量覆盖整个重构集，不能归因到某个协议 opcode。
+
+### 下一轮候选（先证明，再实现）
+
+1. **Switch 静态 CFG 降低优先级最高。** 当前每个 case 前或 case 体语句前都会执行 `Switch(active)` 并经
+	 `Branch` 决定是否跳过。lowering 可为每个 case 生成“未命中继续比较”的跳转，并在首次命中或 default 后
+	 直接落入后续语句；只保留 condition 槽和 case 比较。必须保留 case 表达式的从左到右求值、default 位置、
+	 fallthrough、break/continue/goto 的既有 cleanup 边。先加 profile 统计 `Switch` 各阶段动态次数，再仅用含
+	 多 case 和 fallthrough 的脚本做冻结 A/B。
+2. **全局 receiver 的 method 直接链接。** `ArrayPushGlobal` 已用编译期 `base_name_id` 在执行期缓存 global slot；
+	 `MethodCheck`/`MethodCall` 仍调用 `named_value(name)` 做通用名称解析。对编译期可判定的全局 receiver，可让
+	 CallSite 保存已链接 global slot 的访问类别并直接读 `global_values`，同时保留宿主重入、跨脚本变量更新和
+	 typed array/map 的转换/错误路径。不得把函数局部同名变量误优化成全局 receiver。
+3. **静态局部 Range 绑定直写。** `Range next` 已知局部槽时仍先把元素放进 scratch，再调用通用
+	 `bind_range()`，之后 move 到局部槽。可为无类型或已验证类型的局部 range 变量建立专用路径，直接从 snapshot
+	 元素写目标槽；带 `auto` 推断、显式转换、未初始化诊断或任何可观察 metadata 的路径仍回退。先对照 AST 的
+	 数组修改快照、typed 元素转换和循环体遮蔽脚本。
+4. **编译期不可达块删除。** 现有 `compact()` 只删除显式 `Removed`。在 `verify()` 已得到 CFG 与寄存器状态后，
+	 可标记从 root entries/函数入口不可达的 PC 并同步清理 diagnostics、frame events 和跳转 remap。此项首先
+	 降低代码和冷表体积，只有脚本含 goto/常量分支产生死块时才可能减少执行前缓存压力；不应预设 PI 收益。
+
+不建议重试的方向：删除 Range 快照、删除 `ReleaseLocal`、恢复动态 Scope guard、或把相邻 opcode 机械拼成
+大 handler。前两者破坏语言语义，后两者已证明会增加 dispatcher 体积或恢复不必要的运行期状态。
+
+### 已实施：静态 CFG、直接槽和 verify 状态收缩
+
+- Switch lowering 已改为静态 case 测试链：每个 case 表达式只在此前未命中时按源码顺序求值，命中后跳入对应
+	body；所有 body 在源码顺序中自然 fallthrough。default 仅是全部 case 未命中的落点。运行期不再为每条 case
+	body 语句执行 `Switch(active)` 与 `Branch`，`SwitchState::active`、active/default 阶段也随之删除；条件槽和
+	case equality 仍保留。
+- `MethodPush`、`MethodCheck`、`MethodCall` 对编译期确认的全局 receiver 复用 `linked_global()` 取得的稳定槽，
+	不再每次调用 `named_value(name)` 进行全局名称查找。不存在的 receiver 仍按旧规则经 `assign_named()` 创建，
+	局部 receiver、类型转换和错误顺序保持原路径。
+- Range 的循环变量已有静态 local slot 时，next 阶段直接把快照元素写入 local slot 并调用同一 `bind_range()`；
+	删除 scratch 值的 move 中转，但保留快照、索引、`auto`/显式类型绑定及错误位置。
+- `verify()` 的 `methods` CFG 状态从未由任何 opcode 写入，只扩大了每个待验证 PC 的状态复制与 merge 比较，现已
+	删除；Call、Range、Switch 的真实结构状态仍完整验证。
+- Debug x64 Cifa/CifaBytecode 黑盒回归通过 `76/76`。当前 MSVC Release 基准同时验证 PI 返回 502 字符，百万次
+	increment 返回 `1000000`；本轮尚未冻结本次改动前的同机 A/B，不能把 `22.5446 ms` 归因给其中任意一项。
 
 ## 完整优化计划（2026-09-13）
 
@@ -1665,12 +1742,6 @@ Instruction 结构解码、操作数表和元数据表——这是 Lua 式 32 �
 中位数）。pi -17%，incrementf 18.9 倍，increment -9%，calls -4%，strings -2%。
 收益集中在循环结构上；calls/strings 的瓶颈在调用与字符串处理本身。
 MSVC 下 pi 对 Lua（同机 9.34ms）为 3.2 倍。
-
-### noinline 策略（2026-09-20）
-
-22 个 handler 的强制 noinline 改为默认交给编译器决定（宏可覆盖）。MSVC 七轮
-交替对照：放开后 increment -6%、incrementf -4%、calls -2%，pi/strings 持平。
-2026-09-15 的"拆分后保持 noinline"结论基于当时的分派器结构，已由本轮取代。
 
 ### noinline 策略（2026-09-20）
 
