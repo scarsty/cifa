@@ -42,9 +42,11 @@ int main(int argc, char** argv) try {
             + "\"; int total=0; for(int i=0;i<10000;i++) { total+=size(format(\"{0}:{1}\",echo(base),i)); } return total;";
     } else if (workload == "increment") {
         script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
+    } else if (workload == "empty") {
+        script = "int loop() { for (int i = 0; i < 1000000; i++) { } return 1000000; } return loop();";
     } else if (workload == "incrementf") {
         script = "double loop() { double value = 0; for (double i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
-    } else throw std::runtime_error("workload must be pi, calls, strings, increment, or incrementf");
+    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, or incrementf");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.

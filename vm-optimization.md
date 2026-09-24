@@ -253,6 +253,59 @@ MSVC 的代码布局，但不是跨编译器稳定收益，也不足以解释 Ci
 三轮交错的 MSVC 均值与完整 switch 均约 `3.83 ms`，Clang 高 inline 为 `3.95 ms` 对 `3.92 ms`，没有收益，
 因此不改变生产 opcode 编号。该实验确认影响不在 opcode 数字本身，而在实际执行路径的固定操作。
 
+### 2026-09-24：解释器状态清理与 Lua 数值 for 对照
+
+本轮按字段使用情况检查 `InterpState`。`RangeBinding/range_binding` 只在构造和传递中出现，
+没有任何读写，已删除；它属于真正的死执行状态。`active_values_data`、
+`active_integer_loops_data` 和 `IntegerLoopState` 仍被整数循环入口、循环尾和函数切换使用，
+不能因其位于解释器上下文中就删除。调用帧、局部窗口、全局链接和延迟诊断状态也仍由函数调用、
+宿主重入或错误路径需要，当前没有证据表明它们是纯循环的冗余状态。
+
+随后移除了每条指令执行时的独立 `error_pc = pc - 1` 写入。冷诊断 resolver、
+`current_location()` 和 `mark_error_location()` 现在从当前 `pc` 派生指令位置；这与 Lua 只在
+可能报错、hook 或需要保存状态时更新 `savedpc` 的做法更接近。核心回归
+`regression`、`regression_pool`、`pmr_any` 均通过，诊断位置回归保持通过。PI 单批结果为
+`18.9102 ms`，由于不是交错 A/B，只记录为阶段测量，不单独归因性能收益。
+
+Lua 5.4 的数值 `for` 有明确的专用路径：`OP_FORPREP` 在入口完成类型检查并把整数循环的
+剩余次数写入原 limit 槽；`OP_FORLOOP` 在 `luaV_execute()` 中内联执行整数分支，只做计数
+检查/递减、内部 index 加 step、控制变量写回和 `pc` 回跳。Lua 的 `vmfetch()` 通过 `pc++`
+取指，使用 GCC/Clang computed-goto jump table 时每个 opcode 直接跳到对应 label。
+
+Cifa 的 `IntForPrep`、`IntForNext`、`IntForNextLocal` 已经采用相同的“入口计算剩余次数、尾部
+递减并回跳”策略；但它们仍处于巨大的通用 `switch` 函数中，并且 `IntForNextLocal` 仍经
+`IntegerLoopState` 侧状态。下一步应优先评估一个只携带当前 code、pc 和整数循环状态的专用
+循环执行路径，而不是继续删除 `RegisterSlots` 的类型/名称元数据。后者会影响通用局部读写，
+不能解释已经绕开槽访问的 `IntForNextLocal` 差距。
+
+### 2026-09-24：switch 与 computed-goto 分派实验
+
+新增独立目标 `cifa_dispatch_experiment`，只模拟整数循环尾部的最小热路径：连续取指、
+`IntForNextLocal` 的 `value++`、`remaining--`、`pc` 回跳和 `ScriptEnd`。实验不使用
+`RegisterSlots`、诊断、函数调用或 PMR 状态，因此只用于测量分派器上限，未修改生产
+`execute_instructions()`。
+
+Clang high Release 下，40 个样本、每样本 32 次运行的中位数为：
+
+| 分派方式 | 时间 |
+| --- | ---: |
+| 普通 `switch` | `1.41185 ms` |
+| computed-goto | `0.533991 ms` |
+
+computed-goto 约为普通 `switch` 的 `37.8%`，在这个只有两个 opcode 的极简模型中约快
+`1.87x`。MSVC 不支持 GNU computed-goto，实验自动使用 switch fallback，两者为
+`1.05304/1.05268 ms`，符合预期。
+
+该结果证明 Cifa 当前的普通 `switch` 分派存在可观的理论优化空间，但不能直接推导真实
+VM 会获得同等收益：Clang high 真实 PI 基准仍为 `14.0502 ms`，实际执行还包含大量
+寄存器值处理、通用 opcode、函数调用和错误语义。当前没有把 computed-goto 接入生产代码，
+也没有据此宣称性能提升。
+
+验证方面，MSVC CMake Tools 的 `regression`、`regression_pool`、`pmr_any` 均通过；Clang
+high 的 `cifa_dispatch_experiment`、`cifa_benchmark` 和 `cifa_tests` 均成功构建，真实 PI
+输出为 502 字符并通过校验。当前 CMake Tools 的 CTest 仍指向 `build/cmake`，所以本轮不把
+上述三项报告为 Clang high CTest 结果。
+
 ## 2026-09-23：静态生命周期与控制协议重构
 
 近期两组改动的共同原则是：词法层级、局部槽、清理边、控制协议编号和诊断范围均由编译器计算；VM 只保留

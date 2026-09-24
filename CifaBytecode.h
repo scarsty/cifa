@@ -17,7 +17,7 @@ class CifaBytecode : public Cifa
         PrepareStore, Store, Increment, Switch,
         CallBegin, Call, Peek, Array, Index, IndexLocal, Range, MethodCheck,
         MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
-        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, RegisterBinary, ScriptEnd, Exit, Removed };
+        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, RegisterBinary, ScriptEnd, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {

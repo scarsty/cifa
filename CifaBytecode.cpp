@@ -1097,7 +1097,8 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
     {
         if (candidate.opcode == Opcode::StoreLocal || candidate.opcode == Opcode::IncrementLocal
             || candidate.opcode == Opcode::NumericForNext || candidate.opcode == Opcode::IntIncrementLocal
-            || candidate.opcode == Opcode::IntForNext || candidate.opcode == Opcode::IntForNextLocal)
+            || candidate.opcode == Opcode::IntForNext || candidate.opcode == Opcode::IntForNextLocal
+            || candidate.opcode == Opcode::IntIncrementForNextLocal)
             return candidate.operand == slot;
         if (candidate.opcode == Opcode::ConstantLocal) return candidate.auxiliary == slot + 1;
         if (candidate.opcode == Opcode::NumericBinaryLocal && candidate.auxiliary < instructions.numeric_operations.size())
@@ -1215,6 +1216,15 @@ std::pmr::vector<size_t> CifaBytecode::compact(Instructions& instructions)
                 if (other != pc && writes_local_slot(instructions.code[other], increment.operand))
                 { written_elsewhere = true; break; }
             if (!written_elsewhere) increment.opcode = Opcode::IntIncrementLocal;
+        }
+        if (loop_state.localize && next.opcode == Opcode::IntForNextLocal
+            && loop_state.body + 1 == next_pc
+            && instructions.code[loop_state.body].opcode == Opcode::IntIncrementLocal)
+        {
+            auto& fused = instructions.code[loop_state.body];
+            fused.opcode = Opcode::IntIncrementForNextLocal;
+            fused.member_site = next.member_site;
+            next.opcode = Opcode::Removed;
         }
     }
     return remap;
@@ -3065,7 +3075,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             || instruction.opcode == Opcode::StoreLocal || instruction.opcode == Opcode::IncrementLocal
             || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntForPrep
             || instruction.opcode == Opcode::IntIncrementLocal
-            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal)
+            || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal
+            || instruction.opcode == Opcode::IntIncrementForNextLocal)
             && instruction.operand >= local_slot_count)
         {
             translation_error = "bytecode local slot out of range";
@@ -3074,6 +3085,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
         if (instruction.opcode == Opcode::StoreLocal || instruction.opcode == Opcode::IncrementLocal
             || instruction.opcode == Opcode::NumericForNext || instruction.opcode == Opcode::IntIncrementLocal
             || instruction.opcode == Opcode::IntForNext || instruction.opcode == Opcode::IntForNextLocal
+            || instruction.opcode == Opcode::IntIncrementForNextLocal
             || instruction.opcode == Opcode::DeclareLocal || (instruction.opcode == Opcode::Range && instruction.auxiliary == 1)
             || ((instruction.opcode == Opcode::Load || instruction.opcode == Opcode::Peek) && instruction.auxiliary != 1))
         {
@@ -3242,6 +3254,7 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             break;
         case Opcode::Increment: case Opcode::IncrementLocal: case Opcode::NumericForNext:
         case Opcode::IntIncrementLocal: case Opcode::IntForPrep: case Opcode::IntForNext: case Opcode::IntForNextLocal:
+        case Opcode::IntIncrementForNextLocal:
             if (instruction.opcode == Opcode::Increment && instruction.operand != 0 && instruction.operand - 1 >= index_sites.size())
             { translation_error = "invalid bytecode index descriptor"; return false; }
             if (instruction.opcode == Opcode::IncrementLocal || instruction.opcode == Opcode::NumericForNext
@@ -3370,6 +3383,8 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
                 return 1;
             case Opcode::IntForPrep:
                 return 0;
+            case Opcode::IntIncrementForNextLocal:
+                return 0;
             case Opcode::Index:
                 return instruction.operand;
             case Opcode::PrepareStore:
@@ -3494,7 +3509,7 @@ std::string CifaBytecode::dump_instruction_listing() const
             "CallBegin", "Call", "Peek", "Array", "Index", "IndexLocal", "Range",
             "MethodCheck", "MethodCall", "MethodPush", "ArrayPushGlobal",
             "ArrayPushGlobalLocal", "Member", "NumericBinary", "NumericBinaryLocal",
-            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForPrep", "IntForNext", "IntForNextLocal", "RegisterBinary", "ScriptEnd", "Exit", "Removed",
+            "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForPrep", "IntForNext", "IntForNextLocal", "IntIncrementForNextLocal", "RegisterBinary", "ScriptEnd", "Exit", "Removed",
         };
         std::format_to(std::back_inserter(text), "--- {} ({} instructions, registers={} temporaries={}) ---\n",
             tag, instr.code.size(), instr.register_capacity, instr.temporary_count);
@@ -3827,7 +3842,6 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             bool active = false;
         };
         static constexpr size_t inline_integer_loop_count = 4;
-        struct RangeBinding { std::string name; size_t value_slot = 0; size_t slot = 0; };
         struct Frame
         {
             const Instructions* instructions;
@@ -3850,19 +3864,26 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             size_t register_top;
         };
 
+        struct ColdState
+        {
+            std::pmr::deque<Frame>& frames;
+            std::pmr::deque<RegisterSlots>& local_windows;
+            std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>>& global_links;
+            std::pmr::vector<Machine::ReturnState>& return_states;
+            std::pmr::memory_resource* persistent;
+            std::pmr::monotonic_buffer_resource& execution_scratch;
+        };
+
         Machine& machine;
         CifaBytecode& interpreter;
         RegisterSlots& registers;
         Object& result;
-        std::pmr::deque<Frame>& frames;
-        std::pmr::deque<RegisterSlots>& local_windows;
+        ColdState& cold;
         RegisterSlots*& active_locals;
         std::pmr::vector<SwitchState>& switches;
         std::pmr::vector<RangeState>& ranges;
         std::array<IntegerLoopState, inline_integer_loop_count>& inline_integer_loops;
         std::pmr::vector<IntegerLoopState>& integer_loop_states;
-        std::optional<RangeBinding>& range_binding;
-        std::pmr::unordered_map<const Module*, std::pmr::vector<size_t>>& global_links;
         std::pmr::vector<size_t>*& active_globals;
         const Module*& active_owner;
         std::shared_ptr<const Module>& active_module;
@@ -3873,13 +3894,9 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         const FunctionCode*& active_function;
         const std::pmr::vector<FunctionCode::LocalSlot>*& active_local_slots;
         const SourceLocation*& active_call;
-        std::pmr::vector<Machine::ReturnState>& return_states;
         SourceRef& register_assignment_source;
-        size_t& error_pc;
         size_t& pc;
         const size_t missing_global;
-        std::pmr::memory_resource* persistent;
-        std::pmr::monotonic_buffer_resource& execution_scratch;
 
         size_t input_slot(const Instruction& instruction, size_t index)
         {
@@ -3891,17 +3908,17 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         const SourceLocation& current_location()
         {
             machine.runtime_location_kind = Machine::RuntimeLocationKind::Instruction;
-            machine.runtime_location_pc = error_pc;
+            machine.runtime_location_pc = pc == 0 ? 0 : pc - 1;
             return *active_node;
         }
         void mark_error_location(Machine::RuntimeLocationKind kind)
         {
             machine.runtime_location_kind = kind;
-            machine.runtime_location_pc = error_pc;
+            machine.runtime_location_pc = pc == 0 ? 0 : pc - 1;
         }
         std::pmr::vector<size_t>& link_globals(const Module* owner)
         {
-            auto [entry, inserted] = global_links.try_emplace(owner);
+            auto [entry, inserted] = cold.global_links.try_emplace(owner);
             if (inserted) entry->second.resize(owner->names.size(), missing_global);
             return entry->second;
         }
@@ -3936,17 +3953,17 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         }
         void finish_call()
         {
-            auto& caller = frames.back();
+            auto& caller = cold.frames.back();
             RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
             if (active_function && return_value.empty(0))
             {
                 return_value.write_payload(0, std::any(Object::NoValue{active_function->name, Machine::format_frame(*active_call)}));
                 return_value.set_type(0, {typeid(void), "", "", "NoValue"});
             }
-            auto saved = std::move(frames.back());
-            frames.pop_back();
-            return_states.pop_back();
-            local_windows.pop_back();
+            auto saved = std::move(cold.frames.back());
+            cold.frames.pop_back();
+            cold.return_states.pop_back();
+            cold.local_windows.pop_back();
             active_locals = saved.locals;
             active_local_slots = saved.local_slots;
             registers.restore(saved.register_base, saved.register_size, saved.register_top);
@@ -4225,8 +4242,8 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             const size_t caller_top = registers.top();
             RegisterSlots caller_values(registers, caller_base, caller_size);
             registers.enter(local_count);
-            local_windows.emplace_back(registers, registers.base(), registers.size());
-            auto* local_values = &local_windows.back();
+            cold.local_windows.emplace_back(registers, registers.base(), registers.size());
+            auto* local_values = &cold.local_windows.back();
             // 调用窗口复用底层寄存器存储；进入时必须清空槽位，否则残留的
             // 数值绑定会让声明存储绕过类型转换（如字符串存入 int 槽）。
             for (size_t index = 0; index < local_values->size(); ++index) local_values->release_scope_slot(index);
@@ -4255,7 +4272,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
                 if (!local_values->has_name(index)) local_values->set_name(index, call.arguments[index].str);
             }
             if (machine.should_stop()) { result = machine.error_result(); return false; }
-            frames.push_back({active_instructions, active_node, pc, pc - 1, output,
+            cold.frames.push_back({active_instructions, active_node, pc, pc - 1, output,
                 active_locals, std::move(switches), active_function, active_local_slots, active_call,
                 std::move(ranges), inline_integer_loops, std::move(integer_loop_states), active_owner, std::move(active_module),
                 caller_base, caller_size, caller_top});
@@ -4279,8 +4296,8 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             inline_integer_loops = {};
             integer_loop_states.assign(active_instructions->integer_loops.size() > InterpState::inline_integer_loop_count
                 ? active_instructions->integer_loops.size() - InterpState::inline_integer_loop_count : 0, {});
-            return_states.emplace_back();
-            return_states.back().return_type = cached->return_type;
+            cold.return_states.emplace_back();
+            cold.return_states.back().return_type = cached->return_type;
             pc = 0;
         }
         if (machine.exit_requested) { result = Object(); return false; }
@@ -4552,7 +4569,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_call(const Instruction& 
     }
     else receiver = machine.named_value(active_owner->names[site.base_name_id]);
     alignas(std::max_align_t) std::byte argument_buffer[2048];
-    std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer, sizeof(argument_buffer), persistent);
+    std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer, sizeof(argument_buffer), cold.persistent);
     std::pmr::vector<SourceLocation> arguments(&argument_scratch);
     for (size_t index = 0; index < instruction.auxiliary; ++index) arguments.push_back(site.arguments[index]);
     const size_t scratch_base = active_instructions->register_capacity + active_instructions->temporary_count
@@ -4650,7 +4667,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call_begin(const Instruction& i
                 if (known == machine.functions.end()) machine.set_error("function '" + call_name + "' is not defined");
                 else
                 {
-                    std::pmr::vector<size_t> arities(&execution_scratch);
+                    std::pmr::vector<size_t> arities(&cold.execution_scratch);
                     for (const auto& entry : known->second) arities.push_back(entry.first);
                     std::sort(arities.begin(), arities.end());
                     std::string available;
@@ -4700,20 +4717,20 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_return(const Instruction& instr
 {
     const size_t output = instruction.destination;
         const size_t value_slot = input_slot(instruction, instruction.input_count - 1);
-        if (!frames.empty())
+        if (!cold.frames.empty())
         {
-            auto& caller = frames.back();
+            auto& caller = cold.frames.back();
             RegisterSlots return_value(registers, caller.register_base + caller.return_register, 1);
             return_value.move(0, registers, value_slot);
-            const auto& states = return_states;
+            const auto& states = cold.return_states;
             if (!states.empty() && !states.back().return_type.empty() && states.back().return_type != "void")
                 machine.convert_type(return_value, 0, return_value, 0, states.back().return_type, current_location());
             if (machine.should_stop()) { result = machine.error_result(); return false; }
-            if (return_states.empty()) return_states.emplace_back();
+            if (cold.return_states.empty()) cold.return_states.emplace_back();
             finish_call();
             return true;
         }
-        if (return_states.empty()) return_states.emplace_back();
+        if (cold.return_states.empty()) cold.return_states.emplace_back();
         registers.export_argument(value_slot, result);
         return false;
 }
@@ -5011,7 +5028,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     --registers.window_size;
     using SwitchState = InterpState::SwitchState;
     using RangeState = InterpState::RangeState;
-    using RangeBinding = InterpState::RangeBinding;
     using Frame = InterpState::Frame;
     std::pmr::vector<SwitchState> switches(instructions.switch_count, persistent);
     std::pmr::vector<RangeState> ranges(instructions.range_count, persistent);
@@ -5019,7 +5035,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     std::pmr::vector<InterpState::IntegerLoopState> integer_loop_states(
         instructions.integer_loops.size() > InterpState::inline_integer_loop_count
             ? instructions.integer_loops.size() - InterpState::inline_integer_loop_count : 0, persistent);
-    std::optional<RangeBinding> range_binding;
     std::pmr::deque<RegisterSlots> local_windows(persistent);
     local_windows.emplace_back(module.local_slot_count, machine.host.allocation_resource);
     std::pmr::deque<Frame> frames(persistent);
@@ -5035,7 +5050,6 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
     const FunctionCode* active_function = nullptr;
     const std::pmr::vector<FunctionCode::LocalSlot>* active_local_slots = &module.local_slots;
     const SourceLocation* active_call = nullptr;
-    size_t error_pc = start;
     size_t pc = start;
     SourceRef register_assignment_source;
     auto append_diagnostic_frames = [&](std::pmr::vector<std::pair<const SourceLocation*, bool>>& destination)
@@ -5081,8 +5095,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
     } restore_runtime_resolver{machine, std::move(previous_runtime_resolver), previous_runtime_marker};
     machine.resolve_runtime_location = [&machine, &active_owner, &active_instructions, &active_node,
-        &register_assignment_source, &error_pc]() -> const SourceLocation*
+        &register_assignment_source, &pc]() -> const SourceLocation*
     {
+        const size_t error_pc = pc == 0 ? 0 : pc - 1;
         if (active_instructions != nullptr && error_pc < active_instructions->diagnostics.size())
         {
             const auto& diagnostic = active_instructions->diagnostics[error_pc];
@@ -5134,21 +5149,63 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         size_t size;
         ~RestoreReturns() { states.resize(size); }
     } restore_returns{return_states, return_base};
-    InterpState interp{machine, interpreter, registers, result, frames, local_windows,
-        active_locals, switches, ranges, inline_integer_loops, integer_loop_states, range_binding, global_links, active_globals, active_owner, active_module,
+    InterpState::ColdState cold{frames, local_windows, global_links, return_states, persistent, execution_scratch};
+    InterpState interp{machine, interpreter, registers, result, cold,
+        active_locals, switches, ranges, inline_integer_loops, integer_loop_states, active_globals, active_owner, active_module,
         active_instructions, active_locals->values.data() + active_locals->base(), active_instructions->integer_loops.data(),
-        active_node, active_function, active_local_slots, active_call, return_states,
-        register_assignment_source, error_pc, pc, missing_global, persistent, execution_scratch};
+        active_node, active_function, active_local_slots, active_call,
+        register_assignment_source, pc, missing_global};
     auto& active_values_data = interp.active_values_data;
     auto& active_integer_loops_data = interp.active_integer_loops_data;
+#if defined(CIFA_COMPUTED_GOTO) && (defined(__clang__) || defined(__GNUC__))
+    // The opcode value indexes this table directly. Every executable opcode
+    // lands at its handler label; the switch is compiled only for fallback.
+    static const void* const dispatch[] = {
+        &&cifa_op_Constant, &&cifa_op_ConstantLocal, &&cifa_op_Load, &&cifa_op_LoadLocal,
+        &&cifa_op_DeclareLocal, &&cifa_op_StoreLocal, &&cifa_op_IncrementLocal, &&cifa_op_binary,
+        &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary,
+        &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary,
+        &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary,
+        &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_binary,
+        &&cifa_op_Positive, &&cifa_op_Negative, &&cifa_op_LogicalNot, &&cifa_op_BitNot,
+        &&cifa_op_Cast, &&cifa_op_Size, &&cifa_op_MathUnary, &&cifa_op_MathBinary,
+        &&cifa_op_Empty, &&cifa_op_Jump, &&cifa_op_Branch, &&cifa_op_AndBranch,
+        &&cifa_op_OrBranch, &&cifa_op_binary, &&cifa_op_binary, &&cifa_op_Return,
+        &&cifa_op_ReleaseLocal, &&cifa_op_PrepareStore, &&cifa_op_Store, &&cifa_op_Increment,
+        &&cifa_op_Switch, &&cifa_op_CallBegin, &&cifa_op_Call, &&cifa_op_Peek,
+        &&cifa_op_Array, &&cifa_op_Index, &&cifa_op_IndexLocal, &&cifa_op_Range,
+        &&cifa_op_MethodCheck, &&cifa_op_MethodCall, &&cifa_op_MethodPush, &&cifa_op_ArrayPushGlobal,
+        &&cifa_op_ArrayPushGlobalLocal, &&cifa_op_Member, &&cifa_op_NumericBinary, &&cifa_op_NumericBinaryLocal,
+        &&cifa_op_NumericCompareBranch, &&cifa_op_NumericForNext, &&cifa_op_IntIncrementLocal, &&cifa_op_IntForPrep,
+        &&cifa_op_IntForNext, &&cifa_op_IntForNextLocal, &&cifa_op_IntIncrementForNextLocal, &&cifa_op_RegisterBinary,
+        &&cifa_op_ScriptEnd, &&cifa_op_Exit, &&cifa_op_Removed,
+    };
+#define CIFA_DISPATCH() goto *dispatch[static_cast<size_t>(instruction.opcode)]
+#define CIFA_SWITCH_BEGIN()
+#define CIFA_SWITCH_END()
+#define CIFA_CASE(name) cifa_op_##name
+#define CIFA_TO_INCREMENT_LOCAL() goto cifa_op_IncrementLocal
+#define CIFA_TO_NUMERIC_BINARY() goto cifa_op_NumericBinary
+#define CIFA_EXECUTION_BREAK() goto cifa_vm_fetch
+#define CIFA_DEFAULT cifa_op_binary:
+#else
+#define CIFA_DISPATCH() do {} while (false)
+#define CIFA_SWITCH_BEGIN() switch (instruction.opcode) {
+#define CIFA_SWITCH_END() }
+#define CIFA_CASE(name) case Opcode::name
+#define CIFA_TO_INCREMENT_LOCAL() [[fallthrough]]
+#define CIFA_TO_NUMERIC_BINARY() [[fallthrough]]
+#define CIFA_EXECUTION_BREAK() break
+#define CIFA_DEFAULT default:
+#endif
     while (true)
     {
+    cifa_vm_fetch:
         const auto& instruction = active_instructions->code[pc++];
-        error_pc = pc - 1;
         const size_t output = instruction.destination;
-        switch (instruction.opcode)
-        {
-        case Opcode::ScriptEnd:
+        CIFA_DISPATCH();
+        CIFA_SWITCH_BEGIN()
+        CIFA_CASE(ScriptEnd):
             if (frames.empty()) return false;
             {
                 auto& caller = frames.back();
@@ -5157,25 +5214,25 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             interp.finish_call();
             continue;
-        case Opcode::Exit:
+        CIFA_CASE(Exit):
             machine.exit_requested = true;
             result = Object();
             return true;
-        case Opcode::Jump:
+        CIFA_CASE(Jump):
             pc = instruction.operand;
             continue;
-        case Opcode::Empty:
+        CIFA_CASE(Empty):
             registers.clear(output);
             continue;
-        case Opcode::Removed:
+        CIFA_CASE(Removed):
             continue;
-        case Opcode::IntIncrementLocal:
+        CIFA_CASE(IntIncrementLocal):
         {
             auto& integer = value_get<std::int64_t>(active_locals->resource_payload(instruction.operand));
             ++integer;
             continue;
         }
-        case Opcode::IntForPrep:
+        CIFA_CASE(IntForPrep):
         {
             const std::int64_t integer = value_get<std::int64_t>(active_values_data[instruction.operand].value);
             const size_t loop_index = instruction.member_site - 1;
@@ -5193,7 +5250,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (pc == loop.exit) interp.flush_integer_loop(instruction.member_site);
             continue;
         }
-        case Opcode::IntForNext:
+        CIFA_CASE(IntForNext):
         {
             const size_t loop_index = instruction.member_site - 1;
             auto& loop_state = interp.integer_loop_state(loop_index);
@@ -5214,7 +5271,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             interp.flush_integer_loop(instruction.member_site);
             continue;
         }
-        case Opcode::IntForNextLocal:
+        CIFA_CASE(IntForNextLocal):
         {
             const size_t loop_index = instruction.member_site - 1;
             auto& loop_state = interp.integer_loop_state(loop_index);
@@ -5229,13 +5286,29 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             interp.flush_integer_loop(instruction.member_site);
             continue;
         }
-        case Opcode::Constant:
+        CIFA_CASE(IntIncrementForNextLocal):
+        {
+            const size_t loop_index = instruction.member_site - 1;
+            auto& loop_state = interp.integer_loop_state(loop_index);
+            ++value_get<std::int64_t>(active_locals->resource_payload(instruction.operand));
+            ++loop_state.value;
+            if (loop_state.remaining != 0)
+            {
+                --loop_state.remaining;
+                pc = loop_state.body;
+                continue;
+            }
+            pc = loop_state.exit;
+            interp.flush_integer_loop(instruction.member_site);
+            continue;
+        }
+        CIFA_CASE(Constant):
         {
             const auto& constant = active_owner->constants[instruction.operand];
             registers.write_payload(output, constant.value);
             continue;
         }
-        case Opcode::ConstantLocal:
+        CIFA_CASE(ConstantLocal):
         {
             const size_t slot = instruction.auxiliary - 1;
             if (slot >= active_locals->size())
@@ -5249,7 +5322,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!instruction.discard_result) registers.copy(output, *active_locals, slot);
             continue;
         }
-        case Opcode::Branch:
+        CIFA_CASE(Branch):
         {
             interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
@@ -5258,7 +5331,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!condition) pc = instruction.operand;
             continue;
         }
-        case Opcode::AndBranch:
+        CIFA_CASE(AndBranch):
         {
             interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
@@ -5270,7 +5343,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        case Opcode::OrBranch:
+        CIFA_CASE(OrBranch):
         {
             interp.mark_error_location(Machine::RuntimeLocationKind::Condition);
             const bool condition = machine.condition(registers, interp.input_slot(instruction, instruction.input_count - 1), nullptr);
@@ -5282,10 +5355,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        case Opcode::ReleaseLocal:
+        CIFA_CASE(ReleaseLocal):
             active_locals->release_scope_slot(instruction.operand);
             continue;
-        case Opcode::Member:
+        CIFA_CASE(Member):
         {
             const auto member = machine.resolve_member(active_owner->names[instruction.operand],
                 active_owner->names[instruction.auxiliary]);
@@ -5293,10 +5366,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = Object(); return true; }
             continue;
         }
-        case Opcode::MethodPush:
+        CIFA_CASE(MethodPush):
             if (!interp.op_method_push(instruction)) return true;
             continue;
-        case Opcode::ArrayPushGlobal:
+        CIFA_CASE(ArrayPushGlobal):
         {
             const auto& site = active_owner->calls[instruction.operand];
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
@@ -5332,16 +5405,16 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::ArrayPushGlobalLocal:
+        CIFA_CASE(ArrayPushGlobalLocal):
             if (!interp.op_array_push_global_local(instruction)) return true;
             continue;
-        case Opcode::MethodCheck:
+        CIFA_CASE(MethodCheck):
             if (!interp.op_method_check(instruction)) return true;
             continue;
-        case Opcode::MethodCall:
+        CIFA_CASE(MethodCall):
             if (!interp.op_method_call(instruction)) return true;
             continue;
-        case Opcode::Range:
+        CIFA_CASE(Range):
         {
             if (instruction.auxiliary == 0)
             {
@@ -5366,22 +5439,22 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             continue;
         }
-        case Opcode::Index:
+        CIFA_CASE(Index):
             if (!interp.op_index(instruction)) return true;
             continue;
-        case Opcode::IndexLocal:
+        CIFA_CASE(IndexLocal):
             if (!interp.op_index_local(instruction)) return true;
             continue;
-        case Opcode::Array:
+        CIFA_CASE(Array):
             if (!interp.op_array(instruction)) return true;
             continue;
-        case Opcode::CallBegin:
+        CIFA_CASE(CallBegin):
             if (!interp.op_call_begin(instruction)) return true;
             continue;
-        case Opcode::Call:
+        CIFA_CASE(Call):
             if (!interp.op_call(instruction)) return true;
             continue;
-        case Opcode::Switch:
+        CIFA_CASE(Switch):
         {
             auto& state = switches[instruction.operand];
             if (instruction.auxiliary == 0)
@@ -5421,10 +5494,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (interpreter.should_stop_execution()) { result = Object(); return true; }
             continue;
         }
-        case Opcode::PrepareStore:
+        CIFA_CASE(PrepareStore):
             if (!interp.op_prepare_store(instruction)) return true;
             continue;
-        case Opcode::DeclareLocal:
+        CIFA_CASE(DeclareLocal):
         {
             const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
@@ -5437,7 +5510,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             active_locals->clear(instruction.operand);
             continue;
         }
-        case Opcode::NumericForNext:
+        CIFA_CASE(NumericForNext):
         {
             // Keep the integer payload in place: no numeric conversion, result
             // copy, or diagnostic lookup is needed on this path.
@@ -5471,9 +5544,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     continue;
                 }
             }
-            [[fallthrough]];
+            CIFA_TO_INCREMENT_LOCAL();
         }
-        case Opcode::IncrementLocal:
+        CIFA_CASE(IncrementLocal):
         {
             const auto slot = instruction.operand;
             if (instruction.plain_increment && instruction.discard_result
@@ -5524,7 +5597,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 registers.copy(output, *active_locals, slot);
             continue;
         }
-        case Opcode::StoreLocal:
+        CIFA_CASE(StoreLocal):
         {
             const auto& source = interp.current_location();
             if (instruction.operand >= active_locals->size())
@@ -5584,14 +5657,14 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!instruction.discard_result) registers.copy(output, *active_locals, instruction.operand);
             continue;
         }
-        case Opcode::Store:
-        case Opcode::Increment:
+        CIFA_CASE(Store):
+        CIFA_CASE(Increment):
             if (!interp.op_store_increment(instruction)) return true;
             continue;
-        case Opcode::Return:
+        CIFA_CASE(Return):
             if (!interp.op_return(instruction)) return true;
             continue;
-        case Opcode::NumericCompareBranch:
+        CIFA_CASE(NumericCompareBranch):
         {
             const auto& operation = active_instructions->numeric_operations[instruction.auxiliary];
             if (operation.flags == 4 && operation.left < active_locals->size()
@@ -5668,9 +5741,9 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                 else pc = instruction.member_site;
                 continue;
             }
-            [[fallthrough]];
+            CIFA_TO_NUMERIC_BINARY();
         }
-        case Opcode::NumericBinary:
+        CIFA_CASE(NumericBinary):
         {
             const auto& operation = active_instructions->numeric_operations[instruction.auxiliary];
             const auto read_number = [&](std::uint32_t operand, std::uint16_t flags,
@@ -5708,7 +5781,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             if (!interp.op_register_binary(instruction)) return true; continue;
         }
-        case Opcode::NumericBinaryLocal:
+        CIFA_CASE(NumericBinaryLocal):
         {
             // 整数/浮点本地槽直通路径：操作数均为本地槽、目标槽已绑定数值类型
             // 且无别名时，直接在寄存器文件内完成运算。带错误路径的运算
@@ -5773,10 +5846,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (!interp.op_numeric_binary_local(instruction)) return true;
             continue;
         }
-        case Opcode::RegisterBinary:
+        CIFA_CASE(RegisterBinary):
             if (!interp.op_register_binary(instruction)) return true;
             continue;
-        case Opcode::LoadLocal:
+        CIFA_CASE(LoadLocal):
         {
             if (instruction.operand >= active_locals->size())
             {
@@ -5792,8 +5865,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::Load:
-        case Opcode::Peek:
+        CIFA_CASE(Load):
+        CIFA_CASE(Peek):
         {
             const auto& source = interp.current_location();
             if (instruction.auxiliary == 1)
@@ -5821,16 +5894,16 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::Size:
+        CIFA_CASE(Size):
             if (!interp.op_size(instruction)) return true;
             continue;
-        case Opcode::MathUnary:
+        CIFA_CASE(MathUnary):
             if (!interp.op_math_unary(instruction)) return true;
             continue;
-        case Opcode::MathBinary:
+        CIFA_CASE(MathBinary):
             if (!interp.op_math_binary(instruction)) return true;
             continue;
-        case Opcode::Positive:
+        CIFA_CASE(Positive):
         {
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
@@ -5848,7 +5921,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             registers.move(output, registers, argument);
             continue;
         }
-        case Opcode::Negative:
+        CIFA_CASE(Negative):
         {
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
@@ -5872,7 +5945,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::LogicalNot:
+        CIFA_CASE(LogicalNot):
         {
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
@@ -5891,7 +5964,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::BitNot:
+        CIFA_CASE(BitNot):
         {
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             const auto& input = registers.payload(argument);
@@ -5910,7 +5983,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (machine.should_stop()) { result = machine.error_result(); return true; }
             continue;
         }
-        case Opcode::Cast:
+        CIFA_CASE(Cast):
         {
             const size_t argument = interp.input_slot(instruction, instruction.input_count - 1);
             machine.convert_type(registers, output, registers, argument, active_owner->names[instruction.operand],
@@ -5919,7 +5992,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             if (output != argument) registers.clear(argument);
             continue;
         }
-        default:
+        CIFA_DEFAULT
         {
             if (registers.binary(instruction.opcode, output, interp.input_slot(instruction, instruction.input_count - 2), interp.input_slot(instruction, instruction.input_count - 1),
                 machine, interp.current_location()))
@@ -5929,8 +6002,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             registers.binary_fallback(instruction.opcode, output, interp.input_slot(instruction, instruction.input_count - 2),
                 interp.input_slot(instruction, instruction.input_count - 1), machine, interp.current_location(), active_owner->host_function_version != 0);
-            break;
-        }
+            CIFA_EXECUTION_BREAK();
+        CIFA_SWITCH_END()
         }
         if (machine.should_stop())
         {
