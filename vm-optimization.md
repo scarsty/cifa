@@ -8,6 +8,119 @@
 耗时，不归因给相邻改动。所有 PI 行均以脚本输出校验为前提，早期记录为 length=502/FNV 校验，近期记录为
 502 字符精确断言。
 
+#### 编译期参数形态分析与函数级专门化前提（2026-09-24）
+
+为研究把动态计算移到编译期，`FunctionCode` 增加了冷元数据 `parameter_shapes` 和
+`shape_specializable`。分析器先按函数体使用推导 `Numeric/Array`，再通过脚本函数调用点做固定点传播，
+因此 PI 中 `calc_arctan.base_val` 能从 `big_div_int(a, divisor)` 的需求正确传播为 `Array`；
+`big_mul_int`、`big_div_int` 和 `big_add` 也能识别为形态完整且索引受限的候选函数。listing 已输出
+参数形态和专门化标记，脚本保持冻结。
+
+本轮先收紧了一个误报：普通二元 AST（尤其赋值）不能把两个子节点都标为 `Numeric`；修正后 PI
+输出仍为 502 字符。Release/Debug 单元测试均为 `76/76`。
+
+当前不新增执行 opcode。现有 `IndexLocal` 已经直接读取局部槽并有 `VmArray` 快路；仅增加
+`shape_specializable` 的运行时守护会重复局部槽、类型和数组检查，尚无足够收益抵消热 handler 膨胀。
+高 inline Release 的无插桩 PI VM-only 基线为 7 次中位数约 `13.6646 ms`，结果全部为 502 字符。
+后续应优先研究 verifier 固化的直接目标槽/紧凑热码路径，而不是继续增加通用形态分支。
+
+本轮继续检查了 `a[i]` 数值表达式专门化和 `ArrayPushGlobalLocal` 覆盖。PI 中 `res/tmp` 是无类型函数变量，
+按现有语言语义解析到脚本全局作用域，不能为了优化静默改成局部数组；而 `a[i]` 与数值运算的严格候选
+在当前字节码中主要受无类型局部变量形态未知限制，覆盖不足，不值得新增索引数值旁表或组合 handler。
+该探针已撤回。期间发现 `FunctionCode::parameter_shapes` 初始版本未绑定所属模块的 PMR 资源，重复编译
+公共测试时触发 Release `bad_alloc`；构造函数现已初始化 `parameter_shapes(resource)`，Release 测试恢复通过。
+
+#### 固定类型与数组参数的 VM 优化前提（2026-09-24）
+
+普通脚本不需要为变量写固定类型；动态值语义已经覆盖配置和业务逻辑。性能敏感路径可以显式固定
+`int`、`double` 或 `vector<T>`，为 verifier 和字节码编译器提供稳定的数值绑定、元素类型和容器形态
+事实，从而为减少动态类型检查、选择紧凑执行路径留下空间。固定类型同时保留运行时赋值和元素转换约束，
+但不改变脚本的整体动态值语义。
+
+函数参数的语言语义仍是**按值**，Direct Cifa 不引入引用别名。Bytecode VM 通过 `VmArray` 的共享底层
+存储降低参数传递成本：只读调用传递共享句柄，不深复制数组元素；函数内发生写入时由 COW 分离，
+继续保证调用者值不被修改。这里的共享句柄是 VM 内部实现，不是脚本可写引用，也不是跨调用帧裸指针。
+
+本轮 PI 已把大数临时数组和相关函数参数固定为 `vector<int>`，标量参数固定为 `int`。函数参数仍按值
+传递；显式类型只用于编译期专门化，不改变调用语义。双后端只读数组参数回归为 `78/78`；函数内写入
+回写调用者仍不属于本轮语义。
+
+#### IndexLocalIntStore 编译期融合（2026-09-24）
+
+在 verifier 中新增 `IndexLocalIntStore` peephole lowering：当 `IndexLocalInt` 的结果紧接着被丢弃式
+`StoreLocal` 写入静态整数局部槽时，删除两条通用指令，改为一条直接从 `VmArray` 读取元素并写入目标
+局部槽的专用指令。数组槽、索引槽和目标槽均在编译期编码；执行路径不做字符串类型判断。由于
+`Instruction::destination` 会在 verifier 收尾阶段统一表示寄存器结果，目标局部槽改存于专用的
+`input_offset` 字段，并让该 opcode 绕过通用寄存器输入/输出重写，避免局部槽编号被覆盖。
+
+PI 显式类型化后 listing 已实际出现 `IndexLocalIntStore`。Clang high Release、`--vm-only`、21 次样本
+的中位数为 `12.9595 ms`（范围 `12.8979--13.1743 ms`），此前同配置约 `13.495 ms`；结果仍为 502
+字符。完整回归为 `Passed 78 out of 78 tests`。这证明该 peephole 优化已跨函数类型传播并实际命中，
+而不是仅增加未使用的 opcode。
+
+#### PI 非负商的整数除法化（2026-09-24）
+
+`big_div_int`、`big_add`、`big_mul_int` 中参与商计算的操作数均为非负整数，原先使用
+`floor((double)value / divisor)` 是多余的浮点转换和数学调用。现统一改为整数除法，保持整数商语义并让
+编译器走整数数值路径；`num_blocks` 的非负整数初始化除法也同步改写。Clang high Release、`--vm-only`、
+21 次样本中位数由 `12.4872 ms` 降至 `10.6713 ms`，结果仍为 502 字符；完整回归为
+`Passed 78 out of 78 tests`。这些替换依赖相关被除数非负且除数为正的函数前提。
+
+期间尝试在 `big_sub` 的前导零清理循环中缓存 `size(res)`，但 21 次样本为 `10.7785 ms`，没有超过
+原始路径，已撤回。说明该处长度查询并非当前主要瓶颈，继续添加局部缓存会增加槽和赋值成本。
+
+#### Lua 整数运算对照口径（2026-09-24）
+
+此前 Lua 对照脚本在 `big_add`、`big_mul_int`、`big_div_int` 和初始化块数时使用浮点除法加
+`floor`，而 Cifa 已根据非负整数前提改用整数除法。为避免把算法表达差异误认为 VM 差异，
+`benchmarks/pi/comparison.lua` 现改用 Lua 5.4 的 `//` 整除和 `%` 取模；`build/calc_pi.lua`
+同步更新。
+
+Lua 5.4.5 整数基线：中位数 `5.6875 ms`、平均 `5.6823 ms`；Cifa Clang high Release 同批
+中位数 `10.7986 ms`。两边结果长度均为 502，FNV1a32 均为 `1d4b4c2f`，完整 Cifa 回归为
+`Passed 78 out of 78 tests`。后续性能对照默认使用这份整数运算 Lua 基线；若比较原始 Lua
+浮点表达，则应单独标注为不同算法表达路径。
+
+Lua 的 `OP_ADDI`/`OP_DIVI` 等整数立即数 opcode 提供了 Cifa 的优化方向。对常量除法和取模
+做过受限的局部槽专用化实验，但在真实命中后的多轮样本中没有证明稳定收益，因此已撤回，避免
+给热路径增加无效分支。
+
+#### typed vector 的 `size()` 专用化（2026-09-24）
+
+编译器现能识别 `size(typed_vector_local)`，仍复用 `Size` opcode，但使用新的内部模式直接从
+局部槽中的 `VmArray` 读取 `values.size()`。这省去了 `LoadLocal`、临时寄存器搬运和通用
+字符串/数组/map 类型分派；未初始化、槽越界和运行时类型不一致仍有明确错误路径。PI 基准
+本轮中位数为 `10.6118 ms`，结果保持 `502`/`1d4b4c2f`，完整回归为 `78/78`。当前收益仍
+应视为初步结果，后续需要固定 CPU 条件下重复 A/B。
+
+#### typed vector 整数索引直写（2026-09-24）
+
+`IndexLocalInt` 和 `IndexLocalIntStore` 原本在命中 `vector<int>` 元素后仍复制完整的
+`CompactValue`，再由后续路径重新读取整数。现当数组元素确实保存为 `int64_t` 时，直接写入
+目标寄存器或目标局部数值槽；非整数表示仍保留原始 `CompactValue` 回退路径，未初始化元素、
+越界和类型错误语义不变。
+
+Clang high Release、PI、`--vm-only`、连续两批各 21 次的中位数为 `10.0491 ms` 和
+`10.0389 ms`，此前同机近期样本约 `10.7 ms`；结果保持 502 字符，完整回归仍为
+`Passed 78 out of 78 tests`。这是目前本轮最明确的索引热路径收益，后续可继续研究把该直接
+整数读取与同一基本块内的加减乘运算合并。
+
+#### 转换后独立 peephole 优化阶段（2026-09-24）
+
+编译流水线现在明确分为：`seal` 将构建指令转换为热指令，`verify` 完成基础数值 lowering、
+寄存器输入编码和 CFG 合法性验证，`optimize` 在已转换的热码上分析局部指令序列并进行融合，
+最后 `compact` 删除 `Removed` 指令并重映射 PC。当前已迁移的规则是
+`IndexLocalInt + StoreLocal -> IndexLocalIntStore`，PI listing 实际命中 4 次。
+
+尝试在 `optimize` 后再次调用完整 `verify` 被回归及时发现：首次 lowering 会把优化后的
+`NumericBinaryLocal` 当作原始 `register_binary_sites` 重新编码，导致参数和函数返回等大量测试
+失败。该二次重编码已撤回；后续若需要优化后校验，应新增只读 validator，而不能复用会修改热码的
+首次 lowering 流程。当前安全顺序为 `seal -> verify -> optimize -> compact`。
+
+Clang high Release、PI、`--vm-only` 的中位数为 `10.0984 ms`，结果保持 502 字符；完整回归为
+`Passed 78 out of 78 tests`。这个阶段边界为后续新增 `IndexLocalInt`、数组 push、数值运算和
+循环融合规则提供了统一入口。
+
 | 阶段耗时 | 最终保留的主要优化 | 同批证据或记录结论 |
 | ---: | --- | --- |
 | `313.109 ms` | 早期常量折叠、数值内建直达、局部一维数组直接路径 | 同进程未优化 `355.710 ms` -> 优化 `313.109 ms`，约快 `11.98%` |

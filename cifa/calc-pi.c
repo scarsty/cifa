@@ -1,8 +1,8 @@
 // Keep base-10000 blocks and remainders integer, matching the Lua benchmark.
-// Use a double operand for division: Lua / produces a float even for integers.
-// All modulo operands here are nonnegative, so Cifa % matches Lua %.
+// All division and modulo operands here are nonnegative integers, matching the
+// quotient/remainder operations needed by the base-10000 arithmetic.
 // 判断大数数组是否为 0
-int big_is_zero(a) {
+int big_is_zero(vector<int> a) {
     int len = size(a);
     if (len == 0) return 1;
     if (len == 1 && a[0] == 0) return 1;
@@ -10,8 +10,8 @@ int big_is_zero(a) {
 }
 
 // 大数加法: res = a + b
-auto big_add(a, b) {
-    res = {};
+vector<int> big_add(vector<int> a, vector<int> b) {
+    vector<int> res = {};
     int len_a = size(a);
     int len_b = size(b);
     int max_len = len_a;
@@ -27,18 +27,18 @@ auto big_add(a, b) {
 
         int sum = val_a + val_b + carry;
         res.push_back(sum % 10000);
-        carry = floor(sum / 10000.0);
+        carry = sum / 10000;
     }
     while (carry > 0) {
         res.push_back(carry % 10000);
-        carry = floor(carry / 10000.0);
+        carry = carry / 10000;
     }
     return res;
 }
 
 // 大数减法: res = a - b (前提要求 a >= b)
-auto big_sub(a, b) {
-    res = {};
+vector<int> big_sub(vector<int> a, vector<int> b) {
+    vector<int> res = {};
     int len_a = size(a);
     int len_b = size(b);
     res.reserve(len_a);
@@ -67,26 +67,26 @@ auto big_sub(a, b) {
 }
 
 // 大数乘单个整数: res = a * factor
-auto big_mul_int(a, factor) {
-    res = {};
+vector<int> big_mul_int(vector<int> a, int factor) {
+    vector<int> res = {};
     int carry = 0;
     int len = size(a);
     res.reserve(len + 1);
     for (int i = 0; i < len; i++) {
         int val = carry + a[i] * factor;
         res.push_back(val % 10000);
-        carry = floor(val / 10000.0);
+        carry = val / 10000;
     }
     while (carry > 0) {
         res.push_back(carry % 10000);
-        carry = floor(carry / 10000.0);
+        carry = carry / 10000;
     }
     return res;
 }
 
 // 大数除以单个整数: res = a / divisor
-auto big_div_int(a, divisor) {
-    res = {};
+vector<int> big_div_int(vector<int> a, int divisor) {
+    vector<int> res = {};
     int len = size(a);
     res.reserve(len);
     if (len == 0) {
@@ -94,11 +94,11 @@ auto big_div_int(a, divisor) {
         return res;
     }
     int rem = 0;
-    tmp = {};
+    vector<int> tmp = {};
     tmp.reserve(len);
     for (int i = len - 1; i >= 0; i--) {
         int cur = rem * 10000 + a[i];
-        int q = floor((double)cur / divisor);
+        int q = cur / divisor;
         rem = cur % divisor;
         tmp.push_back(q);
     }
@@ -114,7 +114,7 @@ auto big_div_int(a, divisor) {
 }
 
 // 计算 arctan(1/x) * base
-auto calc_arctan(x, base_val, max_iters) {
+vector<int> calc_arctan(int x, vector<int> base_val, int max_iters) {
     term = big_div_int(base_val, x);
     sum_val = term;
     int x_sq = x * x;
@@ -156,9 +156,9 @@ string format_pi(pi_arr, target_digits) {
 
 int target_digits = 500;
 // 125 (500/4) + 3 (缓冲区) = 128 个 0 块
-int num_blocks = floor(target_digits / 4.0) + 3;
+int num_blocks = target_digits / 4 + 3;
 
-base_val = {};
+vector<int> base_val = {};
 base_val.reserve(num_blocks + 1);
 for (int i = 0; i < num_blocks; i++) {
     base_val.push_back(0);

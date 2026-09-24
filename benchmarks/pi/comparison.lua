@@ -47,12 +47,12 @@ local function big_add(a, b)
         if i < len_a then val_a = a[i + 1] end
         if i < len_b then val_b = b[i + 1] end
         local sum = val_a + val_b + carry
-        push_back(res, floor(fmod(sum, 10000)))
-        carry = floor(sum / 10000)
+        push_back(res, sum % 10000)
+        carry = sum // 10000
     end
     while carry > 0 do
-        push_back(res, floor(fmod(carry, 10000)))
-        carry = floor(carry / 10000)
+        push_back(res, carry % 10000)
+        carry = carry // 10000
     end
     return res
 end
@@ -88,12 +88,12 @@ local function big_mul_int(a, factor)
     for i = 0, len - 1 do
         local val = carry
         if i < len then val = val + a[i + 1] * factor end
-        push_back(res, floor(fmod(val, 10000)))
-        carry = floor(val / 10000)
+        push_back(res, val % 10000)
+        carry = val // 10000
     end
     while carry > 0 do
-        push_back(res, floor(fmod(carry, 10000)))
-        carry = floor(carry / 10000)
+        push_back(res, carry % 10000)
+        carry = carry // 10000
     end
     return res
 end
@@ -109,8 +109,8 @@ local function big_div_int(a, divisor)
     local tmp = {}
     for i = len - 1, 0, -1 do
         local cur = rem * 10000 + a[i + 1]
-        local q = floor(cur / divisor)
-        rem = fmod(cur, divisor)
+        local q = cur // divisor
+        rem = cur % divisor
         push_back(tmp, q)
     end
     local tmp_len = size(tmp)
@@ -164,7 +164,7 @@ end
 
 local function calculate_pi()
     local target_digits = 500
-    local num_blocks = floor(target_digits / 4) + 3
+    local num_blocks = target_digits // 4 + 3
     local base_val = {}
     for _ = 1, num_blocks do
         push_back(base_val, 0)

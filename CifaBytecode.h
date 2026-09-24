@@ -16,7 +16,7 @@ class CifaBytecode : public Cifa
         AndBranch, OrBranch, LogicalAnd, LogicalOr, Return, ReleaseLocal,
         PrepareStore, Store, Increment, Switch,
         CallBegin, Call, Peek, Array, Index, IndexLocal, Range, MethodCheck,
-        MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, Member, NumericBinary, NumericBinaryLocal,
+        MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, ArrayPushLocalInt, Member, IndexLocalInt, IndexLocalIntStore, NumericBinary, NumericBinaryLocal,
         NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, RegisterBinary, ScriptEnd, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
@@ -345,12 +345,14 @@ class CifaBytecode : public Cifa
     struct RegisterSlots
     {
         enum class NumericBinding : std::uint8_t { None, Int, Double };
+        enum class ElementKind : std::uint8_t { Dynamic, Int };
         struct TypeDescriptor
         {
             std::type_index bound = typeid(void);
             std::string declared;
             std::string element;
             std::string special;
+            ElementKind element_kind = ElementKind::Dynamic;
             bool operator==(const TypeDescriptor&) const = default;
         };
         // 与槽下标并行的负载、数值绑定、诊断来源和类型描述；扩容必须同步进行。
@@ -529,12 +531,14 @@ class CifaBytecode : public Cifa
     // 已编译脚本函数及其局部槽需求。
     struct FunctionCode
     {
-        explicit FunctionCode(std::pmr::memory_resource* resource) : parameters(resource), local_slots(resource), instructions(resource) {}
+        explicit FunctionCode(std::pmr::memory_resource* resource)
+            : parameters(resource), parameter_shapes(resource), local_slots(resource), instructions(resource) {}
         struct Parameter
         {
             std::string name;
             std::string type_name;
         };
+        enum class ParameterShape : std::uint8_t { Unknown, Numeric, Array, Mixed };
         enum class LocalStorage : std::uint8_t { StaticNumeric, StaticValue, Cleanup };
         struct LocalSlot
         {
@@ -543,6 +547,8 @@ class CifaBytecode : public Cifa
             LocalStorage storage = LocalStorage::StaticValue;
         };
         std::pmr::vector<Parameter> parameters;
+        std::pmr::vector<ParameterShape> parameter_shapes;
+        bool shape_specializable = false;
         // Lexical resolution owns this table; execution addresses slots directly.
         std::pmr::vector<LocalSlot> local_slots;
         std::string name;
@@ -869,7 +875,8 @@ class CifaBytecode : public Cifa
     static void discard_statement_result(std::pmr::vector<BuildInstruction>& instructions, size_t begin,
         std::optional<size_t> end = std::nullopt);
     bool emit_register_expression(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
-    bool verify(Instructions& instructions, size_t local_slot_count = 0);
+    bool verify(Instructions& instructions, size_t local_slot_count = 0, bool revalidate = false);
+    bool optimize(Instructions& instructions, size_t local_slot_count);
     struct InterpState;
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
         Object& result, size_t start = 0);

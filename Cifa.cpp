@@ -118,6 +118,33 @@ static std::int64_t wrap_int64(std::uint64_t value)
     return std::bit_cast<std::int64_t>(value);
 }
 
+static std::optional<std::string> vector_element_type_name(std::string_view type_name)
+{
+    constexpr std::string_view prefix = "vector<";
+    if (!type_name.starts_with(prefix) || type_name.size() <= prefix.size() + 1 || type_name.back() != '>')
+    {
+        return std::nullopt;
+    }
+    std::string_view element = type_name.substr(prefix.size(), type_name.size() - prefix.size() - 1);
+    int depth = 0;
+    for (size_t index = 0; index < element.size(); ++index)
+    {
+        if (element[index] == '<') { ++depth; }
+        else if (element[index] == '>')
+        {
+            if (depth == 0) { return std::nullopt; }
+            --depth;
+        }
+    }
+    if (depth != 0 || element.empty()) { return std::nullopt; }
+    return std::string(element);
+}
+
+static bool is_vector_type_name(std::string_view type_name)
+{
+    return vector_element_type_name(type_name).has_value();
+}
+
 static bool numeric_less(const Object& left, const Object& right)
 {
     return left.isInteger() && right.isInteger()
@@ -1823,6 +1850,67 @@ std::list<CalUnit> Cifa::split(std::string& str)
         ++it;
     }
 
+    // 将 vector<T>（包括 vector<vector<T>>）合并为一个类型 token。
+    for (auto it = rv.begin(); it != rv.end(); ++it)
+    {
+        if (it->str != "vector" || it->type != CalUnitType::Parameter)
+        {
+            continue;
+        }
+        auto open = std::next(it);
+        if (open == rv.end() || open->str != "<")
+        {
+            continue;
+        }
+        int depth = 1;
+        auto close = std::next(open);
+        for (; close != rv.end() && depth > 0; ++close)
+        {
+            if (close->str == "<")
+            {
+                ++depth;
+            }
+            else if (close->str == ">")
+            {
+                --depth;
+            }
+            else if (close->str == ">>" && depth >= 2)
+            {
+                depth -= 2;
+            }
+        }
+        if (depth != 0)
+        {
+            continue;
+        }
+        auto declarator = close;
+        if (declarator == rv.end()
+            || (declarator->type != CalUnitType::Parameter && declarator->type != CalUnitType::Function)
+            || declarator->with_type)
+        {
+            continue;
+        }
+        std::string type_name = "vector<";
+        for (auto part = std::next(open); part != close; ++part)
+        {
+            if (part->str == ">>")
+            {
+                type_name += ">>";
+            }
+            else
+            {
+                type_name += part->str;
+            }
+        }
+        if (!vector_element_type_name(type_name).has_value())
+        {
+            continue;
+        }
+        it->type = CalUnitType::Type;
+        it->str = std::move(type_name);
+        rv.erase(open, close);
+    }
+
     // 不把类型符号留在归约结果中，但保留类型名供声明转换使用。
     // 同时把 int a = 1, b = 2; 中的类型传播到后续声明符。
     {
@@ -2863,6 +2951,11 @@ Object Cifa::make_declared_default(const std::string& type_name) const
     result.declared_type_name = type_name;
     auto registered = registered_types.find(type_name);
     if (registered != registered_types.end()) { result.bound_type = registered->second.identity; }
+    else if (auto element_type = vector_element_type_name(type_name); element_type.has_value())
+    {
+        result.bound_type = typeid(ObjectVector);
+        result.element_type_name = *element_type;
+    }
     else if (find_struct_definition(type_name) != nullptr) { result.bound_type = typeid(ObjectMap); }
     return result;
 }
@@ -2881,14 +2974,20 @@ bool Cifa::apply_declared_type(Object& object, const std::string& type_name, con
     }
 
     auto registered = registered_types.find(type_name);
-    if (type_name != "auto" && registered == registered_types.end() && find_struct_definition(type_name) == nullptr)
+    const bool vector_type = is_vector_type_name(type_name);
+    if (type_name != "auto" && registered == registered_types.end() && !vector_type
+        && find_struct_definition(type_name) == nullptr)
     {
         set_runtime_error("unknown type '" + type_name + "'", &object, location);
         return false;
     }
     object.declared_type_name = type_name;
-    object.bound_type = registered != registered_types.end() ? registered->second.identity
+    object.bound_type = vector_type ? typeid(ObjectVector) : registered != registered_types.end() ? registered->second.identity
         : std::type_index(type_name == "auto" ? typeid(void) : typeid(ObjectMap));
+    if (vector_type)
+    {
+        object.element_type_name = *vector_element_type_name(type_name);
+    }
     if (type_name == "auto" && infer_auto && object.hasValue() && object.type1 != "NoValue")
     {
         object.bound_type = object.getType();
@@ -2930,6 +3029,28 @@ Object Cifa::convert_object_type(const Object& source, const std::string& type_n
         }
         return registered->second.convert(source);
     }
+    if (auto element_type = vector_element_type_name(type_name); element_type.has_value())
+    {
+        if (!source.isType<ObjectVector>())
+        {
+            set_runtime_error("cannot convert value to '" + type_name + "'", &source, location);
+            return Object();
+        }
+        Object result = source;
+        result.declared_type_name = type_name;
+        result.bound_type = typeid(ObjectVector);
+        result.element_type_name = *element_type;
+        for (auto& element : result.ref<ObjectVector>())
+        {
+            element = convert_object_type(element, *element_type, location);
+            if (has_runtime_error()) { return Object(); }
+            if (!apply_declared_type(element, *element_type, location, false))
+            {
+                return Object();
+            }
+        }
+        return result;
+    }
     if (find_struct_definition(type_name) != nullptr)
     {
         if (!source.isType<ObjectMap>() || (!source.declared_type_name.empty()
@@ -2967,7 +3088,8 @@ Object& Cifa::assign_object_value(Object& target, Object value, const CalUnit& l
 
     if (target.isTyped() && target.bound_type != typeid(void))
     {
-        if (registered_types.contains(target.declared_type_name) || find_struct_definition(target.declared_type_name) != nullptr)
+        if (registered_types.contains(target.declared_type_name) || is_vector_type_name(target.declared_type_name)
+            || find_struct_definition(target.declared_type_name) != nullptr)
         {
             value = convert_object_type(value, target.declared_type_name, location);
         }
@@ -3332,6 +3454,13 @@ Object& Cifa::get_parameter(CalUnit& c, ScopeStack& scopes, bool only_check)
     if (c.with_type)
     {
         apply_declared_type(object, c.type_name, &c, false);
+        if (is_vector_type_name(c.type_name) && !object.hasValue())
+        {
+            object.value = std::vector<Object>();
+            object.bound_type = typeid(ObjectVector);
+            object.declared_type_name = c.type_name;
+            object.element_type_name = *vector_element_type_name(c.type_name);
+        }
     }
     if (!only_check && existed && !c.with_type && !object.hasValue())
     {
@@ -3370,6 +3499,13 @@ Object& Cifa::get_parameter_for_assign(CalUnit& c, ScopeStack& scopes, bool decl
     if (c.with_type && !object.isTyped())
     {
         apply_declared_type(object, c.type_name, &c, false);
+    }
+    if (declare_current && c.with_type && is_vector_type_name(c.type_name) && !object.hasValue())
+    {
+        object.value = std::vector<Object>();
+        object.bound_type = typeid(ObjectVector);
+        object.declared_type_name = c.type_name;
+        object.element_type_name = *vector_element_type_name(c.type_name);
     }
     // struct 类型声明：直接创建并初始化 ObjectMap
     const auto* struct_definition = find_struct_definition(c.type_name);

@@ -28,6 +28,47 @@ namespace cifa
 {
 namespace
 {
+std::optional<std::string> vector_element_type_name(std::string_view type_name)
+{
+    constexpr std::string_view prefix = "vector<";
+    if (!type_name.starts_with(prefix) || type_name.size() <= prefix.size() + 1 || type_name.back() != '>')
+    {
+        return std::nullopt;
+    }
+    const auto element = type_name.substr(prefix.size(), type_name.size() - prefix.size() - 1);
+    int depth = 0;
+    for (const char character : element)
+    {
+        if (character == '<') ++depth;
+        else if (character == '>')
+        {
+            if (depth == 0) return std::nullopt;
+            --depth;
+        }
+    }
+    if (depth != 0 || element.empty()) return std::nullopt;
+    return std::string(element);
+}
+
+bool is_vector_type_name(std::string_view type_name)
+{
+    constexpr std::string_view prefix = "vector<";
+    if (!type_name.starts_with(prefix) || type_name.size() <= prefix.size() + 1 || type_name.back() != '>')
+        return false;
+    int depth = 0;
+    for (size_t index = prefix.size(); index + 1 < type_name.size(); ++index)
+    {
+        const char character = type_name[index];
+        if (character == '<') ++depth;
+        else if (character == '>')
+        {
+            if (depth == 0) return false;
+            --depth;
+        }
+    }
+    return depth == 0;
+}
+
 std::uint64_t profile_now_ns()
 {
 #ifdef __EMSCRIPTEN__
@@ -2037,8 +2078,17 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
             if (argument->str != "," && argument->type != CalUnitType::None)
             {
                 begin_diagnostic_frame(instructions, source_ref(&node));
-                if (argument->type == CalUnitType::Parameter && argument->v.empty() && !argument->with_type
-                    && !local_slot(*argument, false).has_value())
+                const auto argument_slot = argument->type == CalUnitType::Parameter && argument->v.empty()
+                    ? local_slot(*argument, false) : std::nullopt;
+                const bool typed_array_local = argument_slot.has_value()
+                    && *argument_slot < compiling_local_slots->size()
+                    && (*compiling_local_slots)[*argument_slot].has_type
+                    && (*compiling_local_slots)[*argument_slot].type_id < names.size()
+                    && vector_element_type_name(names[(*compiling_local_slots)[*argument_slot].type_id]).has_value();
+                if (typed_array_local)
+                    instructions.push_back({Opcode::Size, source_ref(&node), *argument_slot, 2});
+                else if (argument->type == CalUnitType::Parameter && argument->v.empty() && !argument->with_type
+                    && !argument_slot.has_value())
                     instructions.push_back({Opcode::Size, source_ref(&node), intern_name(argument->str), 1});
                 else
                 {
@@ -2685,57 +2735,94 @@ void CifaBytecode::emit(CalUnit& node, std::pmr::vector<BuildInstruction>& instr
     end_diagnostic_frame(instructions, source_ref(&node));
 }
 
-bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
+bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count, bool revalidate)
 {
-    instructions.numeric_operations.clear();
-    instructions.numeric_local_sites.clear();
-    for (auto& instruction : instructions.code)
+    if (!revalidate)
     {
-        if ((instruction.opcode == Opcode::NumericBinary || instruction.opcode == Opcode::RegisterBinary)
-            && instruction.operand < module_data->register_binary_sites.size())
+        instructions.numeric_operations.clear();
+        instructions.numeric_local_sites.clear();
+        for (auto& instruction : instructions.code)
         {
-            const auto& site = module_data->register_binary_sites[instruction.operand];
-            instructions.temporary_count = (std::max)(instructions.temporary_count, site.temporary_destination);
-            if (instruction.opcode == Opcode::NumericBinary && site.code.destination != 0)
+            if ((instruction.opcode == Opcode::NumericBinary || instruction.opcode == Opcode::RegisterBinary)
+                && instruction.operand < module_data->register_binary_sites.size())
             {
-                const auto& binding = variable_sites[site.variable_site - 1];
-                const auto operation_opcode = static_cast<Opcode>(site.code.opcode);
-                const bool integer_result = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
-                    || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide
-                    || operation_opcode == Opcode::Modulo || operation_opcode == Opcode::BitAnd
-                    || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor
-                    || operation_opcode == Opcode::ShiftLeft || operation_opcode == Opcode::ShiftRight;
-                const bool direct_integer = (!binding.with_type || binding.type_id == module_data->int_type_id) && integer_result;
-                const bool direct_double = binding.with_type && binding.type_id == module_data->double_type_id
-                    && (operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
-                        || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide);
-                if (direct_integer || direct_double)
+                const auto& site = module_data->register_binary_sites[instruction.operand];
+                instructions.temporary_count = (std::max)(instructions.temporary_count, site.temporary_destination);
+                if (instruction.opcode == Opcode::NumericBinary && site.code.destination != 0)
                 {
-                    instruction.opcode = Opcode::NumericBinaryLocal;
+                    const auto& binding = variable_sites[site.variable_site - 1];
+                    const auto operation_opcode = static_cast<Opcode>(site.code.opcode);
+                    const bool integer_result = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                        || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide
+                        || operation_opcode == Opcode::Modulo || operation_opcode == Opcode::BitAnd
+                        || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor
+                        || operation_opcode == Opcode::ShiftLeft || operation_opcode == Opcode::ShiftRight;
+                    const bool direct_integer = (!binding.with_type || binding.type_id == module_data->int_type_id) && integer_result;
+                    const bool direct_double = binding.with_type && binding.type_id == module_data->double_type_id
+                        && (operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                            || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide);
+                    if (direct_integer || direct_double)
+                    {
+                        instruction.opcode = Opcode::NumericBinaryLocal;
+                        instruction.auxiliary = instructions.numeric_operations.size();
+                        auto operation = site.code;
+                        operation.flags = static_cast<std::uint16_t>((site.left_constant ? 1 : site.left_temporary ? 2 : 0)
+                            | (site.right_constant ? 4 : site.right_temporary ? 8 : 0));
+                        instructions.numeric_operations.push_back(operation);
+                        instructions.numeric_local_sites.push_back(instruction.operand);
+                    }
+                    else instruction.opcode = Opcode::RegisterBinary;
+                }
+                else if (instruction.opcode == Opcode::NumericBinary)
+                {
                     instruction.auxiliary = instructions.numeric_operations.size();
                     auto operation = site.code;
                     operation.flags = static_cast<std::uint16_t>((site.left_constant ? 1 : site.left_temporary ? 2 : 0)
                         | (site.right_constant ? 4 : site.right_temporary ? 8 : 0));
+                    operation.destination = static_cast<std::uint32_t>(site.temporary_destination);
                     instructions.numeric_operations.push_back(operation);
-                    instructions.numeric_local_sites.push_back(instruction.operand);
+                    instructions.numeric_local_sites.push_back(std::numeric_limits<size_t>::max());
                 }
-                else instruction.opcode = Opcode::RegisterBinary;
-            }
-            else if (instruction.opcode == Opcode::NumericBinary)
-            {
-                instruction.auxiliary = instructions.numeric_operations.size();
-                auto operation = site.code;
-                operation.flags = static_cast<std::uint16_t>((site.left_constant ? 1 : site.left_temporary ? 2 : 0)
-                    | (site.right_constant ? 4 : site.right_temporary ? 8 : 0));
-                operation.destination = static_cast<std::uint32_t>(site.temporary_destination);
-                instructions.numeric_operations.push_back(operation);
-                instructions.numeric_local_sites.push_back(std::numeric_limits<size_t>::max());
             }
         }
     }
     for (auto& instruction : instructions.code)
         if (instruction.opcode == Opcode::MethodPush && calls[instruction.operand].global_receiver)
             instruction.opcode = Opcode::ArrayPushGlobal;
+    const auto& local_descriptors = compiling_function != nullptr
+        ? compiling_function->local_slots : module_data->local_slots;
+    for (size_t pc = 0; pc + 1 < instructions.code.size(); ++pc)
+    {
+        auto& load = instructions.code[pc];
+        auto& push = instructions.code[pc + 1];
+        if (load.opcode != Opcode::LoadLocal || push.opcode != Opcode::MethodPush
+            || push.operand >= calls.size() || load.operand >= local_descriptors.size()) continue;
+        const auto& call = calls[push.operand];
+        if (call.local_slot == 0 || call.local_slot - 1 >= local_descriptors.size()) continue;
+        const auto& receiver = local_descriptors[call.local_slot - 1];
+        const auto& argument = local_descriptors[load.operand];
+        const auto receiver_element = receiver.has_type && receiver.type_id < names.size()
+            ? vector_element_type_name(names[receiver.type_id]) : std::nullopt;
+        if (!receiver_element || *receiver_element != "int"
+            || !argument.has_type || argument.type_id != module_data->int_type_id) continue;
+        push.opcode = Opcode::ArrayPushLocalInt;
+        push.auxiliary = call.local_slot;
+        push.member_site = load.operand + 1;
+        instructions.diagnostics[pc + 1].condition_source = instructions.diagnostics[pc].source;
+        load.opcode = Opcode::Removed;
+    }
+    for (size_t pc = 0; pc + 1 < instructions.code.size(); ++pc)
+    {
+        auto& empty = instructions.code[pc];
+        const auto& store = instructions.code[pc + 1];
+        if (empty.opcode != Opcode::Empty || store.opcode != Opcode::StoreLocal
+            || store.variable_site == 0 || store.variable_site > variable_sites.size()) continue;
+        const auto& binding = variable_sites[store.variable_site - 1];
+        if (!binding.with_type || binding.type_id >= names.size()
+            || !is_vector_type_name(names[binding.type_id])) continue;
+        empty.opcode = Opcode::Array;
+        empty.operand = 0;
+    }
     for (size_t pc = 0; pc + 1 < instructions.code.size(); ++pc)
     {
         auto& constant = instructions.code[pc];
@@ -2779,6 +2866,21 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             index.variable_site = load.auxiliary;
             instructions.diagnostics[pc + 1].condition_source = instructions.diagnostics[pc].source;
             load.opcode = Opcode::Removed;
+            if (site.local_slot != 0 && site.local_slot - 1 < local_descriptors.size()
+                && load.operand < local_descriptors.size())
+            {
+                const auto& receiver = local_descriptors[site.local_slot - 1];
+                const auto& index_value = local_descriptors[load.operand];
+                const auto receiver_element = receiver.has_type && receiver.type_id < names.size()
+                    ? vector_element_type_name(names[receiver.type_id]) : std::nullopt;
+                if (receiver_element && *receiver_element == "int"
+                    && index_value.has_type && index_value.type_id == module_data->int_type_id)
+                {
+                    index.opcode = Opcode::IndexLocalInt;
+                    index.member_site = site.local_slot;
+                    index.variable_site = load.operand + 1;
+                }
+            }
         }
     alignas(std::max_align_t) std::byte verify_buffer[8192];
     std::pmr::monotonic_buffer_resource verify_scratch(verify_buffer, sizeof(verify_buffer), instructions.resource);
@@ -3156,6 +3258,15 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             ++register_top;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
             break;
+        case Opcode::ArrayPushLocalInt:
+            if (instruction.operand >= calls.size() || calls[instruction.operand].arguments.size() != 1
+                || instruction.auxiliary == 0 || instruction.auxiliary - 1 >= local_slot_count
+                || instruction.member_site == 0 || instruction.member_site - 1 >= local_slot_count
+                || instructions.diagnostics[pc].condition_source.id == 0)
+            { translation_error = "invalid bytecode typed local array push"; return false; }
+            ++register_top;
+            if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
+            break;
         case Opcode::Range:
             if (instruction.auxiliary == 0)
             {
@@ -3189,6 +3300,23 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             { translation_error = "invalid bytecode local index"; return false; }
             ++register_top;
             if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
+            break;
+        case Opcode::IndexLocalInt:
+            if (instruction.operand != 1 || instruction.auxiliary >= index_sites.size()
+                || instruction.member_site == 0 || instruction.member_site - 1 >= local_slot_count
+                || instruction.variable_site == 0 || instruction.variable_site - 1 >= local_slot_count
+                || instructions.diagnostics[pc].condition_source.id == 0)
+            { translation_error = "invalid bytecode typed local index"; return false; }
+            ++register_top;
+            if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
+            break;
+        case Opcode::IndexLocalIntStore:
+            if (instruction.operand != 1 || instruction.auxiliary >= index_sites.size()
+                || instruction.member_site == 0 || instruction.member_site - 1 >= local_slot_count
+                || instruction.variable_site == 0 || instruction.variable_site - 1 >= local_slot_count
+                || instruction.input_offset == 0 || instruction.input_offset - 1 >= local_slot_count
+                || instructions.diagnostics[pc].condition_source.id == 0 || instructions.diagnostics[pc].target_source.id == 0)
+            { translation_error = "invalid bytecode typed local index store"; return false; }
             break;
         case Opcode::Array:
             if (register_top < instruction.operand) { translation_error = "invalid bytecode array stack"; return false; }
@@ -3314,10 +3442,12 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             instructions.register_inputs.push_back(register_top - 1);
             continue;
         case Opcode::Positive: case Opcode::Negative: case Opcode::LogicalNot: case Opcode::BitNot: case Opcode::Cast: case Opcode::Size:
-            if (instruction.opcode == Opcode::Size && instruction.auxiliary == 1)
+            if (instruction.opcode == Opcode::Size && (instruction.auxiliary == 1 || instruction.auxiliary == 2))
             {
-                if (instruction.operand >= names.size())
+                if (instruction.auxiliary == 1 && instruction.operand >= names.size())
                 { translation_error = "invalid bytecode size name"; return false; }
+                if (instruction.auxiliary == 2 && instruction.operand >= local_slot_count)
+                { translation_error = "invalid bytecode local size slot"; return false; }
                 ++register_top;
                 if (register_top > instructions.register_capacity) instructions.register_capacity = register_top;
                 break;
@@ -3413,11 +3543,18 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
             case Opcode::LogicalAnd: case Opcode::LogicalOr:
                 return instruction.discard_result && input_top == 1 ? 1 : 2;
             case Opcode::Size:
-                return instruction.auxiliary == 1 ? 0 : 1;
+                return instruction.auxiliary == 1 || instruction.auxiliary == 2 ? 0 : 1;
             default:
                 return 0;
             }
         }();
+        if (instruction.opcode == Opcode::IndexLocalIntStore)
+        {
+            instruction.input_count = 0;
+            instruction.destination = 0;
+            if (!merge(pc + 1, state)) return false;
+            continue;
+        }
         if (input_count > input_top)
         { translation_error = "bytecode input register underflow"; return false; }
         instruction.input_offset = instructions.register_inputs.size();
@@ -3443,6 +3580,37 @@ bool CifaBytecode::verify(Instructions& instructions, size_t local_slot_count)
     for (size_t pc = 0; pc < instructions.code.size(); ++pc)
         if (!states[pc].visited)
             instructions.code[pc].opcode = Opcode::Removed;
+    return true;
+}
+
+bool CifaBytecode::optimize(Instructions& instructions, size_t local_slot_count)
+{
+    const auto& local_descriptors = compiling_function != nullptr
+        ? compiling_function->local_slots : module_data->local_slots;
+    for (size_t pc = 0; pc + 1 < instructions.code.size(); ++pc)
+    {
+        auto& index = instructions.code[pc];
+        auto& store = instructions.code[pc + 1];
+        if (index.opcode != Opcode::IndexLocalInt || store.opcode != Opcode::StoreLocal
+            || store.write != WriteOperation::Assign || !store.discard_result
+            || store.variable_site == 0 || store.variable_site > variable_sites.size()) continue;
+        const auto& binding = variable_sites[store.variable_site - 1];
+        const bool binding_is_int = binding.with_type && binding.type_id == module_data->int_type_id;
+        const bool target_slot_is_int = store.operand < local_descriptors.size()
+            && local_descriptors[store.operand].has_type
+            && local_descriptors[store.operand].type_id == module_data->int_type_id;
+        if (!binding_is_int && !target_slot_is_int) continue;
+        if (index.member_site == 0 || index.member_site - 1 >= local_slot_count
+            || index.variable_site == 0 || index.variable_site - 1 >= local_slot_count)
+        {
+            translation_error = "invalid bytecode typed local index store candidate";
+            return false;
+        }
+        index.opcode = Opcode::IndexLocalIntStore;
+        index.input_offset = static_cast<std::uint32_t>(store.operand + 1);
+        instructions.diagnostics[pc].target_source = instructions.diagnostics[pc + 1].source;
+        store.opcode = Opcode::Removed;
+    }
     return true;
 }
 
@@ -3508,7 +3676,7 @@ std::string CifaBytecode::dump_instruction_listing() const
             "PrepareStore", "Store", "Increment", "Switch",
             "CallBegin", "Call", "Peek", "Array", "Index", "IndexLocal", "Range",
             "MethodCheck", "MethodCall", "MethodPush", "ArrayPushGlobal",
-            "ArrayPushGlobalLocal", "Member", "NumericBinary", "NumericBinaryLocal",
+            "ArrayPushGlobalLocal", "ArrayPushLocalInt", "Member", "IndexLocalInt", "IndexLocalIntStore", "NumericBinary", "NumericBinaryLocal",
             "NumericCompareBranch", "NumericForNext", "IntIncrementLocal", "IntForPrep", "IntForNext", "IntForNextLocal", "IntIncrementForNextLocal", "RegisterBinary", "ScriptEnd", "Exit", "Removed",
         };
         std::format_to(std::back_inserter(text), "--- {} ({} instructions, registers={} temporaries={}) ---\n",
@@ -3536,7 +3704,29 @@ std::string CifaBytecode::dump_instruction_listing() const
     append_instructions(text, module_data->root_instructions, "root");
     for (const auto& [name, versions] : module_data->function_code)
         for (const auto& [arity, code] : versions)
+        {
             append_instructions(text, code->instructions, std::format("{}/{}", name, arity));
+            const auto shape_name = [](FunctionCode::ParameterShape shape) -> std::string_view
+            {
+                switch (shape)
+                {
+                case FunctionCode::ParameterShape::Numeric: return "Numeric";
+                case FunctionCode::ParameterShape::Array: return "Array";
+                case FunctionCode::ParameterShape::Mixed: return "Mixed";
+                default: return "Unknown";
+                }
+            };
+            std::format_to(std::back_inserter(text), "params {} specializable={}: ", code->name,
+                code->shape_specializable ? "yes" : "no");
+            for (size_t index = 0; index < code->parameters.size(); ++index)
+            {
+                if (index != 0) text += ", ";
+                std::format_to(std::back_inserter(text), "{}={}", code->parameters[index].name,
+                    shape_name(index < code->parameter_shapes.size() ? code->parameter_shapes[index]
+                        : FunctionCode::ParameterShape::Unknown));
+            }
+            text.push_back('\n');
+        }
     return text;
 }
 
@@ -3768,7 +3958,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         seal(root_instructions);
         root_source = source_ref(&compiler.compilation_root);
         seal_calls();
-        if (translation_error.empty() && verify(root_instructions, module_data->local_slot_count))
+        if (translation_error.empty() && verify(root_instructions, module_data->local_slot_count)
+            && optimize(root_instructions, module_data->local_slot_count))
         {
             const auto remap = compact(root_instructions);
             for (auto& entry : root_entries) entry = remap[entry];
@@ -3780,7 +3971,76 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                 auto compiled = std::make_shared<FunctionCode>(allocation_resource.get());
                 compiled->name = name;
                 for (const auto& parameter : definition.arguments)
+                {
                     compiled->parameters.push_back({parameter.name, parameter.type_name});
+                    compiled->parameter_shapes.push_back(FunctionCode::ParameterShape::Unknown);
+                }
+                const auto merge_parameter_shape = [](FunctionCode::ParameterShape& current,
+                    FunctionCode::ParameterShape required)
+                {
+                    if (required == FunctionCode::ParameterShape::Unknown) return;
+                    if (current == FunctionCode::ParameterShape::Unknown || current == required) current = required;
+                    else current = FunctionCode::ParameterShape::Mixed;
+                };
+                const auto parameter_index = [&](const CalUnit& value) -> std::optional<size_t>
+                {
+                    if (value.type != CalUnitType::Parameter || value.str.empty()) return {};
+                    for (size_t index = 0; index < compiled->parameters.size(); ++index)
+                        if (compiled->parameters[index].name == value.str) return index;
+                    return {};
+                };
+                const auto infer_parameter_shapes = [&](const auto& self, const CalUnit& value,
+                    FunctionCode::ParameterShape context) -> void
+                {
+                    if (const auto index = parameter_index(value))
+                    {
+                        if (value.v.empty()) merge_parameter_shape(compiled->parameter_shapes[*index], context);
+                        else if (value.v[0].str == "[]")
+                        {
+                            merge_parameter_shape(compiled->parameter_shapes[*index], FunctionCode::ParameterShape::Array);
+                            for (const auto& dimension : value.v)
+                                if (!dimension.v.empty()) self(self, dimension.v[0], FunctionCode::ParameterShape::Numeric);
+                        }
+                    }
+                    Opcode operation_opcode;
+                    const bool numeric_operator = value.type == CalUnitType::Operator && value.v.size() == 2
+                        && operation(value, operation_opcode)
+                        && operation_opcode >= Opcode::Add && operation_opcode <= Opcode::ShiftRight;
+                    if (numeric_operator)
+                    {
+                        self(self, value.v[0], FunctionCode::ParameterShape::Numeric);
+                        self(self, value.v[1], FunctionCode::ParameterShape::Numeric);
+                    }
+                    else if (value.type == CalUnitType::Function && value.str == "size" && !value.v.empty())
+                        self(self, value.v[0], FunctionCode::ParameterShape::Array);
+                    else if (value.type == CalUnitType::Operator && value.str == "." && value.v.size() == 2
+                        && value.v[1].type == CalUnitType::Function
+                        && (value.v[1].str == "push_back" || value.v[1].str == "resize"
+                            || value.v[1].str == "reserve" || value.v[1].str == "insert"
+                            || value.v[1].str == "erase" || value.v[1].str == "contains"))
+                        self(self, value.v[0], FunctionCode::ParameterShape::Array);
+                    for (const auto& child : value.v) self(self, child, FunctionCode::ParameterShape::Unknown);
+                };
+                infer_parameter_shapes(infer_parameter_shapes, definition.body, FunctionCode::ParameterShape::Unknown);
+                const auto has_supported_indexing = [&](const auto& self, const CalUnit& value) -> bool
+                {
+                    if (value.type == CalUnitType::Parameter && !value.v.empty() && value.v[0].str == "[]")
+                    {
+                        if (value.v.size() != 1 || value.v[0].v.empty()) return false;
+                        const auto& index = value.v[0].v[0];
+                        if (index.type != CalUnitType::Parameter || !index.v.empty()) return false;
+                        for (size_t parameter = 0; parameter < compiled->parameters.size(); ++parameter)
+                            if (compiled->parameters[parameter].name == index.str
+                                && compiled->parameter_shapes[parameter] != FunctionCode::ParameterShape::Numeric)
+                                return false;
+                    }
+                    return std::all_of(value.v.begin(), value.v.end(), [&](const CalUnit& child)
+                        { return self(self, child); });
+                };
+                const bool all_shapes_known = std::all_of(compiled->parameter_shapes.begin(),
+                    compiled->parameter_shapes.end(), [](FunctionCode::ParameterShape shape)
+                    { return shape != FunctionCode::ParameterShape::Unknown && shape != FunctionCode::ParameterShape::Mixed; });
+                compiled->shape_specializable = all_shapes_known && has_supported_indexing(has_supported_indexing, definition.body);
                 compiled->return_type = definition.return_type;
                 compiled->body_source = source_ref(&definition.body);
                 auto* saved_function = compiling_function;
@@ -3809,7 +4069,8 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                 emit(const_cast<CalUnit&>(definition.body), compiled->instructions.build_code);
                 seal(compiled->instructions);
                 seal_calls();
-                if (translation_error.empty() && verify(compiled->instructions, compiled->local_slot_count))
+                if (translation_error.empty() && verify(compiled->instructions, compiled->local_slot_count)
+                    && optimize(compiled->instructions, compiled->local_slot_count))
                     compact(compiled->instructions);
                 compiling_function = saved_function;
                 compiling_local_slots = saved_function == nullptr ? nullptr : &saved_function->local_slots;
@@ -3819,6 +4080,65 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
                 compile_array_locals = std::move(saved_array_locals);
                 function_code[name][arity] = std::move(compiled);
             }
+        }
+        const auto merge_parameter_shape = [](FunctionCode::ParameterShape& current,
+            FunctionCode::ParameterShape required)
+        {
+            if (required == FunctionCode::ParameterShape::Unknown) return false;
+            if (current == FunctionCode::ParameterShape::Unknown || current == required)
+            {
+                const bool changed = current != required;
+                current = required;
+                return changed;
+            }
+            if (current != FunctionCode::ParameterShape::Mixed)
+            {
+                current = FunctionCode::ParameterShape::Mixed;
+                return true;
+            }
+            return false;
+        };
+        const auto flatten_call_arguments = [](const CalUnit& call, std::vector<const CalUnit*>& arguments)
+        {
+            const auto flatten = [&](const auto& self, const CalUnit& value) -> void
+            {
+                if (value.str == ",") for (const auto& child : value.v) self(self, child);
+                else if (value.type != CalUnitType::None) arguments.push_back(&value);
+            };
+            for (const auto& child : call.v) flatten(flatten, child);
+        };
+        for (size_t pass = 0; pass < module_data->function_code.size() + 1; ++pass)
+        {
+            bool changed = false;
+            for (const auto& [caller_name, overloads] : module_data->function_code)
+                for (const auto& [caller_arity, caller] : overloads)
+                {
+                    const auto& definition = compiler.compilation_functions.at(caller_name).at(caller_arity);
+                    const auto visit = [&](const auto& self, const CalUnit& value) -> void
+                    {
+                        if (value.type == CalUnitType::Function)
+                        {
+                            std::vector<const CalUnit*> arguments;
+                            flatten_call_arguments(value, arguments);
+                            const auto callee = module_data->function_code.find(value.str);
+                            if (callee != module_data->function_code.end())
+                            {
+                                const auto target = callee->second.find(arguments.size());
+                                if (target != callee->second.end())
+                                    for (size_t index = 0; index < arguments.size()
+                                        && index < target->second->parameter_shapes.size(); ++index)
+                                        if (arguments[index]->type == CalUnitType::Parameter && arguments[index]->v.empty())
+                                            for (size_t parameter = 0; parameter < caller->parameters.size(); ++parameter)
+                                                if (caller->parameters[parameter].name == arguments[index]->str)
+                                                    changed |= merge_parameter_shape(caller->parameter_shapes[parameter],
+                                                        target->second->parameter_shapes[index]);
+                            }
+                        }
+                        for (const auto& child : value.v) self(self, child);
+                    };
+                    visit(visit, definition.body);
+                }
+            if (!changed) break;
         }
         compile_script_functions = nullptr;
         compile_allows_script_constant_folding = false;
@@ -4052,6 +4372,9 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         bool op_register_binary(const Instruction& instruction);
         bool op_method_push(const Instruction& instruction);
         bool op_array_push_global_local(const Instruction& instruction);
+        bool op_array_push_local_int(const Instruction& instruction);
+        bool op_index_local_int(const Instruction& instruction);
+        bool op_index_local_int_store(const Instruction& instruction);
         bool op_method_check(const Instruction& instruction);
         bool op_method_call(const Instruction& instruction);
         bool op_range_next(const Instruction& instruction);
@@ -4231,6 +4554,104 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_index_local(const Instruction& 
         if (machine.exit_requested) { result = Object(); return false; }
         if (machine.should_stop()) { result = machine.error_result(); return false; }
         return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_index_local_int(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+    const size_t array_slot = instruction.member_site - 1;
+    const size_t index_slot = instruction.variable_site - 1;
+    const auto& site = active_owner->index_sites[instruction.auxiliary];
+    const auto& name = active_owner->names[site.name_id];
+    if (array_slot >= active_locals->size() || index_slot >= active_locals->size())
+        machine.set_error("bytecode local slot out of range");
+    else if (active_locals->empty(index_slot))
+        machine.set_error("array index has not been initialized", &current_location());
+    else
+    {
+        auto* array = active_locals->resource_payload(array_slot).resource<VmArray>();
+        if (!array) machine.set_error("indexed value requires an array or map", &current_location());
+        else
+        {
+            std::int64_t offset = 0;
+            if (!active_locals->integer(index_slot, offset))
+                machine.conversion_error(*active_locals, index_slot, "int", nullptr);
+            if (offset < 0) machine.set_error("array index is out of range");
+            if (!machine.should_stop())
+            {
+                const size_t index = static_cast<size_t>(offset);
+                if (index >= array->values.size())
+                {
+                    array->values.resize(index + 1);
+                    machine.read_indexed(registers, output,
+                        {&array->values[index], nullptr, name, "int"}, false);
+                }
+                else
+                {
+                    const auto& element = std::as_const(array->values)[index];
+                    if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
+                    else if (const auto* integer = element.get_if<std::int64_t>())
+                        registers.write_payload(output, *integer);
+                    else
+                    {
+                        registers.store_payload(output, element);
+                        registers.set_name(output, name);
+                    }
+                }
+            }
+        }
+    }
+    if (machine.exit_requested) { result = Object(); return false; }
+    if (machine.should_stop()) { result = machine.error_result(); return false; }
+    return true;
+}
+
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_index_local_int_store(const Instruction& instruction)
+{
+    const size_t array_slot = instruction.member_site - 1;
+    const size_t index_slot = instruction.variable_site - 1;
+    const size_t target_slot = instruction.input_offset - 1;
+    const auto& site = active_owner->index_sites[instruction.auxiliary];
+    const auto& name = active_owner->names[site.name_id];
+    if (array_slot >= active_locals->size() || index_slot >= active_locals->size()
+        || target_slot >= active_locals->size()) machine.set_error("bytecode local slot out of range");
+    else if (active_locals->empty(index_slot))
+        machine.set_error("array index has not been initialized", &current_location());
+    else
+    {
+        auto* array = active_locals->resource_payload(array_slot).resource<VmArray>();
+        if (!array) machine.set_error("indexed value requires an array or map", &current_location());
+        else
+        {
+            std::int64_t offset = 0;
+            if (!active_locals->integer(index_slot, offset))
+                machine.conversion_error(*active_locals, index_slot, "int", nullptr);
+            if (offset < 0) machine.set_error("array index is out of range");
+            if (!machine.should_stop())
+            {
+                const size_t index = static_cast<size_t>(offset);
+                if (index >= array->values.size()) array->values.resize(index + 1);
+                const auto& element = std::as_const(array->values)[index];
+                if (element.empty()) machine.set_error("array element '" + name + "' has not been initialized");
+                else
+                {
+                    if (const auto* integer = element.get_if<std::int64_t>())
+                    {
+                        active_locals->write_number(target_slot, *integer, true);
+                        active_locals->bind_numeric(target_slot, RegisterSlots::NumericBinding::Int);
+                    }
+                    else
+                    {
+                        active_locals->store_payload(target_slot, element);
+                        active_locals->bind_numeric(target_slot, RegisterSlots::NumericBinding::Int);
+                    }
+                }
+            }
+        }
+    }
+    if (machine.exit_requested) { result = Object(); return false; }
+    if (machine.should_stop()) { result = machine.error_result(); return false; }
+    return true;
 }
 
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruction)
@@ -4582,18 +5003,57 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_array_push_global_local(const I
         return true;
 }
 
+CIFA_NOINLINE bool CifaBytecode::InterpState::op_array_push_local_int(const Instruction& instruction)
+{
+    const size_t output = instruction.destination;
+    const size_t local_slot = instruction.auxiliary - 1;
+    const size_t argument_slot = instruction.member_site - 1;
+    if (local_slot >= active_locals->size()) machine.set_error("bytecode local slot out of range");
+    else if (argument_slot >= active_locals->size()) machine.set_error("bytecode local slot out of range");
+    else if (active_locals->empty(argument_slot))
+    {
+        machine.set_error("variable '" + active_owner->names[active_owner->calls[instruction.operand].base_name_id]
+            + "' has not been initialized", &current_location());
+    }
+    else if (auto* array = active_locals->resource_payload(local_slot).resource<VmArray>())
+    {
+        std::int64_t value = 0;
+        if (active_locals->integer(argument_slot, value))
+        {
+            array->values.emplace_back(value);
+            if (!instruction.discard_result) registers.write_payload(output, double(array->values.size()));
+        }
+        else machine.conversion_error(*active_locals, argument_slot, "int", nullptr);
+    }
+    else machine.set_error("push_back() requires an array or map",
+        &active_owner->source(active_owner->calls[instruction.operand].method_source));
+    if (machine.exit_requested) { result = Object(); return false; }
+    if (machine.should_stop()) { result = machine.error_result(); return false; }
+    return true;
+}
+
 CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_check(const Instruction& instruction)
 {
     const auto& site = active_owner->calls[instruction.operand];
     Machine::NamedValueRef receiver;
-    const size_t slot = site.global_receiver ? linked_global(site.base_name_id) : missing_global;
-    if (slot != missing_global && machine.global_exists_at(slot))
+    if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size())
     {
-        const size_t absolute = machine.global_values.base() + slot;
-        receiver = {&machine.global_values, slot,
-            machine.global_values.type_pool[machine.global_values.slot_types[absolute]].element, true};
+        const size_t local_slot = site.local_slot - 1;
+        const size_t absolute = active_locals->base() + local_slot;
+        receiver = {active_locals, local_slot,
+            active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
     }
-    else receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    else
+    {
+        const size_t slot = site.global_receiver ? linked_global(site.base_name_id) : missing_global;
+        if (slot != missing_global && machine.global_exists_at(slot))
+        {
+            const size_t absolute = machine.global_values.base() + slot;
+            receiver = {&machine.global_values, slot,
+                machine.global_values.type_pool[machine.global_values.slot_types[absolute]].element, true};
+        }
+        else receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    }
     if (!receiver.size())
     {
         machine.set_error(active_owner->names[site.name_id] + "() requires an array or map",
@@ -4609,14 +5069,24 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_method_call(const Instruction& 
     const size_t output = instruction.destination;
     const auto& site = active_owner->calls[instruction.operand];
     Machine::NamedValueRef receiver;
-    const size_t slot = site.global_receiver ? linked_global(site.base_name_id) : missing_global;
-    if (slot != missing_global && machine.global_exists_at(slot))
+    if (site.local_slot != 0 && site.local_slot - 1 < active_locals->size())
     {
-        const size_t absolute = machine.global_values.base() + slot;
-        receiver = {&machine.global_values, slot,
-            machine.global_values.type_pool[machine.global_values.slot_types[absolute]].element, true};
+        const size_t local_slot = site.local_slot - 1;
+        const size_t absolute = active_locals->base() + local_slot;
+        receiver = {active_locals, local_slot,
+            active_locals->type_pool[active_locals->slot_types[absolute]].element, true};
     }
-    else receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    else
+    {
+        const size_t slot = site.global_receiver ? linked_global(site.base_name_id) : missing_global;
+        if (slot != missing_global && machine.global_exists_at(slot))
+        {
+            const size_t absolute = machine.global_values.base() + slot;
+            receiver = {&machine.global_values, slot,
+                machine.global_values.type_pool[machine.global_values.slot_types[absolute]].element, true};
+        }
+        else receiver = machine.named_value(active_owner->names[site.base_name_id]);
+    }
     alignas(std::max_align_t) std::byte argument_buffer[2048];
     std::pmr::monotonic_buffer_resource argument_scratch(argument_buffer, sizeof(argument_buffer), cold.persistent);
     std::pmr::vector<SourceLocation> arguments(&argument_scratch);
@@ -4889,6 +5359,31 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_size(const Instruction& instruc
 {
     mark_error_location(Machine::RuntimeLocationKind::Target);
     const size_t output = instruction.destination;
+        if (instruction.auxiliary == 2)
+        {
+            const auto& location = *active_node;
+            if (instruction.operand >= active_locals->size())
+            {
+                machine.set_error("bytecode local slot out of range", &location);
+                result = machine.error_result();
+                return false;
+            }
+            if (active_locals->empty(instruction.operand))
+            {
+                machine.set_error("typed array local has not been initialized", &location);
+                result = machine.error_result();
+                return false;
+            }
+            const auto* array = active_locals->payload(instruction.operand).get_if<VmArray>();
+            if (array == nullptr)
+            {
+                machine.set_error("function 'size' requires an array local", &location);
+                result = machine.error_result();
+                return false;
+            }
+            registers.write_payload(output, double(array->values.size()));
+            return true;
+        }
         if (instruction.auxiliary == 1)
         {
             const auto& name = active_owner->names[instruction.operand];
@@ -5224,7 +5719,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         &&cifa_op_Switch, &&cifa_op_CallBegin, &&cifa_op_Call, &&cifa_op_Peek,
         &&cifa_op_Array, &&cifa_op_Index, &&cifa_op_IndexLocal, &&cifa_op_Range,
         &&cifa_op_MethodCheck, &&cifa_op_MethodCall, &&cifa_op_MethodPush, &&cifa_op_ArrayPushGlobal,
-        &&cifa_op_ArrayPushGlobalLocal, &&cifa_op_Member, &&cifa_op_NumericBinary, &&cifa_op_NumericBinaryLocal,
+        &&cifa_op_ArrayPushGlobalLocal, &&cifa_op_ArrayPushLocalInt, &&cifa_op_Member, &&cifa_op_IndexLocalInt, &&cifa_op_IndexLocalIntStore, &&cifa_op_NumericBinary, &&cifa_op_NumericBinaryLocal,
         &&cifa_op_NumericCompareBranch, &&cifa_op_NumericForNext, &&cifa_op_IntIncrementLocal, &&cifa_op_IntForPrep,
         &&cifa_op_IntForNext, &&cifa_op_IntForNextLocal, &&cifa_op_IntIncrementForNextLocal, &&cifa_op_RegisterBinary,
         &&cifa_op_ScriptEnd, &&cifa_op_Exit, &&cifa_op_Removed,
@@ -5456,6 +5951,15 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         }
         CIFA_CASE(ArrayPushGlobalLocal):
             if (!interp.op_array_push_global_local(instruction)) return true;
+            continue;
+        CIFA_CASE(ArrayPushLocalInt):
+            if (!interp.op_array_push_local_int(instruction)) return true;
+            continue;
+        CIFA_CASE(IndexLocalInt):
+            if (!interp.op_index_local_int(instruction)) return true;
+            continue;
+        CIFA_CASE(IndexLocalIntStore):
+            if (!interp.op_index_local_int_store(instruction)) return true;
             continue;
         CIFA_CASE(MethodCheck):
             if (!interp.op_method_check(instruction)) return true;
@@ -5846,9 +6350,10 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     const auto slot_binding = active_locals->numeric_binding(slot);
                     if (slot_binding == RegisterSlots::NumericBinding::Int)
                     {
-                        const bool wraps = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                        const bool wraps = operation.flags == 0 && (operation_opcode == Opcode::Add
+                            || operation_opcode == Opcode::Subtract
                             || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::BitAnd
-                            || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor;
+                            || operation_opcode == Opcode::BitOr || operation_opcode == Opcode::BitXor);
                         const auto* left_integer = wraps ? active_locals->payload(operation.left).get_if<std::int64_t>() : nullptr;
                         const auto* right_integer = wraps ? active_locals->payload(operation.right).get_if<std::int64_t>() : nullptr;
                         if (left_integer != nullptr && right_integer != nullptr)
@@ -5872,7 +6377,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     else if (slot_binding == RegisterSlots::NumericBinding::Double)
                     {
                         // 浮点槽的直通运算：Add/Sub/Mul/Div 在二元数值语义下无错误路径。
-                        const bool computes = operation_opcode == Opcode::Add || operation_opcode == Opcode::Subtract
+                        const bool computes = operation_opcode == Opcode::Add
+                            || operation_opcode == Opcode::Subtract
                             || operation_opcode == Opcode::Multiply || operation_opcode == Opcode::Divide;
                         const auto* left_double = computes ? active_locals->payload(operation.left).get_if<double>() : nullptr;
                         const auto* right_double = computes ? active_locals->payload(operation.right).get_if<double>() : nullptr;
@@ -6258,6 +6764,11 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
     const std::string& type_name, const SourceLocation& location)
 {
     if (type_name.empty() || type_name == "auto") { destination.copy(target, source, slot); return true; }
+    if (is_vector_type_name(type_name) && source.empty(slot))
+    {
+        destination.write_payload(target, BytecodeValue::Storage(VmArray(0, host.allocation_resource)));
+        return true;
+    }
     if (source.empty(slot))
     {
         set_error("cannot convert an empty value to '" + type_name + "'", &location);
@@ -6267,6 +6778,14 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
     if (destination.cast_numeric(target, source, slot, type_name)) return true;
     const auto& payload = source.payload(slot);
     const auto* resource = value_get_if<std::any>(&payload);
+    if (is_vector_type_name(type_name))
+    {
+        if (payload.resource<VmArray>() != nullptr)
+        {
+            destination.copy(target, source, slot);
+            return true;
+        }
+    }
     const auto identity = payload.resource<std::pmr::string>() ? std::type_index(typeid(std::string)) : payload.resource<VmMap>() ? std::type_index(typeid(ObjectMap)) : resource ? std::type_index(resource->type()) : value_holds<double>(payload)
         ? std::type_index(typeid(double)) : value_holds<bool>(payload)
         ? std::type_index(typeid(bool)) : std::type_index(typeid(std::int64_t));
@@ -6314,12 +6833,34 @@ bool CifaBytecode::Machine::convert_type(RegisterSlots& destination, size_t targ
 Object CifaBytecode::Machine::convert_type(const Object& source, const std::string& type_name, const SourceLocation& location)
 {
     if (type_name.empty() || type_name == "auto") return source;
+    if (is_vector_type_name(type_name) && !source.hasValue())
+    {
+        Object result;
+        result.value = ObjectVector{};
+        result.declared_type_name = type_name;
+        result.bound_type = typeid(ObjectVector);
+        result.element_type_name = *vector_element_type_name(type_name);
+        return result;
+    }
     if (!source.hasValue())
     {
         set_error("cannot convert an empty value to '" + type_name + "'", &location);
         return {};
     }
     if (type_name == "void") return {};
+    if (is_vector_type_name(type_name))
+    {
+        if (!source.isType<ObjectVector>())
+        {
+            set_error("cannot convert value to '" + type_name + "'", &location);
+            return {};
+        }
+        Object result = source;
+        result.declared_type_name = type_name;
+        result.bound_type = typeid(ObjectVector);
+        result.element_type_name = *vector_element_type_name(type_name);
+        return result;
+    }
     const auto registered = host.registered_types.find(type_name);
     if (registered != host.registered_types.end())
     {
@@ -6348,10 +6889,22 @@ bool CifaBytecode::Machine::bind_type(RegisterSlots& values, size_t slot, const 
     }
     descriptor.bound = typeid(void);
     descriptor.declared.clear();
+    descriptor.element.clear();
+    descriptor.special.clear();
+    descriptor.element_kind = RegisterSlots::ElementKind::Dynamic;
     values.set_type(slot, descriptor);
     if (type_name.empty()) return true;
     if (type_name == "void") { set_error("variable cannot have type void", &location); return false; }
     descriptor.declared = type_name;
+    if (auto element_type = vector_element_type_name(type_name); element_type.has_value())
+    {
+        descriptor.bound = typeid(VmArray);
+        descriptor.element = *element_type;
+        descriptor.element_kind = *element_type == "int"
+            ? RegisterSlots::ElementKind::Int : RegisterSlots::ElementKind::Dynamic;
+        values.set_type(slot, descriptor);
+        return true;
+    }
     if (type_name == "auto")
     {
         // auto 声明的类型由负载决定。身份推导链只认识标量/字符串/map/any；
@@ -6403,13 +6956,18 @@ bool CifaBytecode::Machine::bind_type(Object& value, const std::string& type_nam
         return true;
     }
     const auto registered = host.registered_types.find(type_name);
-    if (registered == host.registered_types.end() && !structures.contains(type_name))
+    if (registered == host.registered_types.end() && !is_vector_type_name(type_name) && !structures.contains(type_name))
     {
         set_error("unknown type '" + type_name + "'", &location);
         return false;
     }
     value.declared_type_name = type_name;
-    value.bound_type = registered != host.registered_types.end() ? registered->second.identity : typeid(ObjectMap);
+    value.bound_type = registered != host.registered_types.end() ? registered->second.identity
+        : is_vector_type_name(type_name) ? typeid(ObjectVector) : typeid(ObjectMap);
+    if (auto element_type = vector_element_type_name(type_name); element_type.has_value())
+    {
+        value.element_type_name = *element_type;
+    }
     return true;
 }
 
@@ -6450,10 +7008,11 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
     }
     const bool registered = host.registered_types.contains(type.declared);
     const bool structure = structures.contains(type.declared);
+    const bool vector = type.bound == typeid(VmArray);
     const bool builtin = type.declared == "int" || type.declared == "double" || type.declared == "float"
         || type.declared == "bool" || type.declared == "char" || type.declared == "string";
     size_t value_slot = slot;
-    if (!no_value && !type.declared.empty() && type.declared != "auto" && (registered || structure || builtin))
+    if (!no_value && !type.declared.empty() && type.declared != "auto" && (registered || structure || builtin || vector))
     {
         if (!convert_type(source, scratch, source, slot, type.declared, location)) return false;
         value_slot = scratch;
@@ -6469,7 +7028,7 @@ bool CifaBytecode::Machine::assign(RegisterSlots& destination, size_t target, Re
         const auto registered_name = host.type_names.find(identity);
         type.declared = registered_name == host.type_names.end() ? identity.name() : registered_name->second;
     }
-    else if (!no_value && !type.declared.empty() && type.bound != typeid(void) && !registered && !structure
+    else if (!no_value && !type.declared.empty() && type.bound != typeid(void) && !registered && !structure && !vector
         && !source.empty(value_slot) && type.bound != identity)
     {
         if (value_slot != slot) source.clear(value_slot);
@@ -6512,10 +7071,11 @@ bool CifaBytecode::Machine::assign(Object& target, Object value, bool with_type,
     }
     const bool registered = host.registered_types.contains(target.declared_type_name);
     const bool structure = structures.contains(target.declared_type_name);
+    const bool vector = target.bound_type == typeid(ObjectVector);
     const bool builtin = target.declared_type_name == "int" || target.declared_type_name == "double"
         || target.declared_type_name == "float" || target.declared_type_name == "bool"
         || target.declared_type_name == "char" || target.declared_type_name == "string";
-    if (!target.declared_type_name.empty() && target.declared_type_name != "auto" && (registered || structure || builtin))
+    if (!target.declared_type_name.empty() && target.declared_type_name != "auto" && (registered || structure || builtin || vector))
     {
         value = convert_type(value, target.declared_type_name, location);
         if (should_stop()) return false;
@@ -6525,7 +7085,7 @@ bool CifaBytecode::Machine::assign(Object& target, Object value, bool with_type,
         target.bound_type = value.getType();
         target.declared_type_name = host.registered_type_name(value);
     }
-    else if (!target.declared_type_name.empty() && target.bound_type != typeid(void) && !registered && !structure
+    else if (!target.declared_type_name.empty() && target.bound_type != typeid(void) && !registered && !structure && !vector
         && value.hasValue() && target.bound_type != value.getType())
     {
         set_error("cannot change the type of a static variable", &location);
