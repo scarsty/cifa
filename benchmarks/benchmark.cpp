@@ -15,13 +15,14 @@ int main(int argc, char** argv) try {
     const int samples = argc > 1 ? std::stoi(argv[1]) : 7;
     if (samples < 1) throw std::runtime_error("sample count must be positive");
     const std::string workload = argc > 2 ? argv[2] : "pi";
-    bool profile = false, pooled = true, count_allocations = false;
+    bool profile = false, pooled = true, count_allocations = false, listing = false;
     for (int i=3;i<argc;++i) {
         const std::string flag=argv[i];
         if (flag=="--vm-only") profile=true;
         else if (flag=="--pool") pooled=true;
         else if (flag=="--no-pool") pooled=false;
         else if (flag=="--allocations") count_allocations=true;
+        else if (flag=="--listing") listing=true;
         else if (flag=="--wait") std::this_thread::sleep_for(std::chrono::seconds(5));
         else throw std::runtime_error("Unknown option: "+flag);
     }
@@ -42,11 +43,15 @@ int main(int argc, char** argv) try {
             + "\"; int total=0; for(int i=0;i<10000;i++) { total+=size(format(\"{0}:{1}\",echo(base),i)); } return total;";
     } else if (workload == "increment") {
         script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
+    } else if (workload == "add") {
+        script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value = value + 1; } return value; } return loop();";
+    } else if (workload == "addloop") {
+        script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value = value + i; } return value; } return loop();";
     } else if (workload == "empty") {
         script = "int loop() { for (int i = 0; i < 1000000; i++) { } return 1000000; } return loop();";
     } else if (workload == "incrementf") {
         script = "double loop() { double value = 0; for (double i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
-    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, or incrementf");
+    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, add, addloop, or incrementf");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.
@@ -65,6 +70,8 @@ int main(int argc, char** argv) try {
     if (workload == "calls" && expected != "200010000.000000") throw std::runtime_error("Incorrect call sum");
     if (workload == "strings" && expected != "1388890.000000") throw std::runtime_error("Incorrect string length sum");
     if (workload == "increment" && expected != "1000000.000000") throw std::runtime_error("Incorrect increment sum");
+    if (workload == "add" && expected != "1000000.000000") throw std::runtime_error("Incorrect add sum");
+    if (workload == "addloop" && expected != "499999500000.000000") throw std::runtime_error("Incorrect addloop sum");
     if (workload == "incrementf" && expected != "1000000.000000") throw std::runtime_error("Incorrect float increment sum");
     if (workload == "pi" && (expected.size()!=502 || !expected.starts_with("3.141592653589793238462643383279"))) throw std::runtime_error("Incorrect PI result");
     if (!profile) {
@@ -76,6 +83,7 @@ int main(int argc, char** argv) try {
         if(direct.has_runtime_error() || reference!=expected) throw std::runtime_error("Direct/VM mismatch");
         std::cout << "direct_parse_execute_ms=" << direct_ms << '\n';
     }
+    if (listing) std::cout << vm.dump_instruction_listing();
     std::cout << "workload=" << workload << " allocator=" << (pooled ? "pool" : "direct")
         << " compile_ms=" << compile_ms << " result_characters=" << expected.size() << '\n';
     std::vector<double> times;

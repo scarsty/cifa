@@ -171,6 +171,30 @@ inline 为空/增量 `2.70 / 2.97 ms`；此前对应约 `2.52 / 3.03 ms` 和 `2.
 没有稳定的整体收益，默认仍使用 32B 旁表版本。常量上界继续保存在 `IntegerLoop` 旁表中，
 局部变量上界通过 `limit_slot` 在入口读取一次。
 
+#### IntegerLoopState 指针缓存实验（2026-09-24）
+
+此前 `IntForPrep`、`IntForNext`、`IntForNextLocal` 和 `IntIncrementForNextLocal` 每次执行
+都通过 `integer_loop_state(loop_index)` 重新做一次 inline 数组与 PMR vector 的二选一定位。
+本轮在 `InterpState` 中缓存当前 `IntegerLoopState*` 及其 `loop_index`：`IntForPrep` 首次进入
+循环时建立缓存，后续同一循环直接复用；循环 index 改变时自动刷新。进入脚本函数和返回调用者
+时都清空缓存，避免不同执行帧或嵌套循环复用旧指针。该改动不改变 `remaining`、`body`、`exit`
+和退出时的 `flush_integer_loop` 语义。
+
+Clang high Release 同配置 A/B（每项 20 个样本，PI 10 个样本）结果如下，单位为每次 benchmark
+执行的毫秒数：
+
+| workload | 原始定位 | 指针缓存 | 变化 |
+| --- | ---: | ---: | ---: |
+| `empty` | `2.71225` | `0.90385` | `-66.7%` |
+| `increment` | `2.73210` | `1.31780` | `-51.7%` |
+| `addloop` | `5.12700` | `4.46140` | `-13.0%` |
+| `pi` | `14.15510` | `13.70820` | `-3.2%` |
+
+这说明此前空循环和内容循环接近，主要并非循环体没有执行，而是每轮 `IntForNextLocal` 的循环
+状态定位成本很高；缓存后空循环的固定成本显著下降，`addloop` 和 PI 的收益则被实际循环体
+和其他 opcode 成本稀释。C++ 局部计数器下界仍是 MSVC `/O2` 约 `0.179 ms/百万次`，Clang
+high 的 `0 ms` 属于代数化简，不能作为有效对照。
+
 #### ScriptEnd 哨兵与 Lua 取指模型
 
 此前 Cifa 的解释器主循环在每条指令前执行 `pc >= active_instructions->code.size()`，这个检查

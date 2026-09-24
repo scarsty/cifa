@@ -3897,6 +3897,12 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
         SourceRef& register_assignment_source;
         size_t& pc;
         const size_t missing_global;
+        IntegerLoopState* cached_integer_loop_state = nullptr;
+        size_t cached_integer_loop_index = std::numeric_limits<size_t>::max();
+        SwitchState* cached_switch_state = nullptr;
+        size_t cached_switch_index = std::numeric_limits<size_t>::max();
+        RangeState* cached_range_state = nullptr;
+        size_t cached_range_index = std::numeric_limits<size_t>::max();
 
         size_t input_slot(const Instruction& instruction, size_t index)
         {
@@ -3982,6 +3988,12 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             active_function = std::move(saved.function);
             active_call = saved.call;
             pc = saved.pc;
+            cached_integer_loop_state = nullptr;
+            cached_integer_loop_index = std::numeric_limits<size_t>::max();
+            cached_switch_state = nullptr;
+            cached_switch_index = std::numeric_limits<size_t>::max();
+            cached_range_state = nullptr;
+            cached_range_index = std::numeric_limits<size_t>::max();
         }
 
         void flush_integer_loop(size_t loop_site)
@@ -4001,6 +4013,37 @@ void CifaBytecode::translate(Cifa& compiler, size_t script_function_version, siz
             return loop_index < inline_integer_loop_count
                 ? inline_integer_loops[loop_index] : integer_loop_states[loop_index - inline_integer_loop_count];
         }
+
+        IntegerLoopState& cached_integer_loop(size_t loop_index)
+        {
+            if (cached_integer_loop_state == nullptr || cached_integer_loop_index != loop_index)
+            {
+                cached_integer_loop_state = &integer_loop_state(loop_index);
+                cached_integer_loop_index = loop_index;
+            }
+            return *cached_integer_loop_state;
+        }
+
+        SwitchState& cached_switch(size_t switch_index)
+        {
+            if (cached_switch_state == nullptr || cached_switch_index != switch_index)
+            {
+                cached_switch_state = &switches[switch_index];
+                cached_switch_index = switch_index;
+            }
+            return *cached_switch_state;
+        }
+
+        RangeState& cached_range(size_t range_index)
+        {
+            if (cached_range_state == nullptr || cached_range_index != range_index)
+            {
+                cached_range_state = &ranges[range_index];
+                cached_range_index = range_index;
+            }
+            return *cached_range_state;
+        }
+
 
         bool op_index(const Instruction& instruction);
         bool op_index_local(const Instruction& instruction);
@@ -4291,6 +4334,12 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_call(const Instruction& instruc
             active_values_data = local_values->values.data() + local_values->base();
             active_integer_loops_data = active_instructions->integer_loops.data();
             active_locals = local_values;
+            cached_integer_loop_state = nullptr;
+            cached_integer_loop_index = std::numeric_limits<size_t>::max();
+            cached_switch_state = nullptr;
+            cached_switch_index = std::numeric_limits<size_t>::max();
+            cached_range_state = nullptr;
+            cached_range_index = std::numeric_limits<size_t>::max();
             switches.assign(active_instructions->switch_count, {});
             ranges.assign(active_instructions->range_count, {});
             inline_integer_loops = {};
@@ -4594,7 +4643,7 @@ CIFA_NOINLINE bool CifaBytecode::InterpState::op_range_next(const Instruction& i
 {
     mark_error_location(Machine::RuntimeLocationKind::Target);
     const size_t output = instruction.destination;
-        auto& state = ranges.at(instruction.operand);
+        auto& state = cached_range(instruction.operand);
         auto* snapshot = registers.resource_payload(state.snapshot_slot).resource<VmArray>();
         const bool available = snapshot && state.index < snapshot->values.size();
         if (available)
@@ -5237,7 +5286,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             const std::int64_t integer = value_get<std::int64_t>(active_values_data[instruction.operand].value);
             const size_t loop_index = instruction.member_site - 1;
             const auto& loop = active_integer_loops_data[loop_index];
-            auto& loop_state = interp.integer_loop_state(loop_index);
+            auto& loop_state = interp.cached_integer_loop(loop_index);
             const std::int64_t limit = loop.limit_slot == std::numeric_limits<size_t>::max()
                 ? loop.limit : value_get<std::int64_t>(active_values_data[loop.limit_slot].value);
             loop_state.value = integer;
@@ -5253,7 +5302,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         CIFA_CASE(IntForNext):
         {
             const size_t loop_index = instruction.member_site - 1;
-            auto& loop_state = interp.integer_loop_state(loop_index);
+            auto& loop_state = interp.cached_integer_loop(loop_index);
             const std::int64_t integer = loop_state.active
                 ? loop_state.value : value_get<std::int64_t>(active_values_data[instruction.operand].value);
             const std::int64_t next_integer = integer + 1;
@@ -5274,7 +5323,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         CIFA_CASE(IntForNextLocal):
         {
             const size_t loop_index = instruction.member_site - 1;
-            auto& loop_state = interp.integer_loop_state(loop_index);
+            auto& loop_state = interp.cached_integer_loop(loop_index);
             ++loop_state.value;
             if (loop_state.remaining != 0)
             {
@@ -5289,7 +5338,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
         CIFA_CASE(IntIncrementForNextLocal):
         {
             const size_t loop_index = instruction.member_site - 1;
-            auto& loop_state = interp.integer_loop_state(loop_index);
+            auto& loop_state = interp.cached_integer_loop(loop_index);
             ++value_get<std::int64_t>(active_locals->resource_payload(instruction.operand));
             ++loop_state.value;
             if (loop_state.remaining != 0)
@@ -5426,7 +5475,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
                     registers, state.snapshot_slot))
                 { result = machine.error_result(); return true; }
                 registers.clear(argument);
-                ranges[instruction.operand] = std::move(state);
+                interp.cached_range(instruction.operand) = std::move(state);
             }
             else if (instruction.auxiliary == 1)
             {
@@ -5434,8 +5483,8 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             }
             else
             {
-                registers.clear(ranges[instruction.operand].snapshot_slot);
-                ranges[instruction.operand] = {};
+                registers.clear(interp.cached_range(instruction.operand).snapshot_slot);
+                interp.cached_range(instruction.operand) = {};
             }
             continue;
         }
@@ -5456,7 +5505,7 @@ bool CifaBytecode::execute_instructions(Machine& machine, const Module& module, 
             continue;
         CIFA_CASE(Switch):
         {
-            auto& state = switches[instruction.operand];
+            auto& state = interp.cached_switch(instruction.operand);
             if (instruction.auxiliary == 0)
             {
                 state.condition_slot = active_instructions->register_capacity + active_instructions->temporary_count + instruction.operand;
