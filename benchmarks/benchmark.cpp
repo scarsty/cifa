@@ -15,7 +15,7 @@ int main(int argc, char** argv) try {
     const int samples = argc > 1 ? std::stoi(argv[1]) : 7;
     if (samples < 1) throw std::runtime_error("sample count must be positive");
     const std::string workload = argc > 2 ? argv[2] : "pi";
-    bool profile = false, pooled = true, count_allocations = false, listing = false;
+    bool profile = false, pooled = true, count_allocations = false, listing = false, opcode_profile = false;
     for (int i=3;i<argc;++i) {
         const std::string flag=argv[i];
         if (flag=="--vm-only") profile=true;
@@ -23,6 +23,7 @@ int main(int argc, char** argv) try {
         else if (flag=="--no-pool") pooled=false;
         else if (flag=="--allocations") count_allocations=true;
         else if (flag=="--listing") listing=true;
+        else if (flag=="--opcode-profile") opcode_profile=true;
         else if (flag=="--wait") std::this_thread::sleep_for(std::chrono::seconds(5));
         else throw std::runtime_error("Unknown option: "+flag);
     }
@@ -51,7 +52,11 @@ int main(int argc, char** argv) try {
         script = "int loop() { for (int i = 0; i < 1000000; i++) { } return 1000000; } return loop();";
     } else if (workload == "incrementf") {
         script = "double loop() { double value = 0; for (double i = 0; i < 1000000; i++) { value++; } return value; } return loop();";
-    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, add, addloop, or incrementf");
+    } else if (workload == "intcompare") {
+        script = "int loop() { int left = 1; int right = 2; int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop();";
+    } else if (workload == "intcompare_dynamic") {
+        script = "int loop(left, right) { int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop(1, 2);";
+    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, add, addloop, incrementf, intcompare, or intcompare_dynamic");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.
@@ -73,7 +78,17 @@ int main(int argc, char** argv) try {
     if (workload == "add" && expected != "1000000.000000") throw std::runtime_error("Incorrect add sum");
     if (workload == "addloop" && expected != "499999500000.000000") throw std::runtime_error("Incorrect addloop sum");
     if (workload == "incrementf" && expected != "1000000.000000") throw std::runtime_error("Incorrect float increment sum");
+    if (workload == "intcompare" && expected != "1000000.000000") throw std::runtime_error("Incorrect int compare sum");
+    if (workload == "intcompare_dynamic" && expected != "1000000.000000") throw std::runtime_error("Incorrect dynamic int compare sum");
     if (workload == "pi" && (expected.size()!=502 || !expected.starts_with("3.141592653589793238462643383279"))) throw std::runtime_error("Incorrect PI result");
+    if (opcode_profile) {
+        vm.reset_opcode_profile();
+        vm.set_opcode_profile_enabled(true);
+        const auto profiled = vm.run();
+        vm.set_opcode_profile_enabled(false);
+        if (vm.has_runtime_error() || key(profiled) != expected) throw std::runtime_error("Opcode profile result mismatch");
+        std::cout << "opcode_profile_begin\n" << vm.get_opcode_profile() << "opcode_profile_end\n";
+    }
     if (!profile) {
         cifa::Cifa direct;
         direct.register_function("println", [](cifa::ObjectVector&) -> cifa::Object { return {}; });

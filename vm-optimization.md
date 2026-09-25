@@ -1,12 +1,42 @@
 # VM 优化记录
 
-## 性能优化历史摘要：约 300ms 到当前 22ms
+## 性能优化历史摘要：约 300ms 到当前约 10ms
 
 下表汇总已保留的优化、关键版本快照及编译器对照。`阶段耗时`是当时可执行版本的 Release PI
 `execute_ms` 中位数或同批代表值，用于展示演进位置；不同日期、机器、二进制和 benchmark harness 不能直接
 相减。`同批证据`列明确写有 A/B、轮转或同版本交错的，才可据此认定该项提速；“阶段记录”只说明当时实际
 耗时，不归因给相邻改动。所有 PI 行均以脚本输出校验为前提，早期记录为 length=502/FNV 校验，近期记录为
 502 字符精确断言。
+
+近期 15ms 到 10ms 的详细专题记录统一放在历史表之后；这里先保留完整时间线，避免把局部实验
+误读为跨阶段的单项收益。当前最新稳定 PI 记录约为 `10.04 ms`，Lua 整数基线约为 `5.69 ms`。
+
+| 阶段耗时 | 最终保留的主要优化 | 同批证据或记录结论 |
+| ---: | --- | --- |
+| `313.109 ms` | 早期常量折叠、数值内建直达、局部一维数组直接路径 | 同进程未优化 `355.710 ms` -> 优化 `313.109 ms`，约快 `11.98%` |
+| `228.504 ms` | 局部初始化直接建槽、double-to-int 受限快速写入 | 当前批绝对值；未做有效交错 A/B，不单独归因 |
+| `153.845 ms` | 槽执行迁移，数值运算/调用/返回减少 Object 往返 | 当前批绝对值；跨批 `199.572 ms` 仅作阶段记录 |
+| `122.198 ms` | 动态 scope、范围、方法参数及返回状态迁入槽 | 当前批绝对值；跨批不作严格收益结论 |
+| `108.370 ms` | 默认优化、函数冻结和旧 Object 双轨删除 | 同批未优化 `172.656 ms`，优化 `108.370 ms` |
+| `95.837 ms` | Scope 静态 binding 预留与纯静态 Scope 容器复用 | 多轮 A/B 后最终复测 `95.837 ms` |
+| `91.858 ms` | const 数组导入避免先复制 ObjectVector | A/B/B/A：`95.604` -> `91.858 ms`，约快 `3.92%` |
+| `63.096 ms` | 执行器由平行 opcode `if` 改为完整 `switch/case` | 四批样本约 `62.3--63.8 ms` |
+| `57.046 ms` | `NumericBinary` 16B 热数值微指令 | A/B/B/A/A/B 约快 `9.43%` |
+| `53.144 ms` | `NumericCompareBranch` 融合数值比较与分支 | A/B/B/A/A/B 约快 `7.48%` |
+| `49.64 ms` | `ArrayPushGlobal` 端到端全局数组追加 | A/B/B/A/A/B 约快 `7.3%` |
+| `44.59 ms` | `LoadLocal + Index` 的 `IndexLocal` | 交错 A/B 约快 `8.5%` |
+| `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A 约快 `5.3%` |
+| `29.95 ms` | 循环体变量声明提升与已知局部保留 | 2026-09-20，7 轮交错约快 `17%` |
+| `25.27/23.51 ms` | clang-cl inline budget 对照 | 2026-09-22，默认/高 inline 约快 `6.95%` |
+| `22.38/20.00/16.20 ms` | 协议重构快照相对 `HEAD` | 2026-09-23，覆盖完整协议重构集，不能归因到单个 opcode |
+| `19.80/15.53 ms` | 诊断冷化、延迟错误格式化、删除 current_source 执行状态 | 2026-09-23，MSVC/clang-cl 高 inline 单批中位数 |
+| `14.5851 ms` | `IntForPrep`/`IntForNext` 剩余迭代计数 | PI 14 次输出一致，长度 502 |
+| `13.7082 ms` | `IntegerLoopState` 指针缓存 | Clang high A/B：`14.15510` -> `13.70820 ms`，约快 `3.2%` |
+| `12.9595 ms` | `IndexLocalIntStore` 编译期融合 | 21 次样本；此前同配置约 `13.495 ms` |
+| `10.6713 ms` | PI 非负商整数除法化 | 21 次样本由 `12.4872` 降至 `10.6713 ms` |
+| `10.6118 ms` | typed vector `size()` 专用化 | 结果保持 `502`/`1d4b4c2f` |
+| `10.0491/10.0389 ms` | typed vector 整数索引直写 | 两批各 21 次，完整回归 `78/78` |
+| `10.0276 ms` | 当前 Clang high PI 基线 | 2026-09-24，21 次样本，范围 `9.9376--10.3867 ms`；结果 502 字符，作为下一阶段 A/B 基线 |
 
 #### 编译期参数形态分析与函数级专门化前提（2026-09-24）
 
@@ -93,6 +123,72 @@ Lua 的 `OP_ADDI`/`OP_DIVI` 等整数立即数 opcode 提供了 Cifa 的优化�
 本轮中位数为 `10.6118 ms`，结果保持 `502`/`1d4b4c2f`，完整回归为 `78/78`。当前收益仍
 应视为初步结果，后续需要固定 CPU 条件下重复 A/B。
 
+#### 计数类内置函数整数化（2026-09-25）
+
+统一修正宿主和 Bytecode 两条执行路径：`size()` 以及数组/Map 变更方法返回的长度现在使用
+`int64_t`；`contains()` 返回 `bool`；`print/println` 返回参数个数 `int64_t`。此前这些
+结果沿用旧动态 API 的 `double` 表示，导致 `int n = size(a)` 必须先经过浮点到整数的绑定转换，
+也阻碍了后续整数类型传播。新增双后端类型回归覆盖 `size`、数组方法、Map 方法和谓词方法，
+Clang high Release 完整测试 `78/78` 通过，PI 结果仍为 502 字符/FNV `1d4b4c2f`，单次
+VM-only profile `9.9864 ms`。
+
+本轮 profile 中 `Size` 仅执行 `3,744` 次，主要热点仍是 `NumericCompareBranch`、
+`NumericBinaryLocal` 和 `NumericForNext`，因此整数化本身不是 PI 级性能收益。下一步优先
+评估受限的 `Size -> StoreLocal` 直接目标槽融合：仅针对静态数组 local、普通赋值且无动态逃逸，
+直接写入整数 local，消除临时寄存器和通用 `StoreLocal`；暂不缓存动态数组长度，以免绕过别名和
+COW 语义。
+
+#### Size 直接目标槽与方法名整数化（2026-09-25）
+
+针对 `Size -> StoreLocal` 增加了受限融合：当源是静态 typed array local、目标是显式 `int`
+local、赋值是普通 Assign 且结果被丢弃时，复用 `Size` 的内部模式直接把长度写入目标槽，
+保留目标槽的整数 binding。PI listing 已出现 `Size aux=3`，`StoreLocal` profile 从 `97,544`
+降至 `94,271`；21 次 Clang high Release VM-only PI 中位数为 `9.6999 ms`，结果保持 502
+字符。由于此前同批次环境有波动，该数值只作为候选记录，不能单凭一批样本归因为稳定收益；完整
+双后端回归仍为 `78/78`。
+
+函数/方法调用中的字符串比较需要区分两类。普通脚本函数调用已经按 `CallSite` 缓存解析后的
+`FunctionCode`，字符串查找主要发生在首次解析或缓存失效时，直接换成跳转表不会优化每次循环
+调用。数组和 Map 方法则确实在每次 `MethodCall` 中按方法名判断；本轮给 `CallSite` 增加编译期
+`MethodKind`，运行期改为枚举分派，字符串只保留给错误信息。`array_methods_test`、
+`map_methods_test` 及完整 `78/78` 均通过。后续若继续处理普通 builtin，应优先做调用点级的
+`BuiltinKind` 缓存，并先用 `calls` workload 的 A/B 证明收益，不直接引入全局字符串跳转表。
+
+#### NumericCompareBranch 固定整数标志探针（2026-09-25，已撤回）
+
+尝试在 verifier/优化阶段为“两个操作数都是静态 int local”的 `NumericCompareBranch` 增加
+`int_compare` 标志，运行期直接读取两个 `int64_t` payload，跳过 `NumericBinding` 检查。完整
+回归仍为 `78/78`，但 PI `NumericCompareBranch` 计数保持 `306,802`，Clang high Release
+21 次 VM-only 中位数由前一候选约 `9.6999 ms` 回到 `9.972 ms`。说明仅增加一个分支标志
+并没有消除比较指令，覆盖不足以抵消新增热路径判断，探针已撤回。
+
+当前下一步不应继续给比较指令叠加分类标志，而应研究在已证明的整数循环中直接消除条件指令：
+把循环条件和 `NumericForNext` 的递增/剩余计数合并，扩展现有 `IntForNext` 状态；只针对不可写
+上界、固定 `i++`、无复杂控制流的循环，其他路径保持现有 `NumericCompareBranch`。
+
+#### IntCompareBranch 编译期整数比较专用化（2026-09-25）
+
+前一探针的问题不是整数比较不能专用化，而是仍保留 `NumericCompareBranch`，只在执行期
+增加一个 `int_compare` 分支。现改为独立的 `IntCompareBranch` opcode：在控制流优化完成后，
+仅当 `RegisterOperation.flags == 0` 且两个 local descriptor 都明确声明为 `int` 时生成；
+循环条件会先完成既有 `IntForPrep`/`IntForNext` 融合，避免新分类阻断循环专用化。
+
+`IntCompareBranch` 直接读取两个 local 的 `int64_t` payload 并比较，不查询
+`NumericBinding`。编译期类型只证明表示类型，不证明变量已初始化，因此 payload 缺失时回退
+原 `NumericCompareBranch`，保留未初始化变量的错误语义。`validate_hot_code()` 同时检查两个
+操作数是 local 且没有 constant/temporary 标志，避免直接路径越界或误用。
+
+新增 `intcompare` workload 动态执行 `IntCompareBranch` 1,000,000 次；21 次 Clang high
+Release pool 样本中位数约 `3.9858 ms`。未声明参数的 `intcompare_dynamic` 保持
+`NumericCompareBranch`，中位数约 `5.3633 ms`。两者返回值均为 `1,000,000`，完整回归
+`78/78`，说明已知 int 类型应在编译期分流，不能在热路径反复查询 binding。
+
+本轮大面积审计后，`NumericCompareBranch` 的静态 local-local int 判型已移除；剩余
+`numeric_binding()` 热路径主要在动态/混合类型的 `NumericCompareBranch` 和
+`NumericBinaryLocal`。后者不能整体删除运行期判断，因为当前 opcode 仍允许目标槽已知而
+操作数来自动态 local；下一步应为“两个操作数和目标槽均为静态 int”单独设计
+`IntBinaryLocal`，继续保持动态操作数走原路径。
+
 #### typed vector 整数索引直写（2026-09-24）
 
 `IndexLocalInt` 和 `IndexLocalIntStore` 原本在命中 `vector<int>` 元素后仍复制完整的
@@ -107,51 +203,26 @@ Clang high Release、PI、`--vm-only`、连续两批各 21 次的中位数为 `1
 
 #### 转换后独立 peephole 优化阶段（2026-09-24）
 
-编译流水线现在明确分为：`seal` 将构建指令转换为热指令，`verify` 完成基础数值 lowering、
-寄存器输入编码和 CFG 合法性验证，`optimize` 在已转换的热码上分析局部指令序列并进行融合，
-最后 `compact` 删除 `Removed` 指令并重映射 PC。当前已迁移的规则是
-`IndexLocalInt + StoreLocal -> IndexLocalIntStore`，PI listing 实际命中 4 次。
+编译流水线现在明确分为：`seal` 将构建指令转换为热指令，`lower_and_encode` 完成首次数值
+lowering 和专用 opcode 选择，`verify` 完成 CFG、寄存器输入和诊断帧验证，`validate_hot_code`
+执行只读热码检查，`optimize` 处理局部指令融合，第一次 `compact` 后由
+`optimize_control_flow` 处理 compare/loop 变换，第二次 `compact` 只删除 `Removed` 指令并
+重映射 PC。当前已迁移的规则是 `IndexLocalInt + StoreLocal -> IndexLocalIntStore`，PI listing
+实际命中 4 次。
 
 尝试在 `optimize` 后再次调用完整 `verify` 被回归及时发现：首次 lowering 会把优化后的
 `NumericBinaryLocal` 当作原始 `register_binary_sites` 重新编码，导致参数和函数返回等大量测试
-失败。该二次重编码已撤回；后续若需要优化后校验，应新增只读 validator，而不能复用会修改热码的
-首次 lowering 流程。当前安全顺序为 `seal -> verify -> optimize -> compact`。
+失败。该二次重编码已撤回。本轮新增只读 `validate_hot_code`，在首次 `verify` 后和
+`optimize` 后检查热指令、诊断表、控制流目标、数值旁表和局部槽编码，不重建任何 side table，
+也不改变 opcode。当前安全顺序为 `seal -> lower_and_encode -> verify -> validate_hot_code ->
+optimize -> validate_hot_code -> compact -> validate_hot_code -> optimize_control_flow ->
+validate_hot_code -> compact`；`compact` 已不再负责 compare/loop 语义变换。
 
 Clang high Release、PI、`--vm-only` 的中位数为 `10.0984 ms`，结果保持 502 字符；完整回归为
 `Passed 78 out of 78 tests`。这个阶段边界为后续新增 `IndexLocalInt`、数组 push、数值运算和
 循环融合规则提供了统一入口。
 
-| 阶段耗时 | 最终保留的主要优化 | 同批证据或记录结论 |
-| ---: | --- | --- |
-| `313.109 ms` | 早期常量折叠、数值内建直达、局部一维数组直接路径 | 同进程未优化 `355.710 ms` -> 优化 `313.109 ms`，约快 `11.98%` |
-| `228.504 ms` | 局部初始化直接建槽、double-to-int 受限快速写入 | 当前批绝对值；未做有效交错 A/B，不单独归因 |
-| `153.845 ms` | 槽执行迁移，数值运算/调用/返回减少 Object 往返 | 当前批绝对值；跨批 `199.572 ms` 仅作阶段记录 |
-| `122.198 ms` | 动态 scope、范围、方法参数及返回状态迁入槽 | 当前批绝对值；跨批不作严格收益结论 |
-| `108.370 ms` | 默认优化、函数冻结和旧 Object 双轨删除 | 同批未优化 `172.656 ms`，优化 `108.370 ms` |
-| `95.837 ms` | Scope 静态 binding 预留与纯静态 Scope 容器复用 | `109.983` -> `102.063 ms`（`-7.2%`），再 `101.450` -> `96.867 ms`（`-4.5%`）；最终复测 `95.837 ms` |
-| `94.908 ms` | Module 级 int/double 名称 ID 与 NumericBinding | A/B/A/B/A/B：`96.860` -> `94.908 ms`，约快 `2.02%` |
-| `91.858 ms` | const 数组导入避免先复制 ObjectVector | A/B/B/A：`95.604` -> `91.858 ms`，约快 `3.92%` |
-| `88.9 ms` | 执行期唯一权威全局槽，减少宿主边界数组转换 | 两批中位数 `88.39/89.43 ms`；相对前一候选仅作跨批阶段记录 |
-| `85--78 ms` | VmArray/VmMap COW、只读索引修正、寄存器原生内建调用 | 多批输出正确；环境漂移或未冻结基线，不单独宣称时间收益 |
-| `63.096 ms` | 执行器由平行 opcode `if` 改为完整 `switch/case` | 四批 `62.6468/63.6289/63.7821/62.3279 ms`；相对约 `78.293 ms` 为同口径跨版本记录 |
-| `57.046 ms` | `NumericBinary` 16B 热数值微指令 | A/B/B/A/A/B：`62.986` -> `57.046 ms`，约快 `9.43%` |
-| `56.553 ms` | `NumericForNext` 融合整数更新与回跳 | A/B/B/A/A/B：`57.282` -> `56.553 ms`，约快 `1.27%` |
-| `53.144 ms` | `NumericCompareBranch` 融合数值比较与分支 | A/B/B/A/A/B：`57.441` -> `53.144 ms`，约快 `7.48%` |
-| `49.64 ms` | `ArrayPushGlobal` 端到端全局数组追加 | A/B/B/A/A/B：`53.53` -> `49.64 ms`，约快 `7.3%` |
-| `48.48 ms` | `LoadLocal + ArrayPushGlobal` 融合 | 复测 A/B/B/A：`49.49` -> `48.48 ms`，约快 `2.0%` |
-| `44.59 ms` | `LoadLocal + Index` 的 `IndexLocal` | 交错 A/B：约 `48.75` -> `44.59 ms`，约快 `8.5%` |
-| `43.28 ms` | 二元数学调用的双局部操作数描述符 | 两轮 A/B：约 `44.54` -> `43.28 ms`，约快 `2.8%` |
-| `42.48 ms` | `ConstantLocal` 直接写目标局部槽 | A/B/B/A/A/B：`43.51` -> `42.48 ms`，约快 `2.37%` |
-| `39.216/39.330 ms` | 显式 double 目标槽直写 | A/B/A：`41.442` -> `39.216/39.330 ms`，约快 `5.3%` |
-| `41.0412 ms` | 标准 PMR、栈上临时存储迁移 | 独立阶段记录：同机 MSVC Release PI `43.5414` -> `41.0412 ms`（约 `-5.7%`）；这是整次迁移结果，不能单独归因于栈缓冲区。 |
-| `36.33 ms` | 复合赋值作用域分析与整数/浮点 fast path | 阶段记录：`incrementf` 从 `182.95` 到 `9.49 ms`；百万次 `total += i` 独立 probe 从 `33.55` 到 `10.49 ms`。PI 只有修复后实测值，未做该项冻结 A/B。 |
-| `29.95 ms` | 循环体变量声明提升与已知局部保留 | 2026-09-20，`a4f2a93` 对当前、7 轮轮转：PI `36.06` -> `29.95 ms`（约 `-17%`）；calls `22.61` -> `21.77 ms`，increment `8.47` -> `7.74 ms`，incrementf `184.21` -> `9.75 ms`。 |
-| `29.95 ms` | 放开 handler 强制 noinline | 2026-09-20，MSVC 7 轮交替：increment `-6%`、incrementf `-4%`、calls `-2%`，PI 与 strings 持平；不计为 PI 收益。 |
-| `25.27 / 23.51 ms` | clang-cl inline budget 对照 | 2026-09-22，Clang 22.1.3、各 21 PI 样本：默认 / 高 inline threshold，中位数 `25.27` -> `23.51 ms`（约 `-6.95%`）；同源码、同机、仅改变 inline 阈值。 |
-| `22.38 / 20.00 / 16.20 ms` | 协议重构快照相对 `HEAD` | 2026-09-23，3 轮交错、每轮 21 PI 样本的均值：MSVC `24.40` -> `22.38 ms`（`-8.3%`）、clang-cl `21.22` -> `20.00 ms`（`-5.5%`）、高 inline clang `17.79` -> `16.20 ms`（`-9.0%`）。覆盖完整协议重构集，不能归因到单个 opcode。 |
-| `22.5446 ms` | 当前静态 CFG / Method / Range / verify 优化后的 MSVC PI | 2026-09-23，MSVC v145 `/O2 /DNDEBUG /MD`，21 个样本；均值 `22.5644 ms`，范围 `22.2952--22.8785 ms`，PI 返回 502 字符。不同重构阶段无冻结 A/B，作为当前测量记录，不单独归因。 |
-| `19.80 / 15.53 ms` | 冷诊断 resolver、延迟错误格式化并删除 current_source 执行状态 | 2026-09-23，最终 MSVC/clang-cl 高 inline 单批 PI 中位数；两者均 `PASS: all 14 outputs identical, characters=502`。此前不含最后 current_source 删除的 3 轮交错 A/B 已测得 MSVC `20.85` -> `20.17 ms`、clang-cl `15.92` -> `15.10 ms`；最终代码在同一 harness 下继续单批降至此行数值。 |
-| `2.727 / 3.179 ms` | Lua 风格剩余迭代计数 | 2026-09-23，`IntForPrep` 首次计算剩余轮数，`IntForNext` 只递减计数并回跳，避免每轮重新读取常量上界并执行 `next < limit`。同一 MSVC `/O2` 大循环基线 `3.238 / 3.438 ms` 降至空循环/增量循环 `2.727 / 3.179 ms`；对应 Lua `1.819 / 2.393 ms`，Cifa/Lua 为 `1.50x / 1.33x`。PI 14 次输出一致、长度 502；Debug 回归通过。 |
+上面的摘要表是唯一的总历史表；后续章节保留各阶段的详细实验、负结果和语义边界，避免重复维护两份时间线。
 
 ### 2026-09-23：完整 int32 隔离实验与循环/数值操作边际成本
 
@@ -2146,3 +2217,168 @@ MSVC 下 pi 对 Lua（同机 9.34ms）为 3.2 倍。
 22 个 handler 的强制 noinline 改为默认交给编译器决定（宏可覆盖）。MSVC 七轮
 交替对照：放开后 increment -6%、incrementf -4%、calls -2%，pi/strings 持平。
 2026-09-15 的"拆分后保持 noinline"结论基于当时的分派器结构，已由本轮取代。
+
+## 当前阶段与下一步计划（2026-09-24）
+
+当前生产基线是 Clang high Release、pool allocator、PI `--vm-only`。最近稳定结果约为
+`10.04 ms`，返回字符串长度为 `502`，FNV1a32 为 `1d4b4c2f`；Lua 5.4.5 整数基线约为
+`5.69 ms`。Cifa 完整回归要求保持 `Passed 78 out of 78 tests`。后续实验统一遵守：先测量，
+再做最小改动，最后以交错 A/B 决定是否保留；单次更快、listing 指令减少或编译成功都不算性能证据。
+
+### 已完成验证：索引结果与同基本块数值运算融合
+
+当前 PI 热路径中没有形成足够稳定的下列连续模式：
+
+```text
+IndexLocalInt / IndexLocalIntStore
+	 -> NumericBinaryLocal
+	 -> StoreLocal 或 discard-result
+```
+
+验证结论：
+
+1. PI listing 中检查了 `IndexLocalInt`、`IndexLocalIntStore`、`NumericBinaryLocal` 和
+	`Size` 的连续关系；没有发现覆盖率足够高、且能安全删除寄存器往返的稳定模式。
+2. 没有为低覆盖率索引路径增加组合 opcode；PI 保持通用路径，结果为 502 字符，FNV1a32
+	为 `1d4b4c2f`。
+3. `empty`、`increment`、`addloop` 和 PI 均完成动态 opcode 统计及交错基线记录。
+
+### 明确不做
+
+- 不改变默认 `int64_t` 语义，不迁移完整 int32 VM。
+- 不删除 Range 快照、`ReleaseLocal`、动态错误语义或宿主重入保护。
+- 不跨基本块做值追踪，不把脚本全局变量静默改成函数局部变量。
+- 不把 `shape_specializable` 直接变成运行时通用守护；只有 verifier 能固化事实时才允许专门化。
+- 不以 Lua 的绝对时间作为 Cifa 单项改动的收益证明；两者只作为同语义方向参考。
+
+### 阶段完成条件
+
+- [x] 当前 Clang high PI 基线完成至少 21 次样本记录。
+- [x] 静态 listing 与必要的动态 opcode 统计完成。
+- [x] 第一个索引后算术融合候选完成覆盖率检查，并因低覆盖率不实现。
+- [x] Debug/Release 回归保持通过，PI 输出校验保持 `502`。
+- [x] 对整数循环尾部候选完成交错 A/B，并确认受限 `addloop` 融合收益稳定。
+
+### 2026-09-24 基线与首个候选的结论
+
+当前 Clang high Release、pool allocator、21 次样本基线为：PI `10.0276 ms`、空循环
+`0.9144 ms`、整数递增循环 `1.5533 ms`、`addloop` `4.7305 ms`。四个负载均返回正确结果；
+PI 结果仍为 502 字符。PI 静态 listing 统计为 `IndexLocalIntStore=4`、`IndexLocalInt=4`、
+`NumericBinaryLocal=15`、`Size=11`、`NumericCompareBranch=20`。
+
+按函数区段检查后，没有发现 `IndexLocalInt/IndexLocalIntStore -> NumericBinaryLocal` 的直接
+连续模式：索引结果通常先经过 `LoadLocal`、常量/普通 `Add`、`MethodPush` 或控制流；因此本轮
+不新增索引后算术组合 opcode。这个候选的覆盖率不足，已作为负结果保留。
+
+现有 profile 数据结构已经通过显式 `--opcode-profile` 接入解释器取指路径；计数默认关闭，不作为
+正常性能路径的一部分。完成统计后，应从真实动态热点中选择下一项优化目标。
+
+### 动态 opcode profile 结果
+
+已为 benchmark 增加显式 `--opcode-profile` 模式。计数器位于 `CifaBytecode` 的冷成员中，默认关闭；
+benchmark 先单独执行一次 profile run，随后关闭计数器再进行计时，因此不会把 profile 开销混入正常
+性能样本。PI profile 的主要动态次数为：
+
+| opcode | 次数 |
+| --- | ---: |
+| `NumericCompareBranch` | `306,802` |
+| `NumericBinaryLocal` | `221,994` |
+| `NumericForNext` | `182,321` |
+| `NumericBinary` | `155,647` |
+| `IndexLocalInt` | `123,409` |
+| `ArrayPushLocalInt` | `91,192` |
+| `IndexLocalIntStore` | `89,934` |
+
+对照 workload 的动态次数为：`addloop` 中 `NumericCompareBranch`、`NumericBinaryLocal`、
+`NumericForNext` 各约 `1,000,000` 次；`increment` 中 `NumericCompareBranch` 和
+`NumericForNext` 各约 `1,000,000` 次。由此确认下一项不应是低覆盖率的
+`IndexLocalInt -> NumericBinaryLocal` 组合，而应先研究共享的整数循环尾部：如何在保持
+动态错误、控制变量可观察写回和循环退出语义的前提下，减少 `NumericCompareBranch`、
+`NumericBinaryLocal` 与 `NumericForNext` 之间的固定执行成本。
+
+### 整数循环专用化接线修复（2026-09-24）
+
+动态 profile 显示 `increment` 的主要路径是 `NumericCompareBranch + NumericForNext`。检查 listing
+后发现控制流优化虽然已经生成 compare/loop 转换逻辑，但第一次 `compact()` 会先删除融合后的
+冗余 `Branch`，而 `optimize_control_flow()` 仍要求 `condition + 1` 保留 `Branch`，导致
+`IntForPrep`、`IntForNextLocal` 和 `IntIncrementForNextLocal` 实际没有命中。
+
+本轮修正了优化阶段之间的契约：控制流优化现在识别第一次 compact 后的“比较指令直接进入循环体”
+形态，不再依赖已被删除的 Branch。结果是 `increment` 的函数体从：
+
+```text
+NumericCompareBranch -> IncrementLocal -> NumericForNext -> Jump
+```
+
+变为：
+
+```text
+IntForPrep -> IntIncrementForNextLocal -> Jump
+```
+
+动态 profile 确认 `IntIncrementForNextLocal` 执行 `1,000,000` 次，`NumericCompareBranch` 和
+`NumericForNext` 不再执行。Clang high Release、pool allocator、21 次样本中，`increment`
+中位数约为 `1.462 ms`；此前基线为 `1.5533 ms`，约改善 `5.9%`。`addloop` 中位数约
+`4.7753 ms`，PI 中位数约 `10.089 ms`，二者未显示稳定收益，因此没有继续新增更宽的组合 opcode。
+完整回归仍为 `Passed 78 out of 78 tests`，PI 结果保持 502 字符。
+
+随后对 `addloop` 的 `NumericBinaryLocal + IntForNext` 单体循环完成了独立交错 A/B，结果见
+下方“整数加法循环融合”记录；该结果只支持受限实现，不支持继续泛化组合 opcode。
+
+### 整数加法循环融合（2026-09-25）
+
+针对 `addloop` 的热路径实现了受限 `IntBinaryForNext`。只有满足以下条件时才会生成该 opcode：
+
+- 循环体只有一条 `NumericBinaryLocal`；
+- 操作是整数 `Add`，且结果丢弃；
+- 目标槽等于左操作数，右操作数等于循环 induction 槽；
+- 目标槽与 induction 槽不同，并已由静态信息确认是整数；
+- 没有函数调用、控制流、别名或动态类型守卫被移除。
+
+融合后的 `addloop` 指令为：
+
+```text
+IntForPrep -> IntBinaryForNext -> Jump
+```
+
+Clang high Release、pool allocator 下按 `addloop`、`increment`、`empty`、PI 顺序交错运行 6
+轮，结果为：`addloop` 中位数约 `2.67 ms`（此前约 `4.7753 ms`），`increment` 约
+`1.43 ms`，`empty` 约 `1.01 ms`，PI 约 `10.15 ms`。PI 每轮均为 502 字符；动态 profile
+确认 `IntBinaryForNext` 执行 `1,000,000` 次。完整回归保持 `Passed 78 out of 78 tests`。
+
+该收益只证明单体整数累加循环融合有效，不代表 PI 已直接受益；下一步应重新采集 PI 的实际
+热点，优先寻找覆盖率更高且同样能保持严格静态事实的路径，不继续泛化这个组合 opcode。
+
+### PI 多指令整数循环识别探针（2026-09-25，撤回）
+
+尝试把“显式 `int` 局部槽，且循环前存在一次 `StoreLocal`”作为整数循环变量或上界的静态事实，
+以扩大 `IntForPrep`/`IntForNext` 的覆盖范围。该条件不足以证明运行时槽已经完成整数绑定：它可能仍
+需要动态类型转换、初始化检查或保留原始数值语义。探针导致 PI 结果错误，已立即撤回。
+
+撤回后 PI 结果恢复为 502 字符，完整回归恢复为 `Passed 78 out of 78 tests`，`addloop` 的
+`IntBinaryForNext` 仍执行 `1,000,000` 次。结论是：下一次循环扩展必须同时证明初始化值、运行时
+numeric binding、上界读取和控制变量写回，而不能仅依据局部声明类型或历史写入。
+
+### NumericCompareBranch 已绑定整数快路（2026-09-25）
+
+在 `NumericCompareBranch` 执行器中增加了一个严格守卫的直接比较路径：只有比较操作的两个
+操作数都是局部槽、且两个槽当前均已绑定 `int64_t` 并持有整数 payload 时，才直接执行整数比较；
+其他情况继续走原有常量、浮点、临时寄存器和动态数值回退路径，不改变类型转换与错误语义。
+
+完整回归保持 `Passed 78 out of 78 tests`，PI 结果保持 502 字符。按 `pi`、`increment`、
+`addloop`、`empty` 顺序交错运行 6 轮，PI 中位数约 `9.96 ms`，`increment` `1.42 ms`，
+`addloop` `2.62 ms`，`empty` `1.00 ms`。相对此前 PI `9.98--10.15 ms` 的波动范围，当前
+快路尚不能宣称有独立的大幅收益，因此不继续扩大为新的组合 opcode；后续优先寻找能稳定减少
+循环尾部取指次数的改写。
+
+### `Size` 动态上界专用化探针（2026-09-25，撤回）
+
+继续检查 PI 中常见的循环形态：`Size(typed_array) -> StoreLocal(limit) -> i < limit`。该
+形态看起来可以把 `size()` 结果作为整数循环上界缓存，但当前 `Size` 执行器输出的是 `double`，
+后续 `StoreLocal` 还负责数值转换、局部绑定和运行时语义；仅凭 opcode 邻接以及目标槽声明为
+`int`，不足以证明后续循环可以安全改用 `IntegerLoopState::remaining`。探针未产生有效的
+`IntForPrep` 命中，并导致 PI 结果错误，已立即撤回。
+
+撤回后 PI 恢复为 502 字符，完整回归保持 `Passed 78 out of 78 tests`，`addloop` 的
+`IntBinaryForNext` 仍执行 `1,000,000` 次。结论是：动态 `size()` 上界若要继续优化，必须在
+编译期建立真实的数据流、类型绑定和别名/容器修改证明；不能继续用局部指令邻接规则推断。

@@ -115,8 +115,9 @@ vector<int> big_div_int(vector<int> a, int divisor) {
 
 // 计算 arctan(1/x) * base
 vector<int> calc_arctan(int x, vector<int> base_val, int max_iters) {
-    term = big_div_int(base_val, x);
-    sum_val = term;
+    auto term = big_div_int(base_val, x);
+    auto sum_val = term;
+    auto term_div = term;
     int x_sq = x * x;
 
     for (int k = 1; k < max_iters; k++) {
@@ -136,7 +137,7 @@ vector<int> calc_arctan(int x, vector<int> base_val, int max_iters) {
 }
 
 // 格式化输出字符串
-string format_pi(pi_arr, target_digits) {
+string format_pi(vector<int> pi_arr, int target_digits) {
     int len = size(pi_arr);
     if (len == 0) return "0.0000";
 
@@ -166,13 +167,13 @@ for (int i = 0; i < num_blocks; i++) {
 base_val.push_back(1);
 // 360 次迭代足以保证 25^-360 < 10^-500 的精度收敛
 int iters = 360;
-atan5 = calc_arctan(5, base_val, iters);
-atan239 = calc_arctan(239, base_val, iters);
+auto atan5 = calc_arctan(5, base_val, iters);
+auto atan239 = calc_arctan(239, base_val, iters);
 
-term1 = big_mul_int(atan5, 16);
-term2 = big_mul_int(atan239, 4);
-pi_big = big_sub(term1, term2);
-string pi_str = format_pi(pi_big, target_digits);
+auto term1 = big_mul_int(atan5, 16);
+auto term2 = big_mul_int(atan239, 4);
+auto pi_big = big_sub(term1, term2);
+auto pi_str = format_pi(pi_big, target_digits);
 println("高精度计算 PI (前 " + to_string(target_digits) + " 位) :");
 println(pi_str);
 return pi_str;

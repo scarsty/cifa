@@ -186,7 +186,7 @@ Cifa::Cifa()
             {
                 if (!print_object(d1)) { break; }
             }
-            return Object(double(d.size()));
+            return Object(static_cast<std::int64_t>(d.size()));
         });
     register_function("println", [print_object](ObjectVector& d)
         {
@@ -201,7 +201,7 @@ Cifa::Cifa()
             }
             //只有全部成功才输出换行，避免出错后多出空行
             if (ok) { std::print("\n"); }
-            return Object(double(d.size()));
+            return Object(static_cast<std::int64_t>(d.size()));
         });
     register_function("to_string", [](ObjectVector& d)
         {
@@ -348,15 +348,15 @@ Cifa::Cifa()
             {
                 if (x[0].isType<std::string>())
                 {
-                    return Object(double(x[0].toString().size()));
+                    return Object(static_cast<std::int64_t>(x[0].toString().size()));
                 }
                 if (x[0].isType<std::vector<Object>>())
                 {
-                    return Object(double(x[0].ref<std::vector<Object>>().size()));
+                    return Object(static_cast<std::int64_t>(x[0].ref<std::vector<Object>>().size()));
                 }
                 if (x[0].isType<ObjectMap>())
                 {
-                    return Object(double(x[0].ref<ObjectMap>().size()));
+                    return Object(static_cast<std::int64_t>(x[0].ref<ObjectMap>().size()));
                 }
                 set_runtime_error("function 'size' requires a string, array, or map", &x[0]);
                 return Object();
@@ -859,12 +859,12 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 }
                 arr.push_back(std::move(value));
             }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "pop_back")
         {
             if (!arr.empty()) { arr.pop_back(); }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "resize")
         {
@@ -873,12 +873,12 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 arr.resize(size_t(eval_scoped(args[0], scopes).toInt()));
                 if (!obj.element_type_name.empty()) { set_array_element_type(obj, obj.element_type_name); }
             }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "reserve")
         {
             if (!args.empty()) { arr.reserve(size_t(eval_scoped(args[0], scopes).toInt())); }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "insert")
         {
@@ -901,7 +901,7 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 }
                 arr.insert(arr.begin() + idx, std::move(value));
             }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "erase")
         {
@@ -913,12 +913,12 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                     arr.erase(arr.begin() + idx);
                 }
             }
-            return Object(double(arr.size()));
+            return Object(static_cast<std::int64_t>(arr.size()));
         }
         if (method_name == "clear")
         {
             arr.clear();
-            return Object(0.0);
+            return Object(std::int64_t(0));
         }
         if (method_name == "contains")
         {
@@ -927,10 +927,10 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 auto val = eval_scoped(args[0], scopes);
                 for (auto& e : arr)
                 {
-                    if (equal(e, val)) { return Object(1.0); }
+                    if (equal(e, val)) { return Object(true); }
                 }
             }
-            return Object(0.0);
+            return Object(false);
         }
         if (method_name == "keys")
         {
@@ -948,21 +948,21 @@ Object Cifa::eval_builtin_method(const CalUnit& method, Object& obj, std::vector
                 auto key = eval_scoped(args[0], scopes).toString();
                 m.erase(key);
             }
-            return Object(double(m.size()));
+            return Object(static_cast<std::int64_t>(m.size()));
         }
         if (method_name == "clear")
         {
             m.clear();
-            return Object(0.0);
+            return Object(std::int64_t(0));
         }
         if (method_name == "contains")
         {
             if (!args.empty())
             {
                 auto key = eval_scoped(args[0], scopes).toString();
-                return Object(m.count(key) ? 1.0 : 0.0);
+                return Object(m.count(key) != 0);
             }
-            return Object(0.0);
+            return Object(false);
         }
         if (method_name == "keys")
         {

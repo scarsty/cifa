@@ -15,9 +15,9 @@ class CifaBytecode : public Cifa
         Positive, Negative, LogicalNot, BitNot, Cast, Size, MathUnary, MathBinary, Empty, Jump, Branch,
         AndBranch, OrBranch, LogicalAnd, LogicalOr, Return, ReleaseLocal,
         PrepareStore, Store, Increment, Switch,
-        CallBegin, Call, Peek, Array, Index, IndexLocal, Range, MethodCheck,
-        MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, ArrayPushLocalInt, Member, IndexLocalInt, IndexLocalIntStore, NumericBinary, NumericBinaryLocal,
-        NumericCompareBranch, NumericForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, RegisterBinary, ScriptEnd, Exit, Removed };
+        CallBegin, Call, Peek, Array, ArrayInt, Index, IndexInt, IndexLocal, Range, MethodCheck,
+        MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, ArrayPushLocalInt, ArrayPushLocalIntStack, ArrayReserve, ArrayReserveGlobal, ArrayPopLocal, Member, IndexLocalInt, IndexLocalIntStore, NumericBinary, IntBinary, IntBinaryStack, IntPreferredBinaryStack, StringPreferredBinaryStack, NumericBinaryLocal,
+        NumericCompareBranch, IntCompareBranch, IntTemporaryCompareBranch, NumericForNext, IntIncrementForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, IntBinaryForNext, RegisterBinary, ScriptEnd, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {
@@ -39,6 +39,7 @@ class CifaBytecode : public Cifa
     };
     struct RegisterSlots;
     struct Machine;
+    enum class RegisterType : std::uint8_t { Unknown, Int, Double, Bool, String, Value };
     enum class WriteOperation : std::uint8_t { Assign, Add, Subtract, Multiply, Divide, Modulo, BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight, PostAdd, PostSubtract, Invalid };
     static WriteOperation write_operation(const std::string& symbol);
     static std::optional<Opcode> write_opcode(WriteOperation operation);
@@ -117,6 +118,7 @@ class CifaBytecode : public Cifa
         std::pmr::vector<IntegerLoop> integer_loops{resource};
         std::pmr::vector<size_t> numeric_local_sites{resource};
         std::pmr::vector<size_t> register_inputs{resource};
+        std::pmr::vector<RegisterType> register_input_types{resource};
         std::pmr::vector<std::pmr::vector<std::pair<size_t, bool>>> diagnostic_frames{resource};
         std::pmr::vector<DiagnosticFrameEvent> diagnostic_frame_events{resource};
         size_t register_capacity = 0;
@@ -510,6 +512,11 @@ class CifaBytecode : public Cifa
         Log10, Erf, Erfc, TGamma, LGamma, Atan2, Pow, Hypot, Fmod,
         Remainder, CopySign, FDim, FMax, FMin
     };
+    enum class MethodKind : std::uint8_t
+    {
+        Unknown, PushBack, PopBack, Resize, Reserve, Insert, Erase, Clear, Contains, Keys
+    };
+    static MethodKind classify_method_kind(std::string_view name);
     // 调用站点的参数诊断、接收者和可选数值快路径描述。
     struct CallSite
     {
@@ -521,6 +528,7 @@ class CifaBytecode : public Cifa
         bool global_receiver = false;
         size_t name_id = 0;
         size_t base_name_id = 0;
+        MethodKind method = MethodKind::Unknown;
         SourceRef method_source;
         MathKind math_kind = MathKind::None;
         std::array<size_t, 2> math_local_slots{};
@@ -726,7 +734,7 @@ class CifaBytecode : public Cifa
             const std::pmr::vector<SourceLocation>& locations);
         bool call_builtin_registers(const std::string& name, RegisterSlots& destination, size_t result,
             RegisterSlots& values, const size_t* arguments, size_t count);
-        void call_method(RegisterSlots& destination, size_t slot, const std::string& name, const SourceLocation& location,
+        void call_method(RegisterSlots& destination, size_t slot, MethodKind kind, const std::string& name, const SourceLocation& location,
             NamedValueRef& receiver, const std::pmr::vector<SourceLocation>& locations, RegisterSlots& arguments);
         IndexedValueRef indexed(const std::string& name, const std::string& type_name, size_t dimensions, bool is_decl_array,
             bool only_check, bool declare_current, RegisterSlots& indices, const size_t* index_slots);
@@ -859,6 +867,7 @@ class CifaBytecode : public Cifa
     size_t index_site(const CalUnit& node);
     void seal(Instructions& instructions);
     void seal_calls();
+    bool lower_and_encode(Instructions& instructions, size_t local_slot_count);
     std::pmr::vector<size_t> compact(Instructions& instructions);
     SourceLocation& source(const SourceRef& reference) const;
     std::optional<size_t> local_slot(const CalUnit& node, bool declare, bool allow_untyped_declaration = false);
@@ -875,8 +884,10 @@ class CifaBytecode : public Cifa
     static void discard_statement_result(std::pmr::vector<BuildInstruction>& instructions, size_t begin,
         std::optional<size_t> end = std::nullopt);
     bool emit_register_expression(CalUnit& node, std::pmr::vector<BuildInstruction>& instructions);
-    bool verify(Instructions& instructions, size_t local_slot_count = 0, bool revalidate = false);
+    bool verify(Instructions& instructions, size_t local_slot_count = 0);
+    bool validate_hot_code(const Instructions& instructions, size_t local_slot_count);
     bool optimize(Instructions& instructions, size_t local_slot_count);
+    bool optimize_control_flow(Instructions& instructions, size_t local_slot_count);
     struct InterpState;
     static bool execute_instructions(Machine& machine, const Module& module, const Instructions& instructions,
         Object& result, size_t start = 0);
@@ -1002,6 +1013,9 @@ public:
     bool is_profiling_enabled() const;
     void reset_profile();
     std::string get_profile_json() const;
+    void set_opcode_profile_enabled(bool enabled) { opcode_profile_enabled = enabled; }
+    void reset_opcode_profile();
+    std::string get_opcode_profile() const;
     //诊断用：调整单次运行最多记录的指令数（默认 2,000,000），以及读取计数结果。
     void set_profile_instruction_limit(size_t limit) { profile_state.instruction_limit = limit; }
     const ProfileState& profile_metrics() const { return profile_state; }
@@ -1029,6 +1043,8 @@ private:
     void clear_compile_visibility();
     std::unique_ptr<Session> session;
     std::pmr::vector<std::unique_ptr<CifaBytecode>> nested_modules{allocation_resource.get()};
+    std::array<std::uint64_t, static_cast<size_t>(Opcode::Removed) + 1> opcode_profile_counts{};
+    bool opcode_profile_enabled = false;
     std::unordered_map<std::string, FunctionOverloads> persistent_functions;
     std::unordered_map<std::string, std::vector<StructField>> persistent_struct_defs;
     std::pmr::unordered_map<std::string, NativeFunction> native_functions{allocation_resource.get()};

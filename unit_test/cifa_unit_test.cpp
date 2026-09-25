@@ -393,6 +393,13 @@ bool builtin_type_function_test()
         auto pending_value = 1;
         arr = {1, 2};
         m["x"] = 1;
+        auto string_size = size("abc");
+        auto array_size = size(arr);
+        auto pushed_size = arr.push_back(3);
+        auto array_contains = arr.contains(3);
+        auto cleared_size = arr.clear();
+        auto erased_size = m.erase("x");
+        auto map_contains = m.contains("x");
         return type(empty_value) == "int"
             && type(pending_value) == "int"
             && type(1) == "int"
@@ -401,7 +408,14 @@ bool builtin_type_function_test()
             && type(true) == "bool"
             && type("abc") == "string"
             && type(arr) == "array"
-            && type(m) == "map";
+                && type(m) == "map"
+                && type(string_size) == "int"
+                && type(array_size) == "int"
+                && type(pushed_size) == "int"
+                && type(cleared_size) == "int"
+                && type(erased_size) == "int"
+                && type(array_contains) == "bool"
+                && type(map_contains) == "bool";
     )");
     return o.isNumber() && o.toDouble() == 1.0;
 }
