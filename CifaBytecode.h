@@ -1,7 +1,253 @@
 #pragma once
 #include "Cifa.h"
+#include <any>
+#include <concepts>
+#include <cstddef>
+#include <cstring>
+#include <initializer_list>
+#include <memory>
+#include <memory_resource>
+#include <vector>
+#include <deque>
+#include <map>
+#include <unordered_map>
+#include <unordered_set>
+#include <limits>
+#include <utility>
+#include <array>
+#include <string>
+#include <string_view>
+#include <algorithm>
+#include <tuple>
 #include <optional>
-#include "CifaMemory.h"
+
+namespace cifa::memory {
+// Shared ownership is deliberate: COW values and compiled modules may outlive
+// the execution that created them. Never retain a pointer to a dead stack arena.
+using Resource = std::shared_ptr<std::pmr::memory_resource>;
+struct Statistics {
+    size_t allocations = 0, deallocations = 0, allocated_bytes = 0;
+    size_t outstanding_bytes = 0, peak_bytes = 0;
+};
+// Counts requests to a resource, not opaque host/Object/std::any allocations.
+class CountingResource : public std::pmr::memory_resource {
+    Resource upstream;
+    Statistics counters;
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        void* result = upstream->allocate(bytes,alignment);
+        ++counters.allocations; counters.allocated_bytes += bytes;
+        counters.outstanding_bytes += bytes;
+        counters.peak_bytes = (std::max)(counters.peak_bytes,counters.outstanding_bytes);
+        return result;
+    }
+    void do_deallocate(void* pointer,size_t bytes,size_t alignment) override {
+        upstream->deallocate(pointer,bytes,alignment);
+        ++counters.deallocations; counters.outstanding_bytes -= bytes;
+    }
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
+public:
+    explicit CountingResource(Resource value) : upstream(std::move(value)) {}
+    Statistics statistics() const { return counters; }
+};
+inline const Resource& default_resource() {
+    static Resource resource(std::pmr::new_delete_resource(), [](auto*) {});
+    return resource;
+}
+// Heterogeneous lookup avoids temporary strings at diagnostic-name boundaries.
+struct StringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
+};
+struct StringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view left,std::string_view right) const noexcept { return left==right; }
+};
+
+// 资源为借用指针，必须比 any 及其副本存活更久；不隐式持有栈 arena。
+class PmrAny {
+public:
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+    static constexpr std::size_t inline_capacity = 4 * sizeof(void*);
+    static constexpr std::size_t inline_alignment = alignof(std::max_align_t);
+
+private:
+    struct Operations {
+        const std::type_info& (*type)() noexcept;
+        void (*destroy)(PmrAny&) noexcept;
+        void (*copy)(const PmrAny&, PmrAny&);
+        void (*relocate)(PmrAny&, PmrAny&) noexcept;
+        bool local;
+    };
+    alignas(inline_alignment) std::byte buffer_[inline_capacity]{};
+    std::pmr::memory_resource* resource_;
+    const Operations* operations_ = nullptr;
+
+    template<class T> static constexpr bool local = sizeof(T) <= inline_capacity
+        && alignof(T) <= inline_alignment && std::is_nothrow_move_constructible_v<T>;
+
+    void* pointer() noexcept {
+        if (operations_->local) return buffer_;
+        void* result;
+        std::memcpy(&result, buffer_, sizeof(result));
+        return result;
+    }
+    const void* pointer() const noexcept { return const_cast<PmrAny*>(this)->pointer(); }
+
+    template<class T> static const Operations* operations() {
+        static const Operations value{
+            []() noexcept -> const std::type_info& { return typeid(T); },
+            [](PmrAny& self) noexcept {
+                auto* object = static_cast<T*>(self.pointer());
+                if constexpr (local<T>) std::destroy_at(object);
+                else self.get_allocator().delete_object(object);
+            },
+            [](const PmrAny& source, PmrAny& destination) {
+                destination.construct<T>(*static_cast<const T*>(source.pointer()));
+            },
+            [](PmrAny& source, PmrAny& destination) noexcept {
+                if constexpr (local<T>) {
+                    std::construct_at(reinterpret_cast<T*>(destination.buffer_),
+                        std::move(*static_cast<T*>(source.pointer())));
+                    std::destroy_at(static_cast<T*>(source.pointer()));
+                } else {
+                    std::memcpy(destination.buffer_, source.buffer_, sizeof(void*));
+                }
+                destination.operations_ = source.operations_;
+                source.operations_ = nullptr;
+            },
+            local<T>
+        };
+        return &value;
+    }
+
+    template<class T, class... Args> T& construct(Args&&... args) {
+        T* object;
+        if constexpr (local<T>) {
+            object = std::uninitialized_construct_using_allocator(
+                reinterpret_cast<T*>(buffer_), get_allocator(), std::forward<Args>(args)...);
+        } else {
+            object = get_allocator().template new_object<T>(std::forward<Args>(args)...);
+            std::memcpy(buffer_, &object, sizeof(object));
+        }
+        operations_ = operations<T>();
+        return *object;
+    }
+
+    void take(PmrAny& source) noexcept {
+        if (source.operations_) source.operations_->relocate(source, *this);
+    }
+
+public:
+    explicit PmrAny(std::pmr::memory_resource* resource = std::pmr::get_default_resource()) noexcept
+        : resource_(resource ? resource : std::pmr::get_default_resource()) {}
+    PmrAny(std::allocator_arg_t, allocator_type allocator) noexcept : PmrAny(allocator.resource()) {}
+
+    PmrAny(const PmrAny& source) : PmrAny(source, source.resource_) {}
+    PmrAny(const PmrAny& source, std::pmr::memory_resource* resource) : PmrAny(resource) {
+        if (source.operations_) source.operations_->copy(source, *this);
+    }
+    PmrAny(std::allocator_arg_t, allocator_type allocator, const PmrAny& source)
+        : PmrAny(source, allocator.resource()) {}
+
+    PmrAny(PmrAny&& source) noexcept : PmrAny(source.resource_) { take(source); }
+    PmrAny(PmrAny&& source, std::pmr::memory_resource* resource) : PmrAny(resource) {
+        if (resource_ == source.resource_) take(source);
+        else {
+            if (source.operations_) source.operations_->copy(source, *this);
+            source.reset();
+        }
+    }
+    PmrAny(std::allocator_arg_t, allocator_type allocator, PmrAny&& source)
+        : PmrAny(std::move(source), allocator.resource()) {}
+
+    template<class T, class... Args> requires (std::same_as<T, std::decay_t<T>> && std::is_copy_constructible_v<T>)
+    explicit PmrAny(std::in_place_type_t<T>, std::pmr::memory_resource* resource, Args&&... args)
+        : PmrAny(resource) { construct<T>(std::forward<Args>(args)...); }
+    template<class T, class... Args> requires (std::same_as<T, std::decay_t<T>> && std::is_copy_constructible_v<T>)
+    PmrAny(std::allocator_arg_t, allocator_type allocator, std::in_place_type_t<T>, Args&&... args)
+        : PmrAny(std::in_place_type<T>, allocator.resource(), std::forward<Args>(args)...) {}
+
+    ~PmrAny() { reset(); }
+    PmrAny& operator=(const PmrAny& source) {
+        if (this != &source) {
+            PmrAny replacement(source, resource_);
+            reset();
+            take(replacement);
+        }
+        return *this;
+    }
+    PmrAny& operator=(PmrAny&& source) {
+        if (this != &source) {
+            PmrAny replacement(std::move(source), resource_);
+            reset();
+            take(replacement);
+        }
+        return *this;
+    }
+
+    template<class T, class... Args> requires std::is_copy_constructible_v<std::decay_t<T>>
+    std::decay_t<T>& emplace(Args&&... args) {
+        reset();
+        return construct<std::decay_t<T>>(std::forward<Args>(args)...);
+    }
+    template<class T, class U, class... Args> requires std::is_copy_constructible_v<std::decay_t<T>>
+    std::decay_t<T>& emplace(std::initializer_list<U> values, Args&&... args) {
+        reset();
+        return construct<std::decay_t<T>>(values, std::forward<Args>(args)...);
+    }
+    void reset() noexcept {
+        if (operations_) { operations_->destroy(*this); operations_ = nullptr; }
+    }
+    bool has_value() const noexcept { return operations_ != nullptr; }
+    bool uses_inline_storage() const noexcept { return operations_ && operations_->local; }
+    const std::type_info& type() const noexcept { return operations_ ? operations_->type() : typeid(void); }
+    allocator_type get_allocator() const noexcept { return allocator_type(resource_); }
+    PmrAny clone(std::pmr::memory_resource* resource) const { return PmrAny(*this, resource); }
+
+    void swap(PmrAny& other) {
+        if (this == &other) return;
+        if (resource_ == other.resource_) {
+            PmrAny temporary(std::move(*this));
+            take(other);
+            other.take(temporary);
+        } else {
+            PmrAny left(other, resource_);
+            PmrAny right(*this, other.resource_);
+            reset();
+            other.reset();
+            take(left);
+            other.take(right);
+        }
+    }
+    friend void swap(PmrAny& left, PmrAny& right) { left.swap(right); }
+
+    template<class T> T* get_if() noexcept {
+        static_assert(std::is_object_v<T>);
+        return type() == typeid(T) ? static_cast<T*>(pointer()) : nullptr;
+    }
+    template<class T> const T* get_if() const noexcept {
+        return const_cast<PmrAny*>(this)->template get_if<T>();
+    }
+};
+
+template<class T> T* any_cast(PmrAny* value) noexcept { return value ? value->template get_if<T>() : nullptr; }
+template<class T> const T* any_cast(const PmrAny* value) noexcept { return value ? value->template get_if<T>() : nullptr; }
+template<class T> T any_cast(PmrAny& value) {
+    using U = std::remove_cvref_t<T>;
+    if (auto* object = any_cast<U>(&value)) return static_cast<T>(*object);
+    throw std::bad_any_cast();
+}
+template<class T> T any_cast(const PmrAny& value) {
+    using U = std::remove_cvref_t<T>;
+    if (auto* object = any_cast<U>(&value)) return static_cast<T>(*object);
+    throw std::bad_any_cast();
+}
+template<class T> T any_cast(PmrAny&& value) {
+    using U = std::remove_cvref_t<T>;
+    if (auto* object = any_cast<U>(&value)) return static_cast<T>(std::move(*object));
+    throw std::bad_any_cast();
+}
+}
 
 namespace cifa
 {
@@ -17,7 +263,7 @@ class CifaBytecode : public Cifa
         PrepareStore, Store, Increment, Switch,
         CallBegin, Call, Peek, Array, ArrayInt, Index, IndexInt, IndexLocal, Range, MethodCheck,
         MethodCall, MethodPush, ArrayPushGlobal, ArrayPushGlobalLocal, ArrayPushLocalInt, ArrayPushLocalIntStack, ArrayReserve, ArrayReserveGlobal, ArrayPopLocal, Member, IndexLocalInt, IndexLocalIntStore, NumericBinary, IntBinary, IntBinaryStack, IntPreferredBinaryStack, StringPreferredBinaryStack, NumericBinaryLocal,
-        NumericCompareBranch, IntCompareBranch, IntTemporaryCompareBranch, NumericForNext, IntIncrementForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, IntBinaryForNext, RegisterBinary, ScriptEnd, Exit, Removed };
+        NumericCompareBranch, IntCompareBranch, IntTemporaryCompareBranch, NumericForNext, IntIncrementForNext, IntIncrementLocal, IntForPrep, IntForNext, IntForNextLocal, IntIncrementForNextLocal, IntBinaryForNext, IntDivMod, RegisterBinary, ScriptEnd, Exit, Removed };
     // 源码位置在冷表中的稳定编号，零表示没有对应源码位置。
     struct SourceRef
     {
@@ -95,8 +341,10 @@ class CifaBytecode : public Cifa
         std::uint32_t destination;
         std::uint32_t left;
         std::uint32_t right;
+        std::uint32_t direct_left = std::numeric_limits<std::uint32_t>::max();
+        std::uint32_t direct_right = std::numeric_limits<std::uint32_t>::max();
     };
-    static_assert(sizeof(RegisterOperation) == 16);
+    static_assert(sizeof(RegisterOperation) == 24);
     // 一段根代码或函数代码的构建期、执行期和验证元数据集合。
     struct Instructions
     {
@@ -107,7 +355,66 @@ class CifaBytecode : public Cifa
             size_t exit;
             size_t control_slot = 0;
             size_t limit_slot = std::numeric_limits<size_t>::max();
+            size_t region_index = std::numeric_limits<size_t>::max();
             bool localize = false;
+        };
+        struct IntegerLoopRegion
+        {
+            struct UseDefLink
+            {
+                size_t producer_pc = 0;
+                size_t consumer_pc = 0;
+                size_t slot = 0;
+                std::uint8_t producer_kind = 0;
+                std::uint8_t consumer_kind = 0;
+                std::uint8_t producer_opcode = 0;
+                std::uint8_t consumer_opcode = 0;
+                bool slot_redefined = false;
+                bool producer_type_stable = false;
+            };
+            struct StateLifetime
+            {
+                size_t slot = 0;
+                size_t first_definition = std::numeric_limits<size_t>::max();
+                size_t last_use = 0;
+                bool used_before_body = false;
+                bool read_in_body = false;
+                bool written_in_body = false;
+                bool used_after_body = false;
+                bool cross_backedge = false;
+                bool statically_integer = false;
+            };
+            size_t terminator = 0;
+            size_t body = 0;
+            size_t exit = 0;
+            size_t control_slot = 0;
+            bool candidate = false;
+            std::pmr::vector<size_t> arrays;
+            std::pmr::vector<size_t> indices;
+            std::pmr::vector<size_t> carried;
+            std::pmr::vector<size_t> outputs;
+            bool has_call = false;
+            bool has_branch = false;
+            bool has_array_write = false;
+            bool has_unknown_alias = false;
+            bool eligible = false;
+            bool array_read_fast = false;
+            size_t array_receiver_slot = std::numeric_limits<size_t>::max();
+            size_t array_index_slot = std::numeric_limits<size_t>::max();
+            size_t index_to_integer_operation = 0;
+            size_t integer_operation_to_store = 0;
+            size_t integer_operation_to_push = 0;
+            size_t use_def_index_to_integer = 0;
+            size_t use_def_constant_to_integer = 0;
+            size_t use_def_local_to_integer = 0;
+            size_t use_def_integer_to_store = 0;
+            size_t use_def_integer_to_push = 0;
+            std::pmr::vector<UseDefLink> use_def_links;
+            std::pmr::vector<StateLifetime> lifetimes;
+            std::pmr::string rejection;
+
+            explicit IntegerLoopRegion(std::pmr::memory_resource* value)
+                : arrays(value), indices(value), carried(value), outputs(value), use_def_links(value), lifetimes(value), rejection(value) {}
         };
         std::pmr::memory_resource* resource;
         explicit Instructions(std::pmr::memory_resource* value = std::pmr::get_default_resource()) : resource(value) {}
@@ -116,6 +423,7 @@ class CifaBytecode : public Cifa
         std::pmr::vector<InstructionDiagnostic> diagnostics{resource};
         std::pmr::vector<RegisterOperation> numeric_operations{resource};
         std::pmr::vector<IntegerLoop> integer_loops{resource};
+        std::pmr::vector<IntegerLoopRegion> integer_loop_regions{resource};
         std::pmr::vector<size_t> numeric_local_sites{resource};
         std::pmr::vector<size_t> register_inputs{resource};
         std::pmr::vector<RegisterType> register_input_types{resource};
@@ -966,6 +1274,9 @@ public:
         size_t int_for_prep_count = 0;
         size_t int_for_next_count = 0;
         size_t total_operand_count = 0;
+        std::array<size_t, static_cast<size_t>(Opcode::Removed) + 1> static_opcode_counts{};
+        size_t static_code_bytes = 0;
+        std::array<std::uint32_t, 7> maximum_instruction_fields{};
         std::vector<Function> functions;
     };
 
@@ -1014,8 +1325,12 @@ public:
     void reset_profile();
     std::string get_profile_json() const;
     void set_opcode_profile_enabled(bool enabled) { opcode_profile_enabled = enabled; }
+    void set_carried_localization_enabled(bool enabled) { carried_localization_enabled = enabled; }
+    void set_array_region_localization_enabled(bool enabled) { array_region_localization_enabled = enabled; }
     void reset_opcode_profile();
     std::string get_opcode_profile() const;
+    std::string get_execution_cost_profile() const;
+    std::string get_static_cost_profile() const;
     //诊断用：调整单次运行最多记录的指令数（默认 2,000,000），以及读取计数结果。
     void set_profile_instruction_limit(size_t limit) { profile_state.instruction_limit = limit; }
     const ProfileState& profile_metrics() const { return profile_state; }
@@ -1044,7 +1359,12 @@ private:
     std::unique_ptr<Session> session;
     std::pmr::vector<std::unique_ptr<CifaBytecode>> nested_modules{allocation_resource.get()};
     std::array<std::uint64_t, static_cast<size_t>(Opcode::Removed) + 1> opcode_profile_counts{};
+    std::array<std::uint64_t, static_cast<size_t>(Opcode::Removed) + 1> opcode_profile_input_totals{};
+    std::uint64_t opcode_profile_input_total = 0;
+    std::uint64_t opcode_profile_instruction_total = 0;
     bool opcode_profile_enabled = false;
+    bool carried_localization_enabled = true;
+    bool array_region_localization_enabled = true;
     std::unordered_map<std::string, FunctionOverloads> persistent_functions;
     std::unordered_map<std::string, std::vector<StructField>> persistent_struct_defs;
     std::pmr::unordered_map<std::string, NativeFunction> native_functions{allocation_resource.get()};

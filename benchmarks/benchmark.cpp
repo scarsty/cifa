@@ -15,7 +15,9 @@ int main(int argc, char** argv) try {
     const int samples = argc > 1 ? std::stoi(argv[1]) : 7;
     if (samples < 1) throw std::runtime_error("sample count must be positive");
     const std::string workload = argc > 2 ? argv[2] : "pi";
-    bool profile = false, pooled = true, count_allocations = false, listing = false, opcode_profile = false;
+    bool profile = false, pooled = true, count_allocations = false, listing = false, opcode_profile = false, cost_model = false;
+    bool carried_localization = true;
+    bool array_region_localization = true;
     for (int i=3;i<argc;++i) {
         const std::string flag=argv[i];
         if (flag=="--vm-only") profile=true;
@@ -24,6 +26,9 @@ int main(int argc, char** argv) try {
         else if (flag=="--allocations") count_allocations=true;
         else if (flag=="--listing") listing=true;
         else if (flag=="--opcode-profile") opcode_profile=true;
+        else if (flag=="--cost-model") cost_model=true;
+        else if (flag=="--no-carried-localization") carried_localization=false;
+        else if (flag=="--no-array-region") array_region_localization=false;
         else if (flag=="--wait") std::this_thread::sleep_for(std::chrono::seconds(5));
         else throw std::runtime_error("Unknown option: "+flag);
     }
@@ -48,6 +53,14 @@ int main(int argc, char** argv) try {
         script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value = value + 1; } return value; } return loop();";
     } else if (workload == "addloop") {
         script = "int loop() { int value = 0; for (int i = 0; i < 1000000; i++) { value = value + i; } return value; } return loop();";
+    } else if (workload == "arrayloop") {
+        std::string values;
+        for (int value = 1; value <= 64; ++value) {
+            if (!values.empty()) values += ',';
+            values += std::to_string(value);
+        }
+        script = "int loop() { vector<int> values = {" + values
+            + "}; vector<int> result = {}; for (int i = 0; i < 64; i++) { result.push_back(values[i] + i); } return result[63]; } return loop();";
     } else if (workload == "empty") {
         script = "int loop() { for (int i = 0; i < 1000000; i++) { } return 1000000; } return loop();";
     } else if (workload == "incrementf") {
@@ -56,13 +69,15 @@ int main(int argc, char** argv) try {
         script = "int loop() { int left = 1; int right = 2; int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop();";
     } else if (workload == "intcompare_dynamic") {
         script = "int loop(left, right) { int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop(1, 2);";
-    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, add, addloop, incrementf, intcompare, or intcompare_dynamic");
+    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, addloop, arrayloop, incrementf, intcompare, or intcompare_dynamic");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.
     if (pooled) resource=std::make_shared<std::pmr::unsynchronized_pool_resource>(resource.get());
     auto requests = std::make_shared<cifa::memory::CountingResource>(resource);
     cifa::CifaBytecode vm(count_allocations ? requests : resource);
+    vm.set_carried_localization_enabled(carried_localization);
+    vm.set_array_region_localization_enabled(array_region_localization);
     vm.register_function("println", [](cifa::ObjectVector&) -> cifa::Object { return {}; });
     auto start=Clock::now();
     if (!vm.compile_script(script)) throw std::runtime_error(vm.get_errors_str());
@@ -77,6 +92,7 @@ int main(int argc, char** argv) try {
     if (workload == "increment" && expected != "1000000.000000") throw std::runtime_error("Incorrect increment sum");
     if (workload == "add" && expected != "1000000.000000") throw std::runtime_error("Incorrect add sum");
     if (workload == "addloop" && expected != "499999500000.000000") throw std::runtime_error("Incorrect addloop sum");
+    if (workload == "arrayloop" && expected != "127.000000") throw std::runtime_error("Incorrect arrayloop result: " + expected);
     if (workload == "incrementf" && expected != "1000000.000000") throw std::runtime_error("Incorrect float increment sum");
     if (workload == "intcompare" && expected != "1000000.000000") throw std::runtime_error("Incorrect int compare sum");
     if (workload == "intcompare_dynamic" && expected != "1000000.000000") throw std::runtime_error("Incorrect dynamic int compare sum");
@@ -99,6 +115,29 @@ int main(int argc, char** argv) try {
         std::cout << "direct_parse_execute_ms=" << direct_ms << '\n';
     }
     if (listing) std::cout << vm.dump_instruction_listing();
+    if (cost_model) {
+        const auto statistics = vm.bytecode_statistics();
+        std::cout << "cost_model_static instruction_size=" << statistics.instruction_size
+            << " static_code_bytes=" << statistics.static_code_bytes
+            << " total_instructions=" << statistics.total_instruction_count
+            << " total_operands=" << statistics.total_operand_count
+            << " functions=" << statistics.functions.size() << '\n';
+        std::cout << "cost_model_field_max operand=" << statistics.maximum_instruction_fields[0]
+            << " auxiliary=" << statistics.maximum_instruction_fields[1]
+            << " member_site=" << statistics.maximum_instruction_fields[2]
+            << " variable_site=" << statistics.maximum_instruction_fields[3]
+            << " destination=" << statistics.maximum_instruction_fields[4]
+            << " input_offset=" << statistics.maximum_instruction_fields[5]
+            << " input_count=" << statistics.maximum_instruction_fields[6] << '\n';
+        std::cout << "cost_model_static_opcodes\n" << vm.get_static_cost_profile();
+        vm.reset_opcode_profile();
+        vm.set_opcode_profile_enabled(true);
+        const auto profiled = vm.run();
+        vm.set_opcode_profile_enabled(false);
+        if (vm.has_runtime_error() || key(profiled) != expected) throw std::runtime_error("Cost model result mismatch");
+        std::cout << "cost_model_dynamic_opcodes\n" << vm.get_opcode_profile();
+        std::cout << "cost_model_dynamic_inputs\n" << vm.get_execution_cost_profile();
+    }
     std::cout << "workload=" << workload << " allocator=" << (pooled ? "pool" : "direct")
         << " compile_ms=" << compile_ms << " result_characters=" << expected.size() << '\n';
     std::vector<double> times;

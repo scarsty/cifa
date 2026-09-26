@@ -1,3 +1,60 @@
+#### 区域生命周期元数据统一化（2026-09-26，保留分析结果）
+
+将原先只在 `dump_instruction_listing()` 中临时扫描的 `def/last/pre/read/write/post/cross` 信息下沉到
+`IntegerLoopRegion::StateLifetime`。绑定到 `IntegerLoopState` 的区域和 `member_site == 0` 的候选回边现在都
+使用同一份持久化分析结果；每个状态同时记录是否为静态 `int`，避免后续执行器重新从 listing 或 opcode
+相邻关系推断生命周期。
+
+本轮只增加编译期冷元数据和 listing 输出，没有改变 opcode、解释器执行路径或运行时语义。`arrayloop` 和
+PI listing 均能输出统一的 `region_state`，例如 `def`、`last`、`cross` 和 `int`；PI 候选中的跨回边
+状态已被明确标出，包含调用、分支或数组写入的区域仍保持拒绝状态。
+
+最终验证：构建 `cifa_tests`/`cifa_benchmark` 成功，完整回归为 `Passed 78 out of 78 tests.`，PI 输出为
+502 字符。当前 Clang high Release、pool allocator、21 次样本结果为：
+
+| workload | median execute time | result |
+| --- | ---: | --- |
+| `pi` | `8.3293 ms` | 502 字符 |
+| `arrayloop` | `0.0050 ms` | 10 字符 |
+| `increment` | `1.455 ms` | 14 字符 |
+| `addloop` | `2.6532 ms` | 19 字符 |
+| `calls` | `7.9971 ms` | 16 字符 |
+| `strings` | `7.2056 ms` | 14 字符 |
+
+这是分析基础设施改动，不将单批性能差异归因于生命周期记录；结果说明它没有引入可见的执行回退。下一步
+可以依据 `StateLifetime` 的 `cross_backedge`、静态整数标志和数组/索引集合，选择一个无调用、无内部控制流
+且有稳定写回协议的区域，设计正式状态描述符；仍不允许从相邻 opcode 猜测栈操作数。
+
+#### 阶段 A：静态/动态成本模型与 Instruction 字段审计（2026-09-27）
+
+成本模型已加入 benchmark 的 `--cost-model` 路径，分别统计静态指令总数、静态 opcode 分布和字节数，
+以及一次真实执行中的 opcode 次数、动态输入总数和每个 opcode 的平均输入数。当前 Clang high Release
+的 `Instruction` 大小为 `32` 字节。PI 的静态代码为 `383` 条指令、`12256` 字节；动态热点包括
+`IntBinary`、`Branch`、`IntIncrementForNext`、`IndexLocalInt`、`IntTemporaryCompareBranch`、
+`StoreLocal`、`ConstantLocal`、`ArrayPushLocalIntStack` 和 `IndexLocalIntStore`。arrayloop 的循环体
+稳定重复 `IndexLocalInt`、`IntBinaryStack`、`ArrayPushLocalIntStack` 和 `IntForNext`，说明后续优化
+应优先处理数组索引、栈协议和热 handler 的组合成本，而不是继续做孤立 opcode 微调。
+
+Instruction 字段最大值也已在成本模型中输出。PI 样本为 `operand=99`、`auxiliary=63`、`member_site=41`、
+`variable_site=83`、`destination=2`、`input_offset=38`、`input_count=3`；arrayloop 的最大
+`input_count=64`。因此当前字段范围支持后续按字段语义分别评估窄化，但不能把所有字段统一替换为更小的
+类型；任何窄化都必须以 verifier 上界和全 workload 统计为前提。本轮没有改变热指令布局。
+
+阶段 A 的完整验证：`cifa_tests` 为 `Passed 78 out of 78 tests.`；六个 workload 使用同一 binary、pool
+allocator、21 次样本均通过，PI 中位数 `8.6884 ms`，increment `1.2936 ms`，addloop `2.649 ms`，
+calls `8.0012 ms`，strings `7.1168 ms`，arrayloop `0.0049 ms`。这些数据确认成本模型没有改变语义；
+它是后续选择优化目标的测量基础，不是单独的性能收益声明。
+
+随后对 `Instruction::input_count` 做了一个受 verifier 上界支持的 16 位窄化实验。六个 workload 和完整
+回归均通过，但 `sizeof(Instruction)` 仍为 `32` 字节，性能变化在不同 workload 间不一致，未形成稳定收益。
+该实验已撤回；结论是字段数值范围足够窄并不等于结构布局会变小，后续必须以实际布局和 A/B 数据为准。
+
+同时新增 `clang-high-lto` preset 和 `CIFA_ENABLE_LTO` 开关。随后直接使用 `vswhere` 定位的 VS2026
+MSBuild 构建了 `build/cmake-clang-high-lto/Release` 下的 `cifa_tests.exe` 和 `cifa_benchmark.exe`。
+LTO binary 完整回归为 `Passed 78 out of 78 tests.`，PI 结果为 502 字符；Clang high LTO、pool allocator、
+21 次样本中位数为：PI `8.5241 ms`、increment `1.3991 ms`、addloop `2.7131 ms`、calls `8.3113 ms`、
+strings `7.3091 ms`、arrayloop `0.0051 ms`。与普通 Clang high 的同批基线相比没有稳定收益，部分 workload
+变慢，因此保留 LTO 构建 preset 作为可复现实验配置，但不将 LTO 作为默认性能优化。
 # VM 优化记录
 
 ## 性能优化历史摘要：约 300ms 到当前约 10ms
@@ -2382,3 +2439,1207 @@ numeric binding、上界读取和控制变量写回，而不能仅依据局部�
 撤回后 PI 恢复为 502 字符，完整回归保持 `Passed 78 out of 78 tests`，`addloop` 的
 `IntBinaryForNext` 仍执行 `1,000,000` 次。结论是：动态 `size()` 上界若要继续优化，必须在
 编译期建立真实的数据流、类型绑定和别名/容器修改证明；不能继续用局部指令邻接规则推断。
+
+## 当前通用优化计划（2026-09-25）
+
+本节是后续工作的权威续接点。计划不依赖 `big_add`、`big_sub`、`big_div_int` 等函数名，目标是建立
+可复用于普通整数数组循环的 VM 优化能力。每次只实现一个窄候选，先验证语义，再以未插桩交错 A/B
+决定保留或撤回。
+
+### 当前生产基线
+
+配置为 `clang-high`、Release、pool allocator、`--vm-only`。当前冻结结果为：
+
+| 工作负载 | 样本 | 中位数 |
+| --- | ---: | ---: |
+| PI | 21 | `8.476 ms` |
+| empty | 7 | `0.0016 ms` |
+| increment | 7 | `1.4584 ms` |
+| addloop | 7 | `2.6532 ms` |
+| calls | 7 | `8.1138 ms` |
+
+PI 返回字符串为 502 字符，完整回归为 `Passed 78 out of 78 tests.`。后续结果必须使用同一可执行
+配置和程序内部 `execute_ms` 对照，不能使用进程外计时，也不能用单批或单次结果宣称收益。
+
+当前 PI 主要动态 opcode 为：
+
+| opcode | 次数 |
+| --- | ---: |
+| `IntBinary` | `439,956` |
+| `Branch` | `187,421` |
+| `IntIncrementForNext` | `182,321` |
+| `IndexLocalInt` | `123,409` |
+| `IntTemporaryCompareBranch` | `122,265` |
+| `StoreLocal` | `95,550` |
+| `ArrayPushLocalIntStack` | `90,539` |
+| `IndexLocalIntStore` | `90,059` |
+| `IntDivMod` | `61,111` |
+
+### 区域分析与重排实验撤回（2026-09-26）
+
+第一阶段区域分析已经接入最终热指令流。`Instructions::IntegerLoopRegion` 现在同时记录已绑定整数循环
+和未绑定的 `region_candidate`，并在 `compact()` 后重映射 `body/exit/terminator`。listing 可直接看到
+区域的控制槽、输入数组、索引槽、carried/output 槽、数组写入、调用/分支/未知别名标记，以及结构化拒绝
+原因，例如 `contains_call`、`contains_branch`、`unknown_alias`、`missing_array_write`。PI 当前的候选
+区域均被正确拒绝，没有把包含函数调用、内部条件或不完整数组写入的循环交给区域执行器。
+
+此前实现过一个严格受限的指令重排实验，验证了“先重排、再尝试已有循环融合”的可行性，但实际只交换
+了两条独立 `IntBinary`，没有形成新的融合形状；PI 也没有命中。多轮交错 A/B 方向不稳定，未证明
+收益，因此重排实现、benchmark workload 和相关选项全部撤回。后续不再保留通用重排路径，只有当某个
+明确的区域融合规则同时定义依赖、副作用和复合执行器时，才重新考虑局部指令顺序调整。
+
+随后用当前 `clang-high` Release 二进制检查了实际区域候选。PI listing 中所有候选均为 `eligible=0`：
+主要拒绝原因为 `contains_call`、`contains_branch`、`unknown_alias`，部分候选还缺少完整的数组读、数组
+索引或数组写入证明；虽然 use-def 链已经能确认若干 `index_to_int`、`int_to_store` 关系，但这些关系不足以
+证明整个循环区域可以脱离通用控制流和容器语义。`addloop` 与 `increment` 没有产生区域候选，二者已经由
+现有 `IntIncrementForNextLocal`/`IntBinaryForNext` 路径处理。
+
+因此本轮没有区域执行器的合法命中形状，不能用理论上的区域跳过分派收益替代实际 A/B。区域 IR 继续保留为
+只读分析和拒绝原因输出；当前不新增区域 opcode，也不把 PI 函数名或数组模式硬编码进规则。
+
+随后补充了一个与函数名无关的 `arrayloop` 微基准：固定 `vector<int>` 源数组，循环执行
+`values[i] + i`，将整数结果追加到目标数组。检查发现原区域分析把循环尾部的回边 `Jump` 误计为区域内部
+分支，导致这个本应安全的形状错误地显示为 `eligible=0`。现已将分支拒绝范围限定为 `body .. terminator`
+的真实循环体，循环 terminator 及其回边不再作为内部控制流；PI 中真正的内部分支仍继续拒绝。
+
+#### 单数组区域 receiver 缓存（2026-09-26，保留）
+
+在第一个 `eligible=1` 的通用区域上实现了最小执行优化，不新增 opcode，也不改变数组元素读取、边界、
+未初始化元素、COW 或错误处理语义。对于满足以下条件的区域：单一数组、单一整数索引、无调用、无额外
+内部控制流、无未知别名，并且索引结果进入整数运算，`IntForPrep` 入口只做一次数组 receiver 的类型检查，
+将 `VmArray*` 缓存到对应的 `IntegerLoopState`；循环内的 `IndexLocalInt` 命中相同数组/索引槽时跳过
+重复的局部资源查找，仍执行原有索引转换、负索引、扩容和元素状态检查。区域退出或回退时清空缓存指针。
+
+新增 `arrayloop` workload 用 64 个整数、64 次循环验证该形状，区域 listing 为：
+
+```text
+eligible=1 call=0 branch=0 array_write=1 alias_unknown=0 arrays=0 indices=2
+```
+
+同一 Clang high Release 二进制、pool allocator、21 次样本的 A/B 为：
+
+| workload | 关闭区域 receiver 缓存 | 开启区域 receiver 缓存 | 结论 |
+| --- | ---: | ---: | --- |
+| `arrayloop`（64 次） | `0.0055 ms` | `0.0051 ms` | 约快 7%，绝对差约 `0.0004 ms` |
+
+该微基准很小，因此只把它记为窄形状的初步收益，不外推为 PI 收益。完整回归保持
+`Passed 78 out of 78 tests.`；PI 结果保持 502 字符，21 次中位数 `8.4926 ms`；`calls` 为
+`7.8862 ms`，`strings` 为 `7.1689 ms`，没有观察到不可解释回退。PI 的复杂区域仍未满足
+`eligible=1`，因此本轮保留的是通用 receiver 缓存机制和区域资格修正，不是 PI 专用优化。
+
+#### 目标数组 push receiver 缓存实验（2026-09-26，撤回）
+
+在同一个合法 `arrayloop` 区域上进一步尝试缓存 `ArrayPushLocalIntStack` 的目标数组 receiver，目标是让
+循环体跳过每次 `resource_payload()` 和 `resource<VmArray>()` 查找。入口同时缓存源数组和目标数组，push
+仍保留整数参数检查、数组追加、返回长度以及原有错误路径；完整回归为 `Passed 78 out of 78 tests.`，
+`arrayloop` 结果保持正确，PI 结果仍为 502 字符。
+
+同一 Clang high Release 二进制、pool allocator、21 次样本的 focused A/B 为：关闭区域缓存
+`0.0056 ms`，开启目标 receiver 缓存 `0.0055 ms`。该差异不足以证明稳定收益；PI 开启版本中位数为
+`8.5646 ms`，`addloop` 为 `2.6513 ms`，也没有观察到跨 workload 收益。因此目标数组 receiver 缓存的
+字段、入口初始化和 push 快路均已撤回，只保留已验证的源数组 receiver 缓存。这个实验确认了“减少一次
+目标数组资源查找”在当前极小 workload 和现有状态管理成本下没有可复现的性能价值。
+
+#### 参数化数组区域执行器原型（2026-09-26，撤回）
+
+在源数组 receiver 缓存之后，进一步尝试了一个严格受限的区域执行器：只有当循环体连续表现为
+`IndexLocalInt -> LoadLocal -> IntBinaryStack(Add) -> ArrayPushLocalIntStack -> IntForNext` 时，才由
+`IntForPrep` 直接执行“读取源数组元素、与索引相加、追加到目标数组”的批量路径。该原型需要同时预先
+证明源数组、目标数组、索引、栈操作数和写入结果的完整关系。
+
+实际 `arrayloop --listing` 的循环体显示为：
+
+```text
+69 IntForPrep
+70 IndexLocalInt
+71 LoadLocal
+72 IntBinaryStack
+73 ArrayPushLocalIntStack
+74 IntForNext
+75 Jump
+```
+
+但现有区域元数据只足以描述数组/索引和 use-def 关系，不能可靠表达栈操作数的来源、加法结果的目标、
+目标数组 receiver 以及每个动态错误边界。严格识别器始终输出 `array_push_fast=0`；继续放宽匹配会变成
+根据相邻指令猜测栈协议，无法证明 COW、类型转换、未初始化元素、追加和错误顺序仍然一致。
+
+该原型没有实际命中，也没有可归因的性能数据。`simple_array_push_fast`、目标数组槽字段、识别器、listing
+标记和 `IntForPrep` 批量执行入口均已删除；当前只保留已验证的源数组 receiver 缓存。结论是：现有区域
+IR 可用于资格分析和缓存优化，但不足以安全承载完整的参数化区域执行器。未来若继续推进，必须先设计正式
+的区域描述符，显式编码输入槽、类型化运算、结果目标、数组写入 receiver 和诊断/错误边界，不能从指令
+相邻关系反推这些语义。
+
+### 已保留的方向
+
+- `IntDivMod`：把相同整数操作数的 `/` 与 `%` 合并为一个 handler；商可在严格匹配时直接追加到
+	局部整数数组。PI 中动态命中 `61,111` 次。
+- `IndexLocalInt` / `IndexLocalIntStore`：直接使用已知局部数组槽和整数索引槽，避免通用命名查找和
+	不必要的寄存器中转。
+- `IntForPrep`、`IntForNextLocal`、`IntIncrementForNextLocal`、`IntBinaryForNext`：在严格静态事实下
+	缓存循环计数器和剩余迭代数。
+- `NumericCompareBranch`、`IntCompareBranch`、`IntTemporaryCompareBranch`：避免比较结果物化后再执行
+	独立 `Branch`。
+
+### 已证伪或暂缓的方向
+
+- 不按函数名特判 `big_add`、`big_sub`、`big_mul_int` 或 `big_div_int`。
+- 不机械压缩完整 `Instruction`，不建立覆盖所有 opcode 的第二执行流。既有 40/44 字节执行流、简单
+	字段重排和旁表实验均有性能回退。
+- `IntBinaryLocal` 实验仅命中 2 条静态指令，PI 的 `IntBinary` 仍为 `439,954` 次，未产生收益，已完整撤回。
+- 不再尝试只靠相邻 opcode 猜测 `Size` 动态上界、carry/borrow 循环或数组算术区域。
+- typed array helper 中的初始化、负索引、越界扩容、元素状态、COW 和错误位置检查仍承担语言语义；没有
+	verifier 证明时不得直接删除。
+- 现有 `clang-high-goto` 产物不能解析当前 typed `vector<int>` PI 脚本，属于无效旧基线；在重新配置、
+	构建并通过完整回归前，不采纳其性能数据。
+
+### 六阶段执行路线
+
+#### 1. 固定基线与分层 Profile
+
+状态：完成。
+
+保留 PI、empty、increment、addloop、calls 的同配置基线；每个后续候选都要同时观察 PI 和至少一个
+隔离微基准，避免把特定 workload 的回退隐藏在 PI 波动中。
+
+#### 2. 固定操作数微指令覆盖审计
+
+状态：完成第一轮，暂不扩展 opcode。
+
+继续使用现有 16 字节 `RegisterOperation` 表达已证明的局部、常量和临时整数来源。新增执行形态前必须先
+统计动态覆盖；低覆盖率的局部写回拆分不再实现。长期目标是减少
+`Instruction -> input_offset -> register_inputs -> register slot` 的间接访问，但不能让通用热 case 增加
+逐操作数 mask 或写回分支。
+
+#### 3. Typed array 访问证明
+
+状态：完成初步审计，等待循环区域分析提供证明。
+
+计划引入编译期数组访问描述，至少记录：receiver slot、element type、index source、checked/unchecked
+bounds mode。普通路径继续承担完整语义；只有循环分析证明索引范围、数组类型和无冲突写入后，才能生成
+更短的访问路径。
+
+#### 4. 循环区域 IR
+
+状态：第一阶段完成，区域执行器尚未开始。
+
+现有 `Instructions::IntegerLoop` 只有 `limit/body/exit/control_slot/limit_slot/localize`，不足以描述数组
+访问和 carried state。下一版先建立编译期只读的 `IntegerLoopRegion`，不立即改变执行器。第一版仅接受：
+
+- 单一入口、单一回边、单一退出；
+- 整数 induction variable；
+- 无宿主调用、无动态函数调用、无 `break`/`continue`/`goto`；
+- typed `vector<int>` 数组槽；
+- 可枚举的局部整数 carried state；
+- 明确的数组读、数组 push 或数组写入站点。
+
+区域分析首先输出 listing/profile 统计：候选函数、循环 PC 范围、输入数组、输出数组、carried slots 和
+动态执行次数。当前已经完成静态摘要和拒绝原因输出；没有覆盖数据和别名证明前不生成新 opcode。
+
+#### 5. 参数化整数循环执行器
+
+状态：未开始，依赖阶段 4。
+
+若区域统计证明覆盖足够，新增独立的小型循环执行器，而不是把完整循环逻辑复制进主 dispatcher。首个
+候选应是通用的反向整数数组 div/mod/push 状态转移，使当前 `big_div_int` 自然命中；描述符必须携带数组
+槽、divisor 来源、基数来源、remainder state 和输出策略，不携带函数名。
+
+后续只有在同一 IR 可表达时，才扩展 add/carry、sub/borrow 和 mul/carry。前导零裁剪等独立循环仍保留
+原字节码，除非区域分析能单独证明并覆盖。
+
+#### 6. 回归与交错 A/B
+
+状态：每个候选强制执行。
+
+每项候选的保留条件：
+
+1. 构建成功，相关源码无新增诊断；
+2. PI 结果为 502 字符且前缀正确；
+3. 完整测试打印 `Passed 78 out of 78 tests.`；
+4. listing/profile 证明新路径实际命中；
+5. 使用冻结基线与候选执行至少 5 轮交错 A/B；
+6. PI 有稳定收益，且 empty/increment/addloop/calls 不出现不可解释的回退。
+
+任一候选若未命中、结果错误、扩大热 handler 后回退，或收益落在批次波动内，应立即完整撤回，并在本节
+记录负结果。禁止仅因代码更短、动态指令更少或插桩 profile 更快而保留。
+
+### 下一具体动作
+
+利用已完成的区域摘要和拒绝原因，继续筛选第一个无调用、无内部控制流、数组类型稳定且写入策略明确的
+通用区域。下一步仍只做一个窄形状的区域执行器，并保留原字节码 fallback；暂不扩大指令重排范围，也不
+把 `big_add`、`big_sub`、`big_mul_int` 或 `big_div_int` 的函数名写入优化规则。
+
+## 指令体系整体优化计划（2026-09-25）
+
+PI 只是暴露热点的测试，不应把优化目标绑定到大数运算。当前 `Instruction` 按字段布局通常为 28 字节，
+而 Lua 5.4 的指令是 32 位、4 字节，因此 Cifa 的热字节码静态体积约为 Lua 的 7 倍。这个数字首先说明
+取指带宽、缓存占用和指令数组遍历成本存在结构性差距；它不表示每条 Cifa 指令的执行时间必然是 Lua 的
+7 倍。执行成本还包括 handler 分支、`register_inputs` 二次寻址、类型/错误检查、`CompactValue` 操作和
+数组 COW 语义。
+
+因此整体目标不是把现有 28 字节结构机械压缩，而是把每条热指令支付的固定成本拆开，逐层消除：
+
+```text
+热指令字节数
+	 -> 取指与解码
+	 -> 操作数寻址
+	 -> handler 固定分支
+	 -> 数值/数组语义检查
+	 -> 多条指令之间重复的状态搬运
+```
+
+### 总体原则
+
+- 保留当前 `BuildInstruction` 和验证流程作为编译期表示；只优化 `seal/compact` 之后的执行表示。
+- 不让诊断、源码位置、类型推断和动态错误信息进入热指令。当前诊断表外置的方向是正确的。
+- 不追求一个能够表达所有语义的万能指令格式。根据操作数数量和类型使用少量稳定格式，复杂指令走冷路径。
+- 任何压缩都必须同时测量字节码大小、`execute_ms`、指令数、L1/I-cache 相关指标（条件允许时）和回归结果。
+- 只有跨普通 workload 都成立的机制才进入生产路径；PI 专用循环执行器只能作为区域执行器的一个实例。
+
+### 阶段 A：建立可量化的指令成本模型
+
+状态：已完成测量基础实现；静态/动态 opcode 统计、输入成本和字段范围审计已接入 benchmark。
+
+在不改变执行语义的前提下，增加编译结果和运行结果统计：
+
+- 每个代码对象的静态指令数、当前热指令字节数和各 opcode 字节占比；
+- 每个 opcode 的动态次数、平均 `input_count`、是否命中 typed fast path；
+- `register_inputs` 的访问次数和平均间接层数；
+- 通用 handler、专用 handler、冷错误路径的进入次数；
+- 可选的每 workload 指令数组大小和执行时间输出。
+
+第一项验收不是加速，而是得到 `pi`、`increment`、`addloop`、`calls`、`strings`、条件分支等多类程序的
+共同热点。该验收已完成；PI/arrayloop 的热点已记录在本节前面的阶段 A 实测记录中，后续结构重设计必须
+以这些数据为依据。
+
+### 阶段 B：热指令格式分层，而不是统一压缩
+
+状态：设计阶段。
+
+将当前单一 28 字节 `Instruction` 拆成少量热格式，建议先从两种开始：
+
+1. **短固定格式**：opcode、一个 destination、两个小操作数或一个跳转目标。适用于整数/数值二元运算、
+	比较分支、局部递增、简单 load/store。
+2. **扩展格式**：短格式无法容纳的 32 位槽号、常量索引、函数调用、成员访问和数组操作，使用旁表或
+	独立扩展记录。
+
+目标不是让所有指令都变成 4 字节，而是让最常见的简单指令从 28 字节降到 8 至 16 字节，并让复杂指令
+	不再拖大所有指令。第一版应保留旧 `Instruction` 作为 A/B 对照表示，不直接替换生产执行流。
+
+必须特别防止一种回退：如果压缩后每次执行都要先查 opcode 类别、再访问多个旁表，新增的解码成本可能超过
+	节省的缓存带宽。因此短格式应能直接取得 handler 所需的常用字段。
+
+### 阶段 C：消除固定的二次操作数寻址
+
+状态：已完成第一项正式候选；`IntBinaryStack` 已使用验证后的直接输入槽，通用指令仍保留旧路径。
+
+当前数值指令通常通过：
+
+```text
+Instruction.input_offset/input_count
+	 -> instructions.register_inputs
+	 -> register slot
+```
+
+这对可变参数、调用和复杂表达式有价值，但对常见的单输入、双输入整数操作会产生固定间接访问。计划按
+以下顺序处理：
+
+- 对 `input_count == 0/1/2` 的常见格式，把已验证的 operand slot 直接嵌入短指令；
+- 仅对 `input_count > 2`、动态调用或需要共享输入列表的指令保留 `register_inputs`；
+- 将 operand 来源类别（local、constant、temporary、stack）在编译期编码进格式，而不是每次 handler
+  再根据 flags 解释；
+- 把 `RegisterOperation` 的固定数值路径与短指令格式对齐，避免数值指令先经过一套格式再跳到另一套
+  `numeric_operations` 记录。
+
+该阶段优先覆盖整数加减乘除、比较分支、局部递增和简单赋值，因为它们跨 workload 通用。不会先为
+`big_add` 或 `big_div_int` 增加业务指令。
+
+#### Clang LLVM 优化备注配置（2026-09-26）
+
+后续优化方向从模仿 Lua 的解释器布局转向让 Clang/LLVM 更充分识别 Cifa 执行器的热路径。工程新增
+`clang-high-remarks` preset 和 `CIFA_CLANG_OPT_REMARKS` 开关，仅对 Clang 开启 LLVM 优化记录，以及
+inline、loop-vectorize、loop-unroll 的命中、未命中和分析备注。普通 `clang-high` 不受影响。
+
+该配置用于回答三个比“手写旁路是否更快”更直接的问题：哪些 handler 被 LLVM 内联，哪些因为函数体或
+调用图过大未内联，以及循环/数组路径是否已经被 LLVM 识别为可优化循环。后续每项源码修改先用优化备注
+确认 IR 形态变化，再用 Clang high Release 的交错 A/B 验证执行时间；不再仅凭 Lua 风格的 opcode 数量或
+旁路缓存推断收益。
+
+### 阶段 D：handler 分层与冷路径外置
+
+状态：已完成主要冷路径分层；复杂索引、调用、store、数组方法、返回、数学和错误路径已使用
+`CIFA_NOINLINE` helper，正常执行路径保留专用 handler 和 fallback。当前剩余的是继续按 profile
+细分 handler，而不是重新设计统一分派器。
+
+当前 computed-goto 已避免主循环的 switch 分派，但很多 handler 仍同时承担快路径和完整动态语义。计划把
+每类操作拆成：
+
+- **验证过的热 handler**：类型、槽范围、操作数来源在编译期已证明，只执行计算和必要写回；
+- **可恢复的普通 handler**：仍执行初始化、类型和边界检查，支持动态程序；
+- **冷错误 helper**：错误格式化、源码定位、COW 分支和异常收尾，通过 `CIFA_NOINLINE` 保持不污染热代码。
+
+这不是删除语言语义。比如 typed array 的负索引、越界扩容、未初始化和 COW 仍必须存在；只有 verifier
+给出稳定证明时，热 handler 才能跳过对应检查，并在证明失效时回退到普通路径。
+
+### 阶段 E：状态寄存器化与值搬运消除
+
+状态：已完成可安全保留的第一批状态局部化；`IntegerLoopState` 缓存循环状态，数组 receiver
+和 carried local 有受限快路径，生命周期元数据持久化。通用区域执行器仍未进入生产路径。
+
+参考 Clang 的做法，识别跨连续指令保持不变的状态，并在一个小范围内保留为 C++ 局部变量：
+
+- 整数 induction variable、循环上界和步长；
+- carry、borrow、remainder 等整数 carried state；
+- typed array 的 data pointer、size 和当前索引；
+- 同一基本块内连续使用的数值结果。
+
+此阶段的通用载体是前文的 `IntegerLoopRegion` 和后续区域执行器，而不是按函数名识别。区域执行器必须
+能在普通整数数组、字符串扫描、简单数值循环等不同程序间复用；PI 的 `big_div_int` 只是第一个覆盖样本。
+
+### 阶段 F：基本块和区域级 superinstruction
+
+状态：已完成候选审计，当前没有满足安全边界且跨 workload 可复用的候选，因此不进入生产路径。
+
+当单指令格式和 operand 寻址稳定后，再根据 profile 合并高频、无分支、无外部调用的短基本块。候选应
+来自稳定的字节码形状，例如：
+
+- 整数计算后立即局部写回；
+- 比较后立即跳转；
+- typed array 读取、整数计算、typed array 写回；
+- 循环递增、边界比较和回边。
+
+superinstruction 必须是参数化的基本块描述，不能保存函数名；不能复制大量 handler 代码；不能为了减少
+动态指令数而扩大 I-cache 压力。每个候选都要和未合并版本交错 A/B。
+
+### 计划顺序与停止条件
+
+实际执行顺序固定为：
+
+```text
+A 成本模型
+  -> B 热格式 A/B 原型
+  -> C 直接 operand slot
+  -> D handler 冷热分层
+  -> E 区域状态寄存器化
+  -> F superinstruction
+```
+
+每一阶段都必须满足：PI 结果保持 502 字符，完整测试打印 `Passed 78 out of 78 tests.`，并在至少五轮
+交错 A/B 中验证 `increment`、`addloop`、`calls`、`strings` 和至少一个分支 workload 没有不可解释的
+回退。若某一层的压缩导致 handler 解码变复杂，或只减少静态字节数但执行时间没有稳定改善，应保留测量
+结果并撤回实现，不继续叠加下一层。
+
+#### 阶段 C 第一项实测记录（2026-09-27）
+
+`IntBinaryStack` 的整数类型已经在编译期确认；其两个寄存器槽现在直接存入
+`RegisterOperation::direct_left/direct_right`，运行期优先读取直接槽，保留无效描述符的
+`register_inputs` fallback。该改动不改变 `Instruction` 大小，也不改变通用 opcode 的输入协议。
+
+完整回归为 `Passed 78 out of 78 tests.`；Clang high Release、pool allocator、21 次样本结果为：
+
+| workload | direct operand median |
+| --- | ---: |
+| `pi` | `8.3975 ms` |
+| `increment` | `1.2903 ms` |
+| `addloop` | `2.6403 ms` |
+| `calls` | `7.5076 ms` |
+| `strings` | `6.9928 ms` |
+| `arrayloop` | `0.0049 ms` |
+
+与成本模型基线相比，`calls` 和 `strings` 方向明显改善，其余 workload 基本持平；目前将该候选
+保留为阶段 C 的正式结果，但不把单批差异扩大解释为统一百分比收益。
+
+#### 阶段 C 第二项实测记录：IntPreferredBinaryStack 直接 operand（2026-09-27）
+
+PI 中 `IntPreferredBinaryStack` 动态执行 `61369` 次，远高于 `IntBinaryStack` 的 `491` 次。第二项实验
+复用 `RegisterOperation` 描述，为 `IntPreferredBinaryStack` 保存两个直接输入槽；当描述不存在时仍回退
+到原 `register_inputs/input_pair` 协议。完整回归为 `Passed 78 out of 78 tests.`，PI 结果保持 502
+字符。
+
+Clang high Release、pool allocator、21 次样本结果为：PI `8.4053 ms`、increment `1.3012 ms`、
+addloop `2.6456 ms`、calls `7.5780 ms`、strings `6.9927 ms`、arrayloop `0.0050 ms`。相对正式
+基线 PI `8.4766 ms`，PI 约快 `0.8%`；`calls` 也保持正向，其他 workload 基本持平。收益较小，
+但与 Lua 式直接寄存器操作数方向一致，且没有增加 `Instruction` 大小，因此保留为弱收益优化，不宣称
+为大幅通用加速。
+
+#### 阶段 D-F 收束结论（2026-09-27）
+
+阶段 D 的冷 helper 分层已在现有执行器中完成，新增候选必须有独立 profile 证据，否则只会扩大
+解释器代码体积。阶段 E 的循环状态寄存器化已通过 `IntegerLoopState`、数组 receiver 和 carried
+local 的有限快路径实现；区域分析明确拒绝包含调用、内部控制流、未知 alias 或不完整数组写回的循环。
+阶段 F 需要在这些边界之外生成参数化基本块，但当前 workload 没有安全且稳定的命中形状；强行合并
+会重新引入旧的 remap、寄存器高度和错误顺序风险，因此本轮不实现 superinstruction。
+
+### 下一步
+
+阶段 A 已完成，阶段 C 的双输入整数直接 operand 候选已保留；阶段 B 的统一短指令格式仍不进入生产路径，
+因为 `Instruction` 的简单窄化实验没有减少 32B 布局，且此前旁表/重排实验有回退。后续若继续，只能从
+成本模型命中的单一 opcode 族做局部 A/B，不能扩大为全量格式重写。
+
+## 状态局部化优先的修订计划（2026-09-25）
+
+上一节的指令格式路线仍然保留为长期方向，但结合 PI 和当前 VM 实现重新排序：**第一优先级不是压缩
+`Instruction`，而是把可证明的跨指令状态提升为解释器 C++ 局部状态**。原因是 Cifa 当前已经有这条路的
+有效证据：`IntegerLoopState`、`IntForNextLocal`、`IntIncrementForNextLocal` 和 `IntBinaryForNext`
+已经把循环计数器或部分整数计算从通用局部槽访问中移出。下一步应扩大“局部化的状态集合”，而不是继续
+增加零散 opcode。
+
+### 从 PI 得到的通用观察
+
+PI 的热点不是某个函数名，而是几种可以出现在大量程序中的状态模式：
+
+- `IntIncrementForNext`：循环 induction variable 在每次迭代更新并参与回边判断；
+- `IndexLocalInt`、`IndexLocalIntStore`：数组槽和整数索引在循环内反复解码、检查和访问；
+- `ArrayPushLocalIntStack`：输出数组的 receiver、长度和元素类型在连续 push 中重复确认；
+- `IntDivMod`：一次迭代内的 quotient/remainder 是连续计算的 carried state；
+- `IntBinary`、`StoreLocal`：carry、borrow、remainder、临时 sum/diff 等值在 VM 槽和数值寄存器之间搬运；
+- `Branch`、`IntTemporaryCompareBranch`：循环条件和边界值在物化、读取、比较之间重复流转。
+
+这些模式对应的是“状态生命周期”问题：值在一个基本块或循环区域内持续有效，却被当作每条指令都需要
+重新从通用 VM 状态解释的值。它们不依赖 PI 的函数名，也不要求所有指令都变短。
+
+### 修订后的核心假设
+
+如果编译期能够证明某个值在一个区域内具有稳定类型、稳定来源和明确生命周期，那么将它放入区域执行器的
+C++ 局部变量中，收益会同时来自：
+
+1. 少做 `CompactValue` 类型检查和 payload 提取；
+2. 少做 `register_inputs` 二次寻址；
+3. 少做局部槽和临时寄存器之间的复制；
+4. 让 Clang 对 induction variable、数组索引、carry 和 remainder 做真正的寄存器分配；
+5. 将数组边界和元素类型检查从每次迭代移动到区域入口，必要时保留失败回退。
+
+这条假设需要用跨 workload 的区域统计和 A/B 验证，不能只看 PI 的总耗时。
+
+### 新的执行顺序
+
+#### 1. 建立状态生命周期分析
+
+状态：下一步，优先级最高。
+
+先不改变 opcode。对现有已识别的整数循环和基本块输出以下元数据：
+
+- 每个 local、temporary、array receiver 和 index 的定义点、最后使用点；
+- 是否跨回边存活；
+- 静态类型和是否可能被动态写入；
+- 是否会被函数调用、宿主调用、异常控制流或别名写入破坏；
+- 是否可以在区域入口一次性获取，区域退出时一次性写回。
+
+第一版只做 listing/profile，不生成新的执行路径。目标是回答“哪些值确实值得局部化”，而不是凭 opcode
+数量猜测。
+
+#### 2. 扩展现有整数循环状态
+
+状态：基于已有 `IntegerLoopState` 增量扩展。
+
+先把循环状态分成三类：
+
+- **控制状态**：induction variable、limit、step、body/exit PC；
+- **只读环境状态**：输入数组 receiver、长度、元素类型、常量 divisor/base；
+- **carried state**：carry、borrow、remainder、当前结果值和输出长度。
+
+第一版只允许单入口、单回边、单退出的整数循环；任何调用、动态容器替换、可能改变数组身份的写入都回退
+到原字节码。入口缓存的状态必须带有失效条件，不能假定一个 `VmArray` 在整个函数调用期间永远不变。
+
+#### 3. 先做通用基础块状态机，不先做业务 opcode
+
+状态：依赖阶段 1 和 2。
+
+建立参数化的 `IntegerLoopRegion`/状态描述符，描述：
+
+- induction variable 的方向、步长和边界关系；
+- 每个数组读写站点对应的 receiver/index/value 状态；
+- carried integer 的来源、更新表达式和写回位置；
+- 区域内允许的分支和退出条件；
+- 入口检查、回退 PC 和退出写回动作。
+
+描述符不能包含 `big_add`、`big_sub` 或 `big_div_int` 名称。它应能表达至少“数组元素读取 + 整数表达式 +
+结果 push/store + 回边”这一类通用循环。
+
+#### 4. 第一个执行器候选：整数数组状态循环
+
+状态：未开始，必须在区域覆盖数据充分后实施。
+
+候选优先顺序不是按 PI 函数名，而是按状态模式的通用程度：
+
+1. 单数组整数读取、整数计算、单数组写回；
+2. 单数组整数读取、整数计算、push 到新数组；
+3. 带一个 carried integer 的循环，例如 carry 或 remainder；
+4. 两数组读取和一个 carried integer，例如 add/carry 或 sub/borrow；
+5. 反向遍历和 quotient/remainder 双结果，例如当前 `IntDivMod` 形态。
+
+这样可以先用 `increment`、数组微基准和 PI 共同验证执行器，而不是第一步就把复杂的大数除法全部硬编码
+进去。
+
+#### 5. 语义检查移动到入口，保留失败回退
+
+状态：与执行器同步实现。
+
+区域入口可集中验证：
+
+- receiver 是否仍是预期的 typed array；
+- 数组元素类型是否匹配；
+- COW 是否允许当前写入；
+- 起始索引、终止索引和遍历方向是否安全；
+- carried state 是否为已初始化整数。
+
+通过后循环体使用局部指针/引用、局部 size 和局部整数。若入口证明失效，跳转到原始字节码路径；不能把
+错误或动态类型变化静默当成未定义行为。
+
+#### 6. 最后再评估指令格式和 superinstruction
+
+状态：延后。
+
+只有当状态局部化已经减少了每轮 handler 的实质工作，再测量短指令格式是否仍有独立收益。如果区域执行器
+已经覆盖主要热路径，继续压缩 `Instruction` 的收益可能主要体现在冷循环、短函数和 I-cache；这时再按实际
+数据决定是否实现短格式。格式压缩不再作为整个项目的先决条件。
+
+### PI 在新计划中的位置
+
+PI 用作覆盖复杂状态模式的回归样本，而不是设计驱动：
+
+- `big_div_int` 覆盖反向遍历、一个 remainder、div/mod 双结果和输出 push；
+- `big_mul_int` 覆盖正向遍历、乘法和 carry；
+- `big_add` 覆盖两个可能缺失的输入数组和 carry；
+- `big_sub` 覆盖 borrow、条件读取和结果裁剪；
+- `calc_arctan` 覆盖循环调用、数组值传递和多个区域之间的状态边界。
+
+新执行器必须先在更小的通用 workload 上成立，再用这些 PI 区域验证复杂情况。PI 通过但普通 workload
+无收益时，不保留该设计；普通 workload 受益而 PI 不命中时，也不能因此判定设计无效。
+
+### 新的验收指标
+
+除了已有的结果和性能要求，每个状态局部化候选还必须报告：
+
+- 区域入口检查次数和区域体执行次数；
+- 每次迭代省略的 VM 指令/handler 数量；
+- 被局部化的状态数量及其入口获取、退出写回次数；
+- fallback 次数和原因；
+- 区域执行器自身的代码大小，避免把主循环变成新的大 handler。
+
+保留条件仍然是：PI 输出 502 字符，完整测试打印 `Passed 78 out of 78 tests.`，至少五轮交错 A/B，且
+`increment`、`addloop`、`calls`、`strings` 和分支 workload 没有不可解释的回退。除此之外，必须证明收益
+来自状态访问减少，而不是一次偶然的缓存或测量波动。
+
+### 当前唯一下一步
+
+实现只读的状态生命周期/循环区域 listing：先复用现有 `integer_loops` 和 `IntBinaryForNext` 识别结果，
+输出 induction variable、数组 receiver、index、carried integer、入口检查和退出写回候选。该步骤不新增
+opcode、不改变执行语义；结果稳定后，首先尝试“单数组整数读取 + 计算 + 写回”的通用区域，再扩展到 PI 的
+carry/remainder 模式。
+
+### 第一轮执行结果（2026-09-25）
+
+已完成第一轮只读探针：扩展 `dump_instruction_listing()`，输出已有 `IntegerLoop` 区域以及尚未绑定
+`IntegerLoopState` 的整数回边候选。探针没有修改 opcode、执行路径或语言语义。
+
+本轮发现：PI listing 中存在 `IntIncrementForNext`，但其中一批循环的 `member_site == 0`，只有回边目标保存在
+`auxiliary`；因此它们没有可供 listing 直接读取的 `integer_loops` 元数据，输出为 `metadata=none`。这不是
+执行失败，当前 handler 仍然能够执行回边；但它说明后续状态局部化不能只依赖现有 `integer_loops`，需要在
+循环识别阶段为这类回边建立统一的区域描述。
+
+PI 首轮探针识别到 7 个候选区域。已观察到的候选状态包括：
+
+- 数组槽：`0`、`1`、`2`、`5`；
+- 索引槽：`5`、`6`、`7`；
+- carried 槽：包括 `0`、`1`、`2`、`3`、`4`、`5`、`6`、`7`、`8`、`9`、`10`。
+
+这些槽号来自字节码局部槽，不代表所有槽都已经证明为 carried state；下一轮必须加入定义点、最后使用点、
+跨回边存活、类型和写入来源分析，避免把循环体内一次性临时值误判为可局部化状态。
+
+验证结果：
+
+- `cifa_benchmark.exe 1 pi --vm-only`：结果为 502 字符，样本执行约 `8.383 ms`；
+- `cifa_tests.exe`：`Passed 78 out of 78 tests.`；
+- `cifa_benchmark` 构建成功，仅保留已有编译警告。
+
+下一步调整为：在 `optimize_control_flow()` 的循环识别结果上补齐统一的回边区域元数据，至少记录 body、
+back-edge、exit、control slot、array/index/carried 候选及其来源；仍然只输出 listing，不进入执行器。只有
+这些元数据在 `increment`、`addloop`、数组微基准和 PI 上稳定后，才实现第一种“单数组整数读取 + 计算 +
+写回”的 C++ 局部状态执行路径。
+
+### 第二轮执行结果：补齐候选退出边界（2026-09-25）
+
+继续完成只读分析：对尚未绑定 `IntegerLoopState` 的整数回边，从循环体内指向循环体外的
+`Jump`/`Branch`/`AndBranch`/`OrBranch` 目标推断 `exit`，listing 不再显示 `exit=?`。本轮仍未新增
+opcode，也未改变解释器执行路径。
+
+PI 中 7 个候选区域现在可以稳定表示为：
+
+- `format_pi/2`：`body=14..45`，`exit=47`；
+- `calc_arctan/3`：`body=11..44`，`exit=46`；
+- `big_mul_int/2`：`body=7..18`，`exit=20`；
+- `big_div_int/2`：`body=19..26`，`exit=28`；
+- `big_div_int/2`：`body=43..47`，`exit=49`；
+- `big_sub/2`：`body=8..26`，`exit=28`；
+- `big_add/2`：`body=15..32`，`exit=34`。
+
+其中 `big_div_int/2` 的两个区域分别对应主除法循环和结果反向复制循环；这说明只按函数名识别是不必要的，
+同一函数内部也可能有多个不同状态模式。
+
+验证结果：
+
+- `cifa_benchmark.exe 1 pi --vm-only`：结果为 502 字符，样本执行约 `8.537 ms`；
+- `cifa_tests.exe`：`Passed 78 out of 78 tests.`；
+- `cifa_benchmark` 构建成功，仅保留已有编译警告。
+
+下一步进入状态生命周期分析：对每个候选区域计算 local/temporary/array/index 的定义点、区域内最后使用
+点、是否跨回边写入，以及是否被调用或内部控制流破坏。只有明确跨回边存活且类型稳定的值，才进入后续 C++
+局部状态执行器候选。
+
+### 第三轮执行结果：统一生命周期输出（2026-09-25）
+
+已将同一套生命周期输出接入两类区域：
+
+- 已绑定 `IntegerLoopState` 的区域，使用 `region[...]` 输出；
+- 尚未绑定循环元数据的旧式整数回边，使用 `region_candidate:` 输出。
+
+这一区分很重要。`increment` 和 `addloop` 已经显示为：
+
+- `increment`：`localize=1`，说明循环控制状态已经在解释器侧局部化；
+- `addloop`：`localize=0`，说明循环控制变量仍需保留在局部槽，但循环区域元数据已经存在。
+
+PI 的复杂循环则继续显示数组、索引、输出和状态生命周期。例如当前能观察到：
+
+- `calc_arctan/3` 有跨回边 carried 候选；
+- `big_div_int/2` 的反向复制区域有数组槽、索引槽和跨回边状态；
+- `big_add/2`、`big_sub/2` 同时有多数组访问和 carry/borrow 相关状态；
+- `big_mul_int/2` 有数组读取、索引和乘法 carry 相关状态。
+
+验证结果：
+
+- `increment` 与 `addloop` 都能输出现有 `IntegerLoopState` 区域；
+- PI 输出保持 502 字符，样本执行约 `8.510 ms`；
+- `cifa_tests.exe`：`Passed 78 out of 78 tests.`；
+- 构建和源码诊断检查通过。
+
+这轮没有产生性能结论，也没有改动执行语义。下一步停止继续扩展 listing 字段，转入最小执行验证：先
+审计 `localize=1` 区域的入口获取、循环体访问和退出写回是否完整，再选择一个跨 workload 可表达的“单数组
+整数读取 + 计算 + 写回”区域，建立参数化状态描述和回退路径。PI 的 `big_div_int` 只作为后续复杂模式
+验证，不直接作为第一条专用执行器。
+
+### 第四轮执行结果：区分控制状态与 carried state（2026-09-25）
+
+尝试验证现有 `IntIncrementForNextLocal` 是否还能删除每轮局部槽写回。结果证明不能直接删除：该指令的
+`operand` 不是 induction variable，而是循环体内被递增的 carried value。`increment` workload 中它对应
+`value++`；删除后循环结果从预期的 `1000000` 变为错误值。
+
+该实验已恢复原写回，PI 和基础循环均恢复正确。结论是：
+
+- `IntegerLoopState.value` 只代表控制循环变量；
+- `IntIncrementForNextLocal.operand` 代表循环体计算结果槽；
+- 一个指令可以同时更新控制状态和 carried state，不能仅凭 `localize=1` 删除所有局部槽写入；
+- 后续区域执行器必须为每个状态标注角色：`control`、`readonly environment` 或 `carried output`，并分别
+	生成入口获取、每轮更新和退出写回动作。
+
+验证结果：
+
+- `increment`：结果正确，约 `1.411 ms`；
+- `addloop`：结果正确，约 `2.669 ms`；
+- PI：502 字符，约 `8.363 ms`；
+- 完整测试：`Passed 78 out of 78 tests.`。
+
+下一步不再尝试通过删除单条写回来验证局部化收益，而是建立带角色的区域状态描述，先在 listing 中确认每个
+状态的定义、读取、更新和退出写回，再实现真正的区域执行路径。
+
+### 第五轮执行结果：carried 整数局部化（2026-09-25）
+
+完成第一个通用状态局部化执行路径：扩展 `InterpState::IntegerLoopState`，为
+`IntIncrementForNextLocal` 缓存循环体的 carried 整数值。首次进入循环时从目标 local 读取一次，循环体内
+只更新 C++ 局部的 `carried_value`，退出时通过 `flush_integer_loop()` 一次写回。
+
+这里没有删除必要的 carried 写回，而是明确区分两类状态：
+
+- `value`：循环控制变量，由已有 `IntegerLoopState` 管理；
+- `carried_value`：循环体目标值，例如 `value++` 中的 `value`，由新增字段管理。
+
+这条路径不依赖函数名，适用于任何被严格识别为“局部化整数循环 + 单一整数递增 carried 值”的区域。
+如果循环没有实际进入，`carried_active` 不会触发写回；如果区域退出，则统一恢复 local 槽语义。
+
+验证结果（同一 Release 二进制、同一进程外条件、交错 A/B）：
+
+- `increment`：12 轮中位数从基线 `1.54 ms` 降至候选 `1.27 ms`，中位数收益 `17.6%`；
+- `addloop`：6 轮中位数基线 `2.61 ms`、候选 `2.60 ms`，没有可见收益；
+- PI：6 轮中位数基线 `8.41 ms`、候选 `8.43 ms`，在测量噪声范围内，输出保持 502 字符；
+- 完整测试：`Passed 78 out of 78 tests.`；
+- 构建通过，已有源码警告未因本次改动新增错误。
+
+本轮也完成了一次负实验：直接删除 `IntIncrementForNextLocal` 的 local 写回会破坏 `increment`，因为该
+指令的 `operand` 是 carried 目标槽而不是控制槽。当前实现保留必要的退出写回，并只消除了每轮重复的
+`CompactValue`/payload 访问。严格 A/B 说明这是一个通用但形状受限的 VM 优化：凡是被 verifier 识别为
+“局部化整数循环 + 单一整数 carried 值自增”的区域都可以受益，但不能据此外推到数组加法、除法或 PI
+的复杂循环。
+
+后续研究优先转向 PI，而不是继续扩展简单 `increment` workload。PI 的动态 opcode profile（一次完整
+运行）为：`IntBinary 439956`、`Branch 187421`、`IntIncrementForNext 182321`、`IndexLocalInt
+123409`、`IntTemporaryCompareBranch 122265`、`StoreLocal 95550`、`ArrayPushLocalIntStack 90539`、
+`IndexLocalIntStore 90059`、`IntDivMod 61111`。静态上最主要的函数是 `big_div_int/2`、`calc_arctan/3`、
+`big_sub/2`、`big_add/2` 和 `big_mul_int/2`。
+
+因此下一条 PI 候选暂定为跨函数可表达的“数组整数读取 + 整数计算 + 数组写入/追加”区域，而不是函数名
+特判。必须先让数组 receiver、索引、元素类型和 COW/别名条件在区域入口集中验证，再将安全的 data、index
+和 carried 状态提升为局部状态；任何动态容器替换、别名写入或错误路径不确定的区域继续回退原始字节码。在
+实现前先拆分 `IntBinary` 的操作/函数分布，并用同一二进制 A/B 验证；只有 PI 中位数稳定改善且 502 字符
+结果、完整回归均保持正确，才接受该候选。
+
+PI 第一条 `IntBinary` local fast path 负实验（2026-09-25）：尝试对两个静态 local 整数操作数直接读取
+payload，绕过通用来源判断。语义和 PI 502 字符均正确，但同一 Release 二进制 12 轮交错 A/B 的中位数为
+基线 `8.57 ms`、候选 `8.64 ms`，收益为负约 `0.5%`，逐轮差异也不稳定。该路径已撤回；后续不再仅凭
+`IntBinary` 动态计数增加相同形式的局部分支，下一候选必须同时减少数组索引、循环控制或写回的实际工作。
+
+### PI 减少计算方向复核（2026-09-25）
+
+重新检查 PI 关键函数的 listing 后确认：
+
+- `big_div_int/2` 的除法和取模已经融合为 `IntDivMod`；
+- `big_div_int/2` 和 `calc_arctan/3` 的整数循环增量已经使用专用循环 opcode；
+- `calc_arctan/3` 中 `term == 0` 的提前退出已经降为 `IntTemporaryCompareBranch`。
+
+因此下一阶段不再重复优化单个整数 handler，而研究区域级的实际计算削减：减少数组元素搬运、重复扫描，或
+证明某些循环迭代无效并提前结束。曾尝试在 `big_div_int` 中复用输入数组作为商输出，以删除临时数组和
+第二次复制循环；该方案破坏 Cifa 数组的值语义/COW 隔离，因为调用者之间仍可能共享 `term`、`sum_val`
+等数组值，已撤回。后续任何原地化方案都必须先证明 receiver 没有别名且写入不会改变其他脚本值，否则继续
+保留原始安全路径。
+
+### 区域强化第一阶段：持久化循环区域元数据（2026-09-25）
+
+已将原先只在 listing 中临时扫描得到的已绑定整数循环信息，提升为 `Instructions::IntegerLoopRegion` 元数据。
+每个区域现在持久化：
+
+- body、exit、control slot；
+- 数组槽、索引槽、carried 槽和 output 槽；
+- 是否包含调用、内部控制流、数组写入和未知别名风险；
+- `eligible` 资格标志。
+
+该元数据在 `compact()` 后同步重映射，当前只参与 listing 和后续分析，不改变执行器路径，因此不会引入新的
+性能结论。`increment` 已能输出绑定的 `region[...]`；PI 的复杂循环仍主要是未绑定的 `region_candidate:`，
+这说明下一阶段必须把 candidate 区域也纳入持久化分析，并明确其拒绝原因，不能只强化简单的
+`IntegerLoop`。
+
+验证结果：
+
+- Clang high Release 构建通过；
+- PI listing 正常，结果保持 502 字符；
+- 完整回归：`Passed 78 out of 78 tests.`。
+
+### 指令重排方向分析（2026-09-26）
+
+检查 PI 的 `big_add/2`、`big_sub/2`、`big_mul_int/2` 和 `big_div_int/2` 指令序列后，结论是：单纯
+重排指令不能直接减少大整数算法的计算量。局部顺序受到寄存器栈高度、局部槽读写、数组 COW 写入、分支、
+调用和诊断帧的共同约束，数组索引、Store、Push、Branch 和 Release 都必须作为调度屏障。
+
+但重排可以作为**融合的前置步骤**。当前可见的候选链包括：
+
+- `big_mul_int/2`：`LoadLocal`、`IndexLocalInt`、整数乘法、整数加法、`StoreLocal`，随后分别执行余数
+	计算和 carry 更新；
+- `big_add/2`：多个整数局部值相加后，分别执行 `% 10000`、`/ 10000` 和结果追加；
+- `big_div_int/2`：除法与取模已经融合为 `IntDivMod`，不应再做同类的局部重排。
+
+因此后续方向不是实现通用指令调度器，而是在基本块内做依赖约束下的模式重排和融合识别：
+
+1. 以 `Load/Index -> IntBinary -> Store/Push` 为候选窗口；
+2. 只允许纯整数运算在无副作用指令之间重排；
+3. 把重排后的窗口匹配为区域级复合操作，例如“数组元素乘 factor、加 carry、拆 quotient/remainder、
+	 追加低位并更新 carry”；
+4. 保留原始字节码 fallback，任何 COW、别名、错误位置或动态类型条件不满足时不融合。
+
+当前证据支持“重排服务于融合”，不支持“重排本身会带来收益”。下一步应先为 `big_mul_int/2` 做静态
+依赖图和候选窗口计数，再实现只做 listing 的融合匹配器；通过后才进入区域执行器和 A/B 测量。
+
+### 2026-09-26：后续优化实验队列（逐项执行）
+
+结合 Lua 5.4 的专用整数循环/操作数编码方式，以及 Clang 的 SSA、寄存器提升和循环优化思路，后续实验
+统一按“一个候选、一次验证、确认后再进入下一项”的顺序进行。任何候选都必须保留 Cifa 的按值语义、数组
+快照、COW、错误位置和宿主重入语义；不能以单次 benchmark、listing 指令减少或静态字节数减少作为收益证明。
+
+当前基线：Clang high Release、pool allocator、PI `--vm-only` 约 `10.04 ms`，Lua 5.4.5 整数基线约
+`5.69 ms`。每项实验至少执行 Debug 完整回归、PI 输出校验、`increment`、`addloop`、`calls`、
+`strings` 和一个分支 workload；性能候选使用同一二进制交错 A/B，至少五轮后再决定保留或撤回。
+
+#### 实验 1：整数循环区域的只读匹配统计
+
+先不修改执行器。基于已持久化的 `IntegerLoopRegion`，对 `big_mul_int/2`、`big_add/2`、`big_sub/2`、
+`big_div_int/2` 生成基本块级 use-def 统计，记录以下模式的静态站点数和动态覆盖数：
+
+```text
+IndexLocalInt / IndexLocalIntStore
+	-> IntBinary / NumericBinaryLocal
+	-> StoreLocal / ArrayPushLocalIntStack
+```
+
+同时记录数组 receiver、索引、carry、factor、quotient/remainder 的来源、是否跨基本块、是否存在调用/分支、
+是否有未知别名和是否需要 COW。只读统计若证明覆盖率不足，则保留负结果，不实现组合 opcode；若存在稳定
+候选，才进入实验 2。
+
+成功条件：统计能解释区域拒绝原因，并找到跨多个函数或 workload 的稳定窗口；失败条件：候选只在 PI 某个
+函数中出现或需要依赖未证明的别名/类型事实。
+
+#### 实验 2：区域级数组状态缓存原型
+
+仅针对实验 1 命中的静态 `vector<int>`、无调用、无内部控制流的区域，在入口一次验证数组类型、元素类型、
+索引范围和 COW 状态；区域内部使用局部数组状态、整数 carry 和 index，退出时统一写回。任何 vector 扩容
+都必须重新取得数据地址；不能保存会被 `push_back` 失效的裸指针。
+
+先实现一个 fallback 保持原字节码的原型，不扩展动态上界、不改变默认 `int64_t` 表示，也不把普通脚本全局
+变量静默改为局部变量。只有区域入口条件全部满足时才进入区域执行器。
+
+成功条件：PI 中位数稳定改善，且 `increment`、`addloop`、`calls`、`strings` 无不可解释回退；否则撤回，
+保留覆盖率和失败原因。
+
+#### 实验 3：producer 到 push 的端到端融合
+
+若实验 2 未覆盖 push，单独匹配完整的整数 producer 到 `ArrayPushLocalIntStack` 链，优先检查
+`IntDivMod -> push quotient/remainder` 以及 carry 计算后追加低位的形态。融合操作必须静态编码 receiver、
+参数来源、元素类型和是否丢弃长度结果，不能只优化 receiver 名称查找。
+
+#### 实验 4：区域级唯一性与 COW 优化
+
+仅在编译期能证明数组没有别名、没有逃逸、不会被宿主观察且当前写入不影响其他脚本值时，才允许区域入口一次
+detach 或取得唯一 storage。无法证明时继续使用现有 COW 路径；不能依据变量名或局部形状猜测唯一性。
+
+#### 实验 5：Clang PGO/LTO 对照
+
+在执行器候选冻结后再做编译器实验，比较普通 Clang Release、high inline 和 PGO/LTO。训练集至少覆盖 PI、
+`increment`、`addloop`、`calls`、`strings` 和分支 workload；同时观察分支 miss、I-cache miss、代码体积
+以及非 PI workload，避免把单一 PI 的收益误判为通用收益。
+
+#### 实验 6：最终指令字段范围与局部缩窄
+
+最后才扫描最终 `Instruction` 各字段最大值，用 verifier 建立 code PC、local slot、register input、site
+和 constant index 的硬上限。只有证明某个字段的范围后，才允许局部使用 `uint16_t`；所有 encode/verify 边界
+都必须显式检查，禁止隐式截断。不得重新引入双执行流、旁表取指或逐条解码。
+
+暂不重试：单独给 `NumericCompareBranch` 或 `IntBinary` 增加运行时分类标志、机械缩小完整 `Instruction`、
+通用 superinstruction、通用指令重排、删除 Range snapshot、删除 `ReleaseLocal`、恢复动态 Scope guard、
+完整迁移到 `int32_t`，以及只凭静态 listing 判断收益。
+
+#### 实验 1 结果：相邻 producer-consumer 窗口覆盖不足（2026-09-26）
+
+为避免仅凭 opcode 动态次数直接实现区域执行器，`IntegerLoopRegion` 新增了只读 listing 统计：
+`index_to_int`、`int_to_store` 和 `int_to_push`。它们只统计同一循环区域内严格相邻的
+`IndexLocalInt/IndexLocalIntStore -> IntBinary/NumericBinaryLocal/IntDivMod`，以及后续直接写局部或
+`ArrayPushLocalInt*` 的形态；没有改变 opcode、控制流或执行器。
+
+Clang high Release 的 PI listing 表明：`big_mul_int`、`big_sub`、`big_div_int` 三类窗口均为 `0`；
+`big_add` 只有一个 `int_to_push=1`，但其区域仍因内部条件分支被标记 `contains_branch`。所有候选区域也
+没有满足“无调用、无内部控制流、可直接入口验证”的第一版区域执行器前提。因此相邻模式不能作为区域融合
+实现依据，当前不进入实验 2 的执行器原型。
+
+这不是“数组区域没有优化空间”的结论，而是证明了当前值在寄存器栈、局部槽和分支之间流动，简单相邻 opcode
+统计无法准确恢复依赖关系。下一项应升级为**只读基本块 use-def 匹配器**：解析 `register_inputs`、
+`RegisterOperation` 的 local/constant/temporary flags 和局部写回目标，允许跨越无副作用的常量装载，
+但不得跨越 Branch、Jump、Call、数组写入或诊断可见指令。只有该匹配器显示跨函数的稳定 producer-consumer
+链，才重新评估区域状态缓存。
+
+验证：Clang high `cifa_tests` 与 `cifa_benchmark` 构建成功；PI listing 返回 502 字符，单次
+`--vm-only` 运行 `8.4427 ms`，该单次时间不作为性能结论。当前 CMake Tools 未枚举到可运行 CTest 项，
+因此本轮无法通过该集成入口执行完整 CTest；本次新增统计没有引入新的编辑器诊断。
+
+#### 当前 PI 时间口径（2026-09-26）
+
+前文首页的 `10.0276/10.04 ms` 是 2026-09-24 阶段冻结的 Clang high、pool allocator、
+`--vm-only` 基线，不是当前工作树的最新测量。2026-09-26 使用当前
+`build/cmake-clang-high/Release/cifa_benchmark.exe` 运行 21 次 PI，结果为：
+
+```text
+median = 8.4746 ms
+min    = 8.3603 ms
+max    = 9.6183 ms
+result = 502 characters
+```
+
+因此此前记录中的约 `8.4--8.6 ms` 属于真实可复现的当前性能档位；`8.41 ms` 对 `8.43 ms` 的记录是
+区域状态局部化候选与基线的交错 A/B，结论是该项对 PI 没有稳定收益，但没有把 PI 退回到 `10 ms`。
+本次只读区域窗口统计没有修改执行器，当前 `8.4746 ms` 主要应视为既有代码状态的复测，不归因于该统计。
+
+后续性能比较应将当前 21 次中位数 `8.4746 ms` 作为工作树参考，同时保留 `10.0276 ms` 作为此前阶段
+的历史冻结基线；两者不能直接作为同一轮 A/B 的两侧。
+
+#### 实验 1 的结论口径（2026-09-26）
+
+实验 1 虽然没有修改执行器、没有降低当前 PI 的端到端时间，但仍是有效的优化实验。它证明了严格相邻
+producer-consumer 窗口在当前 PI 中覆盖不足：`big_mul_int`、`big_sub`、`big_div_int` 没有可用窗口，
+`big_add` 只有一个 `int_to_push=1` 且区域包含分支。因此该实验有效排除了一个会增加组合 opcode、入口
+守护和热路径代码、但当前 workload 没有足够覆盖率的方案。后续文档中的“有效实验”包括这种能可靠排除
+错误优化方向的结果，不要求每次都带来 benchmark 降低。
+
+#### PGO 初次实测结果（2026-09-26）
+
+Clang PGO 采集版使用 PI、`increment`、`addloop`、`calls`、`strings` 和 `intcompare` 六个 workload
+训练，使用版读取合并后的 `build/pgo/cifa.profdata`。新增的 `clang-pgo-generate` 和
+`clang-pgo-use` preset 可以分别完成采集构建和 profile-use 构建；PGO 使用版完整回归最终为
+`Passed 78 out of 78 tests.`。编译器对测试目标报告有 1 个函数 profile 数据过期并忽略，未影响构建或测试结果。
+
+同一环境重新测量的 Clang high 基线与 PGO 使用版结果如下，均为 21 次 `--vm-only` 中位数：
+
+| workload | Clang high | PGO use | 变化 |
+| --- | ---: | ---: | ---: |
+| `pi` | `8.6069 ms` | `7.4993 ms` | 约快 `12.9%` |
+| `calls` | `7.5401 ms` | `6.5154 ms` | 约快 `13.6%` |
+| `strings` | `7.0416 ms` | `6.2352 ms` | 约快 `11.5%` |
+| `addloop` | `2.6429 ms` | `2.7891 ms` | 约慢 `5.5%` |
+
+这次 PGO 实验证明编译器反馈能把 PI 从当前约 `8.5 ms` 推到约 `7.5 ms`，并同时改善调用和字符串
+workload；但 `addloop` 出现明确回退，因此不能把该 profile 或 PGO 选项直接设为所有 workload 的默认
+配置。当前结论是：**PGO 是有效候选，收益约为 11--14%，但需要扩大训练集、做严格轮转 A/B，并继续
+检查短整数循环回退后，才能决定是否保留为专用构建配置。**
+
+本轮没有修改 VM 执行语义；`CIFA_CLANG_PGO_MODE` 仅控制 Clang 的 generate/use 编译选项，profile
+文件由训练命令产生并合并，未把 workload 选择放进运行时环境变量。
+
+#### 从 PGO 反推 VM 优化方向（2026-09-26）
+
+PGO 不应只被看作某一组 workload 的专用加速工具。它提供了一个重要的反向证据：编译器实际认为哪些
+VM 小操作值得放入热路径，以及哪些分支/辅助函数值得内联。当前合并 profile 的最高内部块计数集中在：
+
+| PGO 热点 | 最大内部块计数 | 对 VM 设计的含义 |
+| --- | ---: | --- |
+| `CompactValue::get_if<int64_t>` | `33,081,356` | payload/tag 检查是核心固定成本，不能只优化算术 handler |
+| `execute_instructions` | `32,872,188` | dispatcher 和 handler 周边协议仍是最大热区域 |
+| `CompactValue::get_if<int64_t> const` | `22,606,050` | 读路径和写路径都反复解码数值表示 |
+| `RegisterSlots::payload` | `18,123,884` | 局部槽/寄存器二次寻址成本很高 |
+| `InterpState::cached_integer_loop` | `12,000,012` | 循环状态缓存已经命中，但每轮仍有状态访问成本 |
+| `RegisterSlots::write_number` | `10,040,504` | 数值结果写回槽是独立热点，不应只看输入端 |
+| `InterpState::input_slot` | `3,930,456` | `register_inputs` 间接寻址是可被操作数静态化消除的成本 |
+
+函数调用计数也说明了热点形态：`op_index_local_int` 约 `493,636` 次，`op_index_local_int_store` 约
+`360,236` 次，`op_array_push_local_int` 约 `120,324` 次，`finish_call` 约 `127,508` 次；而
+`op_numeric_binary_local` 和 `op_method_push` 的独立函数计数为零。后两项不能直接解释为“没有执行”，
+更可能表示 PGO 后调用点被内联进 `execute_instructions`，也可能是训练集没有走到对应的 out-of-line 路径，
+需要用最终汇编确认。无论哪种情况，结论都不是继续增加更多通用 helper，而是让热路径具备可内联的稳定形状。
+
+由此得到可以迁移到 VM/字节码的方向：
+
+1. **把 tag/payload 解码从每次操作移到区域入口。** 对 verifier 已证明为静态 `int` 的 local、array
+	element 和循环 carried 值，区域入口完成一次表示检查，区域内部使用 `int64_t` 局部状态，退出时统一写回。
+	这直接针对 `get_if`、`payload`、`write_number` 三类热点，比再增加一个 `IntBinary` 分类分支更有针对性。
+2. **把 `input_slot` 的间接寻址转成静态 operand。** PGO 明确显示输入表查找本身有数百万次。不能全局删除
+	`register_inputs`，但对已证明的双 local、local+constant、local+temporary 形态，可以在热操作中直接编码
+	槽号/常量号；动态、别名、错误路径继续使用通用输入表。
+3. **扩大循环状态局部化，而不是只做循环计数缓存。** `cached_integer_loop` 已经是 1,200 万次级别的
+	热点，说明当前缓存解决了定位问题，但状态读取/写回仍反复发生。下一步应针对数组 receiver、index、carry、
+	quotient/remainder 做 verifier 证明后的区域局部状态，和 PGO 热点完全对应。
+4. **让专用 handler 形状稳定、短而可内联。** `op_index_local_int` 和 `op_index_local_int_store` 有明确热度，
+	而通用 `op_*` 辅助函数容易因错误路径、诊断和动态类型扩大代码。应把冷错误路径拆出，保留一个短的成功路径，
+	让普通 Clang 也能获得 PGO 当前正在发现的内联效果。
+5. **把“高频但低信息量”的成功检查集中化。** `should_stop/has_error`、`empty`、`clear` 等被大量调用，
+	不能简单删除，因为它们承载错误和资源语义；可以研究区域内无错误证明后的批量检查，在区域出口统一检查，错误路径
+	仍保留逐指令 fallback。
+
+不能直接迁移的 PGO 收益包括：dispatcher 机器码布局、分支预测方向、跨函数内联决策、代码冷块排列和寄存器分配。
+这些收益依赖 CPU、编译器版本和训练集，不能据此新增 Cifa opcode。正确的使用方式是：PGO 找热点和热/冷边界，
+然后把稳定事实固化到 verifier、紧凑操作数或区域执行器中，再用无 PGO 构建 A/B 验证该优化是否具有共性。
+
+下一项分析应对比 PGO 与非 PGO 的 `execute_instructions` 汇编，重点确认三件事：
+
+- `input_slot`、`cached_integer_loop`、`CompactValue::get_if` 是否被内联；
+- PGO 是否把错误/诊断分支移出主循环；
+- `op_index_local_int`、`op_index_local_int_store` 的成功路径是否已形成更短的直线代码。
+
+只有确认其中至少一项，才值得把对应的“热路径固化”做成下一项非 PGO VM 实验。
+
+#### PGO 对象级验证结果（2026-09-26）
+
+为验证 PGO 是否只是运行时计数变化，分别从普通 Clang high 和 PGO use 的静态库中提取了
+`CifaBytecode.obj`。普通版对象约 `40.8 MB`，PGO 版约 `30.6 MB`，PGO 使该翻译单元的最终机器码/冷块
+布局明显收缩，和 PI、calls、strings 的整体改善相符；这不是简单的字节码数量变化。
+
+COFF 对象的完整 C++ demangled 签名无法被当前 `llvm-objdump --disassemble-symbols` 稳定匹配，
+因此本轮不把“某个 helper 一定已内联”作为确定事实。profile 中 helper 的独立计数为零，只能说明它可能
+被内联进 `execute_instructions`，也可能训练路径没有进入其 out-of-line 慢路；需要带稳定符号信息的最终
+可执行文件反汇编或源码级 optimization remarks 才能区分。当前可以确定的事实仍是：PGO 把主解释器循环、
+数值 payload 访问、局部槽访问、循环状态和整数数组路径识别为共同热区，并显著改变了代码体积与布局。
+
+因此下一项不复制 PGO 的机器码布局，而做一个可在无 PGO 下验证共性的窄实验：只对 verifier 已证明的
+`local/constant/temporary` 数值操作，把 `input_slot` 间接寻址和重复 `CompactValue` tag 检查移到操作数
+固化或区域入口；错误、别名、动态类型和宿主路径继续走现有慢路。成功标准仍是 Debug 回归、PI 502 字符、
+`increment`/`addloop`/`calls`/`strings` 交错 A/B 均无不可解释回退；否则记录为有效排除实验。
+
+#### PGO 反推的三项源码实验（2026-09-26）
+
+按“每次只改一个因素”的顺序完成了三项实验。由于当前 `CIFA_NOINLINE` 默认为空，Clang high 本身已经
+允许普通 handler 内联，因此第三项采用强制 noinline 作为反向对照，而不是误称为“移除 noinline”。
+
+| 实验 | 改动 | 结果 | 判定 |
+| --- | --- | --- | --- |
+| 1. 双输入槽缓存 | 为 `IntBinaryStack` 和 `IntPreferredBinaryStack` 增加 `input_pair()`，一次取得两个 `register_inputs` 槽位，保留非法输入的通用回退 | 回归通过；同批中 `PI 8.2725→8.2529ms`、`strings 6.9606→6.9430ms`，`calls` 基本持平，`increment` 轻微波动 | **保留**。减少了一次重复的输入表边界/寻址协议，但端到端收益很小 |
+| 2. 循环状态局部副本 | 在 `IntForNextLocal`/`IntIncrementForNextLocal` 中把 `value/remaining/body/exit` 绑定到局部引用/副本 | 回归通过，但 `PI 8.2529→8.3361ms`、`strings 6.9430→7.1287ms`、`increment 1.3103→1.3712ms`、`addloop 2.6318→2.7683ms` | **撤回**。源码表达式减少没有转化为更好的机器码，额外局部状态反而可能扩大热区或破坏布局 |
+| 3. 整数索引 handler 强制 noinline | 仅对 `op_index_local_int`/`op_index_local_int_store` 加 `__declspec(noinline)` | 回归通过；`PI 8.2529→8.5635ms`、`strings 6.9430→7.2368ms`，明显变慢 | **撤回**。默认 Clang 内联这两个 handler 的方向是正确的 |
+
+最终源码只保留实验 1 的 `input_pair()`。最终保留状态重新构建并通过完整回归；Clang high 的一次最终测量为
+`PI 8.3985ms`、`calls 7.6245ms`、`strings 7.0695ms`、`increment 1.2978ms`、`addloop 2.6058ms`，
+与中间批次存在正常环境漂移。因此实验 1 的结论是“减少解释器操作并无回归，收益尚未达到稳定可宣称加速”，
+而不是根据单次微小差异宣布性能提升。
+
+这三项实验还给出一个比原先更具体的 PGO 使用规则：
+
+- PGO 指向的访问协议可以做源码级合并，例如 `input_pair()`；
+- 仅把成员访问改写成局部变量，不保证编译器生成更好的代码，必须实测；
+- PGO 发现的 handler 内联方向应保留默认编译器决策，不应手工强制 noinline；
+- 下一步若继续，应把输入槽来源在 lowering 阶段直接编码为稳定 operand，而不是继续堆叠运行时 helper。
+
+#### 基本块 use-def 匹配器第一版（2026-09-26）
+
+继续原计划后，先实现了一个**只读统计**版本的基本块 use-def 匹配器，没有改变 opcode lowering、执行器或
+控制流。第一版先限定在真实的寄存器栈编码：`IndexLocalInt` 通过 `Instruction::destination` 产生栈槽，
+后续 `IntBinaryStack`/`IntPreferredBinaryStack` 通过 `register_inputs` 消费栈槽；`RegisterOperation` 中
+local/temporary 的另一套操作数编码暂不混入，避免把两个命名空间错误地合并。
+
+匹配器统计三类链：
+
+- `IndexLocalInt -> IntBinaryStack/IntPreferredBinaryStack`；
+- 整数栈运算结果 -> `StoreLocal`；
+- 整数栈运算结果 -> `ArrayPushLocalIntStack`。
+
+PI listing 中严格相邻统计仍然可能是 `index_to_int=0`，但 `big_mul_int`/`big_div_int` 等实际区域已经
+出现 `use_def_index_to_int=1`、`use_def_int_to_store=1`。这确认了此前的判断：当前 producer-consumer
+链经常被 `LoadLocal`、常量装载或其他无副作用指令隔开，严格相邻窗口不足以指导融合；use-def 匹配器能找回
+一部分真实依赖。
+
+本轮仍不自动融合，也不把统计值当成区域安全证明。遇到 local/temporary 编码、分支、调用、数组写入、
+跨基本块回边或诊断可见操作时，必须继续扩展明确的定义失效规则后，才能考虑生成稳定 operand 或区域状态。
+当前验证：Clang high 构建成功，完整回归 `Passed 78 out of 78 tests.`，PI 结果仍为 502 字符；21 次
+benchmark 中位数为 `PI 8.4670 ms`、`calls 7.4770 ms`、`strings 6.9702 ms`、`increment 1.2997 ms`、
+`addloop 2.6245 ms`，只作为无语义变化的运行确认，不宣称统计器带来性能收益。
+
+下一步继续原计划：扩展 use-def 的来源类型和定义失效规则，先输出每条链的 PC、输入槽和 producer opcode，
+再评估是否存在可以安全固化的单一 operand；PGO 只用于确认这些链是否落在实际热点，不再单独驱动微调。
+
+#### use-def 链明细与 barrier 收紧（2026-09-26）
+
+第二步没有进入自动融合，而是把每条命中保存为 `producer_pc/consumer_pc/slot`，并输出 producer 与
+consumer opcode。PI 中可以直接核对：`big_mul_int` 出现 `11 -> 13`（索引结果进入整数栈运算）和
+`14 -> 15`（整数运算结果写入局部变量）；`big_div_int` 出现 `25 -> 26` 和 `26 -> 27`。这说明
+匹配器找到的是实际 lowering 链，而不是仅凭 opcode 邻接关系推测。
+
+同时加入了保守的定义失效规则：经过 `Jump`/`Branch`/逻辑分支、调用，以及 `IndexLocalIntStore`、
+`ArrayPushLocalInt`、`ArrayPushLocalIntStack` 等数组写入后，清空当前寄存器栈 producer 表；因此不会把
+控制流另一条路径或数组别名写入前的 producer 延续到后续指令。链明细还记录 opcode，便于后续增加
+`Constant`/`LoadLocal` 等 producer 类型时逐条检查，而不是扩大一个无法审计的计数器。
+
+本轮验证：Clang high 构建成功，完整回归 `Passed 78 out of 78 tests.`；`big_mul_int`/`big_div_int`
+的预期链仍然存在，且 PI 结果保持 502 字符。当前结论仍是**分析有效、暂不自动融合**：use-def 链
+跨越的语义边界已经能被观测，但还需要证明输入槽稳定性、类型稳定性和回边迭代一致性，才能把链编码为
+执行器可依赖的 operand。
+
+#### 静态整数 producer 过滤（2026-09-26）
+
+继续扩展来源类型时，先排除了一个会误导优化判断的问题：不能把所有 `LoadLocal` 或所有 `Constant`
+都视为整数 producer。当前分析器只接受两类可证明来源：
+
+- 常量表中实际为 `int64_t` 的 `Constant`/`ConstantLocal`；
+- local descriptor 明确绑定模块 `int` 类型的 `LoadLocal`。
+
+PI listing 的结果是：`big_mul_int` 保留两条明确的 `LoadLocal(int) -> IntBinaryStack` 链，
+`big_div_int` 没有局部或常量来源误报，PI 中常量 producer 当前为零命中。之前统计出的两个泛化
+`LoadLocal` 命中因此被收紧为真正的静态整数来源；double、string、动态 Value 和未知 local 类型
+不会进入可固化整数 operand 的候选集合。
+
+这一项暂不改变执行器，只提高后续优化证据的准确性。Clang high 构建成功，完整回归为
+`Passed 78 out of 78 tests.`；下一步继续检查这些静态整数链在循环回边上的输入槽和类型是否保持一致，
+再决定是否有资格进入真实 lowering/operand 固化实验。
+
+#### 循环回边稳定性检查（2026-09-26）
+
+对每条已识别的 use-def 链增加了两个只读诊断：producer 到 consumer 之间是否发生同一寄存器槽的
+重复定义，以及 producer 是否属于已证明的静态整数来源。PI listing 中 `big_mul_int` 的四条链和
+`big_div_int` 的两条链均为 `stable=1/1`，即没有中途同槽覆盖，且来源类型满足当前分析器的整数资格
+条件。链的控制流边界仍由前一轮的 branch/call/array-write barrier 保护，因此这个结果可以作为后续
+operand 固化候选的输入，而不是单纯的 opcode 计数。
+
+本轮仍未改动执行器。Clang high 构建成功，完整回归 `Passed 78 out of 78 tests.`；21 次 benchmark
+中位数为 `PI 8.6209 ms`、`calls 7.5699 ms`、`strings 7.0121 ms`、`increment 1.2994 ms`、
+`addloop 2.6189 ms`，所有 workload 结果通过。与前一轮统计版本相比属于正常环境波动，不能宣称分析器
+带来性能收益。当前证据足够支持下一步做一个**单一稳定整数链的 lowering/执行器候选**，但仍应保持
+独立 A/B，若减少操作没有端到端收益也记录为有效优化结论。
+
+#### 稳定整数链的输入旁表候选（2026-09-26，撤回）
+
+基于上述稳定链，实际尝试了一项执行器优化：为 `IntBinaryStack`/`IntPreferredBinaryStack` 建立按 PC
+对齐的左右输入槽旁表，handler 优先从旁表读取，未命中时回退原有 `input_pair()`。该方案不扩大热
+`Instruction`，语义回归也通过，因此可以作为公平的 A/B 候选。
+
+同一 Clang high 构建下，旁表开启与关闭读取的 21 次中位数如下：
+
+| workload | 旁表开启 | 旁表关闭 | 结论 |
+| --- | ---: | ---: | --- |
+| `pi` | 9.2438 ms | 8.3620 ms | 回退 |
+| `calls` | 8.4533 ms | 7.8490 ms | 回退 |
+| `strings` | 7.5938 ms | 7.1676 ms | 回退 |
+| `increment` | 1.3235 ms | 1.3024 ms | 基本持平偏慢 |
+| `addloop` | 2.7824 ms | 2.6087 ms | 回退 |
+
+旁表确实减少了一次 `register_inputs` 间接读取，但每次整数栈指令新增了 PC 对齐旁表访问、有效性判断和
+额外内存流；净结果在主要 workload 上变慢。因此按“减少操作但端到端无收益也算有效验证”的规则，结论为
+**候选已验证但撤回**：保留 use-def 只读统计和稳定性证据，删除旁表及其热路径读取，不再继续做同类
+PC 对齐旁表。最终撤回状态构建成功，完整回归 `Passed 78 out of 78 tests.`，PI 结果仍为 502 字符。
+
+这次 A/B 也收窄了后续方向：若继续优化，必须让稳定 operand 直接成为现有指令/已有 operation 的编码，
+不能仅在执行器旁边增加一层按 PC 查表；否则减少一次查表很容易被新的旁表成本抵消。
+
+#### 复用 RegisterOperation 编码稳定整数槽（2026-09-26，撤回）
+
+为验证更小的编码方案，又做了一个不增加 `Instruction` 大小、不增加旁表的候选：让生成的
+`IntBinaryStack` 复用现有 `RegisterOperation.left/right` 和一个未占用的 flags 位保存两个稳定输入槽，
+handler 直接读取这两个槽；原 `input_pair()` 路径保留为对照。语义验证通过，说明这种编码在当前样本上
+可以工作，但它会给已有 16B operation 引入新的 flags 协议，并要求所有 operation 验证/调试/后续转换
+路径理解这组特殊语义。
+
+同一 Clang high 构建下，21 次中位数对比为：
+
+| workload | 直接槽编码 | `input_pair()` 对照 | 结论 |
+| --- | ---: | ---: | --- |
+| `pi` | 8.4234 ms | 8.5101 ms | 略快 |
+| `calls` | 7.4490 ms | 7.4780 ms | 略快 |
+| `strings` | 7.1248 ms | 6.9671 ms | 回退 |
+| `increment` | 1.3009 ms | 1.3567 ms | 略快 |
+| `addloop` | 2.7562 ms | 2.7356 ms | 回退 |
+
+收益方向不一致，且新增 flags 特殊协议的维护/验证复杂度无法由稳定端到端收益证明。候选因此撤回，
+恢复原有 `RegisterOperation` 语义和 `input_pair()` 执行路径。最终构建成功，完整回归
+`Passed 78 out of 78 tests.`，PI 结果保持 502 字符。
+
+至此，当前 use-def 工作的结论是：它成功找到了稳定的真实依赖链，但“增加旁表”与“复用 operation
+特殊编码”两种执行器落地方式都没有形成稳定收益。后续若继续，应优先寻找能在 lowering 阶段消除整条
+解释器操作链的现有 opcode 融合，而不是继续给输入槽增加间接协议。
+
+#### `IndexLocalInt -> IntBinaryStack` 单 opcode 融合评估（2026-09-26，有效排除）
+
+最后评估了更激进的方向：把已经确认的 `IndexLocalInt -> IntBinaryStack` 链融合为一个 opcode，理论上
+可以同时消除一次取指和一次中间寄存器结果。检查现有实现后，这不是一个只改 lowering 的小候选：
+新 opcode 必须同步修改 dispatch 表、verify 的栈高度与输入数量、compact/remap、hot-code validation、
+listing，以及索引读取的数组扩容、COW、未初始化元素和索引错误语义；整数运算还要保留除零、移位范围
+和源码诊断位置。尤其 `IndexLocalInt` 的错误属于索引访问，而 `IntBinaryStack` 的错误属于算术操作，
+简单合并会改变错误优先级或源码位置。
+
+因此本轮没有引入半成品 opcode，也没有把“少一条指令”的理论收益当成实际收益。该方向记录为**有效排除**：
+在没有统一的融合指令描述和完整副作用/诊断协议之前，不继续扩张 `Opcode`。当前保留的优化成果是
+准确的只读 use-def 链分析；已经验证的两个实际执行器候选（PC 旁表、`RegisterOperation` 特殊槽编码）
+均已因端到端收益不稳定而撤回。
+
+#### 循环控制槽复用为数组索引实验（2026-09-26，撤回）
+
+在已通过区域分析的 `arrayloop` 形状上继续尝试更窄的状态局部化：当单数组、单索引区域的索引槽与
+整数循环控制槽相同，且区域内没有发现该槽重定义时，让 `IndexLocalInt` 直接读取
+`IntegerLoopState::value`，跳过每轮局部槽整数解码。该候选保留原数组边界、扩容、未初始化元素、负索引和
+错误路径，只改变整数索引的来源。
+
+候选实现通过构建、`arrayloop` 正确性检查和完整回归；PI 结果保持 502 字符，完整测试为
+`Passed 78 out of 78 tests.`。但同一 Clang high Release 二进制、pool allocator、21 次样本的 focused A/B
+为：关闭索引值复用 `0.0055 ms`，开启 `0.0069 ms`，候选反而变慢。该路径已完整撤回，仅保留源数组
+receiver 缓存。结论是：在当前小型区域中，省掉一次整数槽解码不足以抵消额外资格状态和分支成本；后续若要
+局部化 index，必须与更大范围的区域执行器或数组访问融合一起验证，不能单独增加状态分支。
+
+#### IndexLocalIntStore receiver 缓存扩展（2026-09-26，撤回）
+
+基于已经保留的源数组 receiver 缓存，尝试将同一缓存资格扩展到 `IndexLocalIntStore`，以减少数组存储路径
+中的一次 receiver 查找。索引转换、负索引、扩容、元素初始化、COW、类型绑定和错误处理均未改变。
+
+实际 listing 审计显示，PI 中出现的 `IndexLocalIntStore` 区域都包含内部控制流、调用或未知别名；
+`increment`、`addloop` 和 `arrayloop` 没有形成可执行的无分支 store 区域。因此该扩展没有稳定命中，
+无法产生有意义的 A/B 性能结论。为避免在热路径保留零覆盖条件，扩展已撤回，当前只保留源数组
+`IndexLocalInt` receiver 缓存。
+
+撤回后的最终验证：Clang high Release 构建成功，完整回归 `Passed 78 out of 78 tests.`，PI 502 字符。
+21 次样本中位数为：`pi 8.5144 ms`、`arrayloop 0.0054 ms`、`increment 1.2972 ms`、
+`addloop 2.7775 ms`、`calls 7.9381 ms`、`strings 7.1273 ms`。这些数据用于确认撤回后没有可见回退，
+不将单批差异归因于本次零覆盖实验。
