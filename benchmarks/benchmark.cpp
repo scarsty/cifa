@@ -33,8 +33,9 @@ int main(int argc, char** argv) try {
         else throw std::runtime_error("Unknown option: "+flag);
     }
     std::string script;
-    if (workload == "pi") {
-        std::ifstream input("cifa/calc-pi.c");
+    if (workload == "pi" || workload == "pi_dynamic") {
+        const char* source_name = workload == "pi" ? "cifa/calc-pi.c" : "cifa/calc-pi-dynamic.c";
+        std::ifstream input(source_name);
         if (!input) throw std::runtime_error("Run from repository root");
         script.assign(std::istreambuf_iterator<char>(input), {});
         // Exclude console I/O from VM timings, retaining the returned PI string.
@@ -69,7 +70,7 @@ int main(int argc, char** argv) try {
         script = "int loop() { int left = 1; int right = 2; int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop();";
     } else if (workload == "intcompare_dynamic") {
         script = "int loop(left, right) { int total = 0; for (int i = 0; i < 1000000; i++) { if (left < right) total++; } return total; } return loop(1, 2);";
-    } else throw std::runtime_error("workload must be pi, calls, strings, empty, increment, addloop, arrayloop, incrementf, intcompare, or intcompare_dynamic");
+    } else throw std::runtime_error("workload must be pi, pi_dynamic, calls, strings, empty, increment, addloop, arrayloop, incrementf, intcompare, or intcompare_dynamic");
     auto upstream = std::make_shared<cifa::memory::CountingResource>(cifa::memory::default_resource());
     cifa::memory::Resource resource = count_allocations ? upstream : cifa::memory::default_resource();
     // Upstream is declared first and outlives this standard PMR pool.
@@ -96,7 +97,8 @@ int main(int argc, char** argv) try {
     if (workload == "incrementf" && expected != "1000000.000000") throw std::runtime_error("Incorrect float increment sum");
     if (workload == "intcompare" && expected != "1000000.000000") throw std::runtime_error("Incorrect int compare sum");
     if (workload == "intcompare_dynamic" && expected != "1000000.000000") throw std::runtime_error("Incorrect dynamic int compare sum");
-    if (workload == "pi" && (expected.size()!=502 || !expected.starts_with("3.141592653589793238462643383279"))) throw std::runtime_error("Incorrect PI result");
+    if ((workload == "pi" || workload == "pi_dynamic")
+        && (expected.size()!=502 || !expected.starts_with("3.141592653589793238462643383279"))) throw std::runtime_error("Incorrect PI result");
     if (opcode_profile) {
         vm.reset_opcode_profile();
         vm.set_opcode_profile_enabled(true);

@@ -754,6 +754,11 @@ public:
 
     std::string get_runtime_error() const;
     bool has_runtime_error() const;
+    const CalUnit* compiled_ast() const { return compiled ? &compilation_root : nullptr; }
+    const std::unordered_map<std::string, FunctionOverloads>* compiled_functions() const
+    {
+        return compiled ? &compilation_functions : nullptr;
+    }
 
     //用户可扩展的运算符函数列表
     template <typename T>
