@@ -90,6 +90,11 @@ struct Constant {
     mutable const CifaLuaString* runtime_string = nullptr;
 };
 
+struct UpvalueDesc {
+    bool instack = false;
+    unsigned index = 0;
+};
+
 struct Proto {
     std::string source;
     unsigned linedefined = 0;
@@ -100,18 +105,23 @@ struct Proto {
     std::vector<std::uint32_t> code;
     std::vector<Constant> constants;
     std::vector<Proto> children;
-    std::vector<unsigned> upvalue_names;
+    std::vector<UpvalueDesc> upvalues;
 };
 
 class FunctionCompiler {
 public:
     FunctionCompiler(const Cifa& owner, Proto& proto, const std::unordered_map<std::string, FunctionOverloads>* functions,
-        bool root = false)
-        : owner_(owner), proto_(proto), functions_(functions), root_(root) {}
+                bool root = false, unsigned first_register = 0,
+                const std::unordered_map<std::string, unsigned>* function_upvalues = nullptr)
+                : owner_(owner), proto_(proto), functions_(functions), root_(root),
+                    function_upvalues_(function_upvalues), next_register_(first_register) {}
 
     bool compile_body(const CalUnit& body, const std::vector<Function2::Argument>& args, std::string& error)
     {
-        for (const auto& arg : args) local(arg.name);
+        for (const auto& arg : args) {
+            local(arg.name);
+            numeric_kinds_[arg.name] = type_kind(arg.type_name);
+        }
         if (!emit_block(body, error)) return false;
         if (proto_.code.empty() || (proto_.code.back() & 0x7f) != RETURN0 && (proto_.code.back() & 0x7f) != RETURN1)
             proto_.code.push_back(abc(RETURN0, 0, 0, 0));
@@ -129,9 +139,30 @@ private:
     Proto& proto_;
     const std::unordered_map<std::string, FunctionOverloads>* functions_;
     bool root_ = false;
+    const std::unordered_map<std::string, unsigned>* function_upvalues_ = nullptr;
     std::unordered_map<std::string, unsigned> locals_;
+    enum class NumericKind { Unknown, Integer, Float };
+    std::unordered_map<std::string, NumericKind> numeric_kinds_;
     std::vector<std::vector<unsigned>> loop_breaks_;
-    unsigned next_register_ = root_ ? 1u : 0u;
+    std::vector<std::pair<std::string, unsigned>> one_based_indices_;
+    std::vector<std::pair<std::string, unsigned>> append_indices_;
+    unsigned next_register_ = 0;
+
+    std::optional<unsigned> one_based_index(const CalUnit& node) const
+    {
+        if (node.type != CalUnitType::Parameter || !node.v.empty()) return std::nullopt;
+        for (auto index = one_based_indices_.rbegin(); index != one_based_indices_.rend(); ++index)
+            if (index->first == node.str) return index->second;
+        return std::nullopt;
+    }
+
+    std::optional<unsigned> append_index(const CalUnit& node) const
+    {
+        if (node.type != CalUnitType::Parameter || !node.v.empty()) return std::nullopt;
+        for (auto index = append_indices_.rbegin(); index != append_indices_.rend(); ++index)
+            if (index->first == node.str) return index->second;
+        return std::nullopt;
+    }
 
     unsigned local(const std::string& name)
     {
@@ -146,6 +177,37 @@ private:
     {
         auto it = locals_.find(name);
         return it == locals_.end() ? std::nullopt : std::optional<unsigned>(it->second);
+    }
+
+    static NumericKind type_kind(const std::string& type_name)
+    {
+        if (type_name == "int" || type_name == "vector<int>") return NumericKind::Integer;
+        if (type_name == "double" || type_name == "float"
+            || type_name == "vector<double>" || type_name == "vector<float>") return NumericKind::Float;
+        return NumericKind::Unknown;
+    }
+
+    NumericKind expression_kind(const CalUnit& node) const
+    {
+        if (node.type == CalUnitType::Constant)
+            return node.str.find_first_of(".eE") == std::string::npos ? NumericKind::Integer : NumericKind::Float;
+        if (node.type == CalUnitType::Parameter) {
+            const auto it = numeric_kinds_.find(node.str);
+            if (it == numeric_kinds_.end()) return NumericKind::Unknown;
+            if (node.v.empty() || (node.v.size() == 1 && node.v[0].str == "[]")) return it->second;
+            return NumericKind::Unknown;
+        }
+        if (node.type == CalUnitType::Operator && node.str == "()" && node.v.size() == 1)
+            return expression_kind(node.v[0]);
+        if (node.type == CalUnitType::Operator && node.v.size() == 2) {
+            const NumericKind left = expression_kind(node.v[0]);
+            const NumericKind right = expression_kind(node.v[1]);
+            if (left == NumericKind::Float || right == NumericKind::Float) return NumericKind::Float;
+            if (left == NumericKind::Integer && right == NumericKind::Integer
+                && (node.str == "+" || node.str == "-" || node.str == "*" || node.str == "%" || node.str == "/" || node.str == "//"))
+                return NumericKind::Integer;
+        }
+        return NumericKind::Unknown;
     }
 
     unsigned constant(const Constant& value)
@@ -217,12 +279,22 @@ private:
             return 0;
         }
         const auto base = emit_name(node.str, error);
+        Constant constant_index{};
+        if (node.v[0].v[0].type == CalUnitType::Constant && number(node.v[0].v[0].str, constant_index)
+            && constant_index.kind == Constant::Integer && constant_index.integer >= 0 && constant_index.integer < 255) {
+            const auto result = next_register_++;
+            proto_.code.push_back(abc(GETI, result, base, static_cast<unsigned>(constant_index.integer + 1)));
+            return result;
+        }
+        if (const auto index = one_based_index(node.v[0].v[0])) {
+            const auto result = next_register_++;
+            proto_.code.push_back(abc(GETTABLE, result, base, *index));
+            return result;
+        }
         const auto source_index = emit_expression(node.v[0].v[0], error);
         const auto index = next_register_++;
-        proto_.code.push_back(abc(MOVE, index, source_index, 0));
-        const auto one = emit_constant(Constant{Constant::Integer, 1});
-        proto_.code.push_back(abc(ADD, index, index, one));
-        proto_.code.push_back(abc(MMBIN, index, one, 6));
+        proto_.code.push_back(abc(ADDI, index, source_index, 128));
+        proto_.code.push_back(abc(MMBINI, source_index, 128, 6));
         const auto result = next_register_++;
         proto_.code.push_back(abc(GETTABLE, result, base, index));
         return result;
@@ -245,14 +317,25 @@ private:
             else if (node.str == "!=") { op = EQ; invert = true; }
             else if (node.str == "<") op = LT;
             else if (node.str == "<=") op = LE;
-            else if (node.str == ">") { op = LT; std::swap(left, right); }
-            else if (node.str == ">=") { op = LE; std::swap(left, right); }
+            else if (node.str == ">" || node.str == ">=") {
+                op = node.str == ">" ? LT : LE;
+            }
             else { error = "unsupported condition: " + node.str; return 0; }
+            Constant right_constant{};
+            const bool immediate = (node.str == "==" || node.str == "!=" || node.str == "<" || node.str == "<=")
+                && node.v[1].type == CalUnitType::Constant && number(node.v[1].str, right_constant)
+                && right_constant.kind == Constant::Integer && right_constant.integer >= -127 && right_constant.integer <= 128;
+            if (node.str == ">" || node.str == ">=") std::swap(left, right);
             const auto stable_left = next_register_++;
             const auto stable_right = next_register_++;
             proto_.code.push_back(abc(MOVE, stable_left, left, 0));
             proto_.code.push_back(abc(MOVE, stable_right, right, 0));
-            proto_.code.push_back(abc(op, stable_left, stable_right, 0, invert ? 1u : 0u));
+            if (immediate && (node.str == "==" || node.str == "!=" || node.str == "<" || node.str == "<=")) {
+                const unsigned immediate_op = op == EQ ? EQI : op == LT ? LTI : LEI;
+                proto_.code.push_back(abc(immediate_op, stable_left, static_cast<unsigned>(right_constant.integer + 127), 0, invert ? 1u : 0u));
+            }
+            else
+                proto_.code.push_back(abc(op, stable_left, stable_right, 0, invert ? 1u : 0u));
             const auto jump = proto_.code.size();
             proto_.code.push_back(asj(JMP, 0));
             return static_cast<unsigned>(jump);
@@ -303,10 +386,15 @@ private:
         }
         if (node.type == CalUnitType::Operator && node.v.size() == 2 && node.str != "." && node.str != "::") {
             static const std::unordered_map<std::string, unsigned> operations = {
-                {"+", ADD}, {"-", SUB}, {"*", MUL}, {"/", IDIV}, {"%", MOD}, {"//", IDIV}
+                {"+", ADD}, {"-", SUB}, {"*", MUL}, {"%", MOD}, {"//", IDIV}
             };
-            const auto it = operations.find(node.str);
-            if (it == operations.end()) {
+            unsigned operation = 0;
+            if (node.str == "/") {
+                operation = expression_kind(node.v[0]) == NumericKind::Integer
+                    && expression_kind(node.v[1]) == NumericKind::Integer ? IDIV : DIV;
+            } else if (const auto it = operations.find(node.str); it != operations.end()) {
+                operation = it->second;
+            } else {
                 error = "unsupported operator: " + node.str;
                 if (node.str == "." && node.v.size() == 2) {
                     error += " left=" + std::to_string(static_cast<int>(node.v[0].type))
@@ -316,7 +404,6 @@ private:
                 return 0;
             }
             const auto left = emit_expression(node.v[0], error);
-            const auto right = emit_expression(node.v[1], error);
             const auto contains_string = [&](const CalUnit& item, const auto& self) -> bool {
                 if (item.type == CalUnitType::String) return true;
                 if (item.type == CalUnitType::Function && item.str == "to_string") return true;
@@ -324,6 +411,7 @@ private:
                 return false;
             };
             if (node.str == "+" && (contains_string(node.v[0], contains_string) || contains_string(node.v[1], contains_string))) {
+                const auto right = emit_expression(node.v[1], error);
                 const auto first = next_register_++;
                 const auto second = next_register_++;
                 proto_.code.push_back(abc(MOVE, first, left, 0));
@@ -331,8 +419,23 @@ private:
                 proto_.code.push_back(abc(CONCAT, first, 2, 0));
                 return first;
             }
+            Constant right_constant{};
+            const bool has_right_constant = node.v[1].type == CalUnitType::Constant
+                && number(node.v[1].str, right_constant);
+            const unsigned right = has_right_constant ? 0 : emit_expression(node.v[1], error);
             const auto result = next_register_++;
-            proto_.code.push_back(abc(it->second, result, left, right));
+            if (has_right_constant && operation == ADD && right_constant.kind == Constant::Integer
+                && right_constant.integer >= -127 && right_constant.integer <= 127) {
+                proto_.code.push_back(abc(ADDI, result, left, static_cast<unsigned>(right_constant.integer + 127)));
+            } else if (has_right_constant) {
+                const unsigned constant_index = constant(right_constant);
+                const unsigned constant_operation = operation == ADD ? ADDK
+                    : operation == SUB ? SUBK : operation == MUL ? MULK : operation == MOD ? MODK
+                    : operation == DIV ? DIVK : operation == IDIV ? IDIVK : operation;
+                proto_.code.push_back(abc(constant_operation, result, left, constant_index));
+            } else {
+                proto_.code.push_back(abc(operation, result, left, right));
+            }
             const unsigned metamethod = node.str == "+" ? 6u
                 : node.str == "-" ? 7u
                 : node.str == "*" ? 8u
@@ -340,7 +443,14 @@ private:
                 : node.str == "^" ? 10u
                 : node.str == "/" ? 12u
                 : node.str == "//" ? 12u : 0u;
-            proto_.code.push_back(abc(MMBIN, result, right, metamethod));
+            if (has_right_constant && operation == ADD && right_constant.kind == Constant::Integer
+                && right_constant.integer >= -127 && right_constant.integer <= 127) {
+                proto_.code.push_back(abc(MMBINI, left, static_cast<unsigned>(right_constant.integer + 127), metamethod));
+            } else if (has_right_constant) {
+                proto_.code.push_back(abc(MMBINK, left, constant(right_constant), metamethod));
+            } else {
+                proto_.code.push_back(abc(MMBIN, result, right, metamethod));
+            }
             return result;
         }
         if (node.type == CalUnitType::Union && node.str == "{}") {
@@ -369,11 +479,16 @@ private:
             if (method == "push_back") {
                 if (arguments.size() != 1) { error = "push_back expects one argument"; return 0; }
                 const auto value = emit_expression(*arguments[0], error);
+                if (const auto index = append_index(node.v[0])) {
+                    proto_.code.push_back(abc(SETTABLE, receiver, *index, value));
+                    proto_.code.push_back(abc(ADDI, *index, *index, 128));
+                    proto_.code.push_back(abc(MMBINI, *index, 128, 6));
+                    return receiver;
+                }
                 const auto index = next_register_++;
                 proto_.code.push_back(abc(LEN, index, receiver, 0));
-                const auto one = emit_constant(Constant{Constant::Integer, 1});
-                proto_.code.push_back(abc(ADD, index, index, one));
-                proto_.code.push_back(abc(MMBIN, index, one, 6));
+                proto_.code.push_back(abc(ADDI, index, index, 128));
+                proto_.code.push_back(abc(MMBINI, index, 128, 6));
                 proto_.code.push_back(abc(SETTABLE, receiver, index, value));
                 return receiver;
             }
@@ -424,11 +539,21 @@ private:
                 return result;
             }
             const unsigned function_reg = next_register_;
-            next_register_ += static_cast<unsigned>(arguments.size() + 1);
             const std::string function_name = node.str == "to_string" ? "tostring"
                 : node.str == "println" ? "print" : node.str;
-            const unsigned name = constant(Constant{Constant::String, 0, 0, false, function_name});
-            proto_.code.push_back(abc(GETTABUP, function_reg, 0, name, 1));
+            next_register_ += static_cast<unsigned>(arguments.size() + 1);
+            if (function_upvalues_) {
+                const auto function = function_upvalues_->find(function_name);
+                if (function != function_upvalues_->end()) {
+                    proto_.code.push_back(abc(GETUPVAL, function_reg, function->second, 0));
+                } else {
+                    const unsigned name = constant(Constant{Constant::String, 0, 0, false, function_name});
+                    proto_.code.push_back(abc(GETTABUP, function_reg, 0, name, 1));
+                }
+            } else {
+                const unsigned name = constant(Constant{Constant::String, 0, 0, false, function_name});
+                proto_.code.push_back(abc(GETTABUP, function_reg, 0, name, 1));
+            }
             std::vector<unsigned> argument_registers;
             argument_registers.reserve(arguments.size());
             for (const auto* argument : arguments) argument_registers.push_back(emit_expression(*argument, error));
@@ -453,6 +578,7 @@ private:
     {
         if (node.type == CalUnitType::None || node.type == CalUnitType::Split || node.str == ";") return true;
         if (node.type == CalUnitType::Parameter && node.v.empty()) {
+            if (node.with_type) numeric_kinds_[node.str] = type_kind(node.type_name);
             const auto target = local(node.str);
             proto_.code.push_back(abc(NEWTABLE, target, 0, 0));
             proto_.code.push_back(ax(EXTRAARG, 0));
@@ -460,18 +586,34 @@ private:
         }
         if (node.type == CalUnitType::Operator && node.str == "=" && node.v.size() == 2) {
             if (node.v[0].type != CalUnitType::Parameter) { error = "unsupported assignment target"; return false; }
+            if (node.v[0].with_type) numeric_kinds_[node.v[0].str] = type_kind(node.v[0].type_name);
             const auto source = emit_expression(node.v[1], error);
             if (!node.v[0].v.empty() && node.v[0].v[0].str == "[]") {
                 const auto table = emit_name(node.v[0].str, error);
-                const auto source_index = emit_expression(node.v[0].v[0].v[0], error);
-                const auto index = next_register_++;
-                proto_.code.push_back(abc(MOVE, index, source_index, 0));
-                const auto one = emit_constant(Constant{Constant::Integer, 1});
-                proto_.code.push_back(abc(ADD, index, index, one));
-                proto_.code.push_back(abc(MMBIN, index, one, 6));
-                proto_.code.push_back(abc(SETTABLE, table, index, source));
+                Constant constant_index{};
+                if (node.v[0].v[0].v[0].type == CalUnitType::Constant && number(node.v[0].v[0].v[0].str, constant_index)
+                    && constant_index.kind == Constant::Integer && constant_index.integer >= 0 && constant_index.integer < 255) {
+                    proto_.code.push_back(abc(SETI, table, static_cast<unsigned>(constant_index.integer + 1), source));
+                } else {
+                    if (const auto index = one_based_index(node.v[0].v[0].v[0])) {
+                        proto_.code.push_back(abc(SETTABLE, table, *index, source));
+                    } else {
+                        const auto source_index = emit_expression(node.v[0].v[0].v[0], error);
+                        const auto lua_index = next_register_++;
+                        proto_.code.push_back(abc(ADDI, lua_index, source_index, 128));
+                        proto_.code.push_back(abc(MMBINI, source_index, 128, 6));
+                        proto_.code.push_back(abc(SETTABLE, table, lua_index, source));
+                    }
+                }
             } else if (root_ && !find_local(node.v[0].str)) emit_global_set(node.v[0].str, source);
             else {
+                const bool indexed_parameter = node.v[1].type == CalUnitType::Parameter
+                    && !node.v[1].v.empty() && node.v[1].v[0].str == "[]";
+                if (node.v[0].with_type && !find_local(node.v[0].str)
+                    && (node.v[1].type != CalUnitType::Parameter || indexed_parameter)) {
+                    locals_.emplace(node.v[0].str, source);
+                    return error.empty();
+                }
                 const auto target = local(node.v[0].str);
                 if (target != source) proto_.code.push_back(abc(MOVE, target, source, 0));
             }
@@ -481,7 +623,6 @@ private:
             && (node.str == "+=" || node.str == "-=")) {
             if (node.v[0].type != CalUnitType::Parameter || !node.v[0].v.empty()) { error = "unsupported compound assignment"; return false; }
             const auto left = emit_name(node.v[0].str, error);
-            const auto right = emit_expression(node.v[1], error);
             const auto contains_string = [&](const CalUnit& item, const auto& self) -> bool {
                 if (item.type == CalUnitType::String) return true;
                 if (item.type == CalUnitType::Function && item.str == "to_string") return true;
@@ -489,15 +630,28 @@ private:
                 return false;
             };
             if (node.str == "+=" && contains_string(node.v[1], contains_string)) {
-                const auto first = next_register_++;
-                const auto second = next_register_++;
+                std::vector<const CalUnit*> pieces;
+                const auto flatten = [&](const CalUnit& item, const auto& self) -> void {
+                    if (item.type == CalUnitType::Operator && item.str == "+" && item.v.size() == 2) {
+                        self(item.v[0], self);
+                        self(item.v[1], self);
+                    } else pieces.push_back(&item);
+                };
+                flatten(node.v[1], flatten);
+                const auto first = next_register_;
+                next_register_ += static_cast<unsigned>(pieces.size() + 1);
                 proto_.code.push_back(abc(MOVE, first, left, 0));
-                proto_.code.push_back(abc(MOVE, second, right, 0));
-                proto_.code.push_back(abc(CONCAT, first, 2, 0));
+                for (std::size_t index = 0; index < pieces.size(); ++index) {
+                    const unsigned value = emit_expression(*pieces[index], error);
+                    const unsigned target = first + 1 + static_cast<unsigned>(index);
+                    if (value != target) proto_.code.push_back(abc(MOVE, target, value, 0));
+                }
+                proto_.code.push_back(abc(CONCAT, first, static_cast<unsigned>(pieces.size() + 1), 0));
                 if (left != first) proto_.code.push_back(abc(MOVE, left, first, 0));
                 if (root_ && !find_local(node.v[0].str)) emit_global_set(node.v[0].str, left);
                 return error.empty();
             }
+            const auto right = emit_expression(node.v[1], error);
             const unsigned op = node.str == "+=" ? ADD : SUB;
             proto_.code.push_back(abc(op, left, left, right));
             proto_.code.push_back(abc(MMBIN, left, right, node.str == "+=" ? 6u : 7u));
@@ -533,6 +687,114 @@ private:
             else {
                 clauses = &node.v[0];
                 body = &node.v[1];
+                const auto writes_name = [&](const CalUnit& item, const std::string& name, const auto& self) -> bool {
+                    if (item.type == CalUnitType::Operator
+                        && (item.str == "=" || item.str == "+=" || item.str == "-=" || item.str == "++" || item.str == "()++")
+                        && !item.v.empty() && item.v[0].type == CalUnitType::Parameter && item.v[0].str == name)
+                        return true;
+                    for (const auto& child : item.v) if (self(child, name, self)) return true;
+                    return false;
+                };
+                const auto loop_step = [&](const CalUnit& item, const std::string& name) -> int {
+                    if ((item.str == "++" || item.str == "()++") && item.v.size() == 1
+                        && item.v[0].type == CalUnitType::Parameter && item.v[0].str == name)
+                        return 1;
+                    if ((item.str == "--" || item.str == "()--") && item.v.size() == 1
+                        && item.v[0].type == CalUnitType::Parameter && item.v[0].str == name)
+                        return -1;
+                    if ((item.str != "+=" && item.str != "-=") || item.v.size() != 2 || item.v[0].type != CalUnitType::Parameter
+                        || item.v[0].str != name || item.v[1].type != CalUnitType::Constant)
+                        return 0;
+                    Constant amount{};
+                    if (!number(item.v[1].str, amount) || amount.kind != Constant::Integer || amount.integer != 1) return 0;
+                    return item.str == "+=" ? 1 : -1;
+                };
+                const auto unique_append_receiver = [&](const CalUnit& item, std::string& receiver, unsigned& count, const auto& self) -> void {
+                    if (item.type == CalUnitType::Operator && item.str == "." && item.v.size() == 2
+                        && item.v[0].type == CalUnitType::Parameter && item.v[0].v.empty()
+                        && item.v[1].type == CalUnitType::Function && item.v[1].str == "push_back") {
+                        receiver = item.v[0].str;
+                        ++count;
+                    }
+                    for (const auto& child : item.v) self(child, receiver, count, self);
+                };
+                const CalUnit* numeric_condition = &clauses->v[1];
+                const CalUnit* extra_condition = nullptr;
+                if (numeric_condition->type == CalUnitType::Operator && numeric_condition->str == "&&" && numeric_condition->v.size() == 2) {
+                    numeric_condition = &numeric_condition->v[0];
+                    extra_condition = &clauses->v[1].v[1];
+                }
+                if (clauses->v.size() == 3 && clauses->v[0].type == CalUnitType::Operator
+                    && clauses->v[0].str == "=" && clauses->v[0].v.size() == 2
+                    && clauses->v[0].v[0].type == CalUnitType::Parameter && clauses->v[0].v[0].with_type
+                    && type_kind(clauses->v[0].v[0].type_name) == NumericKind::Integer
+                    && numeric_condition->type == CalUnitType::Operator
+                    && (numeric_condition->str == "<" || numeric_condition->str == ">=") && numeric_condition->v.size() == 2
+                    && numeric_condition->v[0].type == CalUnitType::Parameter
+                    && numeric_condition->v[0].str == clauses->v[0].v[0].str
+                    && loop_step(clauses->v[2], clauses->v[0].v[0].str) != 0) {
+                    const std::string& index_name = clauses->v[0].v[0].str;
+                    const CalUnit& limit = numeric_condition->v[1];
+                    const int step = loop_step(clauses->v[2], index_name);
+                    const bool ascending = numeric_condition->str == "<" && step == 1;
+                    const bool descending = numeric_condition->str == ">=" && step == -1;
+                    const bool stable_limit = limit.type == CalUnitType::Constant
+                        || (limit.type == CalUnitType::Parameter && limit.v.empty() && find_local(limit.str)
+                            && !writes_name(*body, limit.str, writes_name));
+                    if (stable_limit && (ascending || descending)) {
+                        const unsigned initial = emit_expression(clauses->v[0].v[1], error);
+                        const unsigned loop_base = next_register_;
+                        next_register_ += 4;
+                        locals_[index_name] = loop_base + 3;
+                        numeric_kinds_[index_name] = NumericKind::Integer;
+                        proto_.code.push_back(abc(MOVE, loop_base, initial, 0));
+                        const bool stable_index = !writes_name(*body, index_name, writes_name);
+                        const unsigned one_based = next_register_++;
+                        proto_.code.push_back(abc(ADDI, one_based, loop_base, 128));
+                        proto_.code.push_back(abc(MMBINI, loop_base, 128, 6));
+                        std::string append_receiver;
+                        unsigned append_count = 0;
+                        unique_append_receiver(*body, append_receiver, append_count, unique_append_receiver);
+                        const bool cached_append = append_count == 1 && !writes_name(*body, append_receiver, writes_name);
+                        unsigned append_index_register = 0;
+                        if (cached_append) {
+                            const unsigned receiver = emit_name(append_receiver, error);
+                            append_index_register = next_register_++;
+                            proto_.code.push_back(abc(LEN, append_index_register, receiver, 0));
+                            proto_.code.push_back(abc(ADDI, append_index_register, append_index_register, 128));
+                            proto_.code.push_back(abc(MMBINI, append_index_register, 128, 6));
+                        }
+                        const unsigned limit_register = emit_expression(limit, error);
+                        proto_.code.push_back(abc(MOVE, loop_base + 1, limit_register, 0));
+                        if (ascending) {
+                            proto_.code.push_back(abc(ADDI, loop_base + 1, loop_base + 1, 126));
+                            proto_.code.push_back(abc(MMBINI, loop_base + 1, 126, 7));
+                        }
+                        proto_.code.push_back(abx(LOADI, loop_base + 2, step + 65535));
+                        const unsigned prep = static_cast<unsigned>(proto_.code.size());
+                        proto_.code.push_back(abx(FORPREP, loop_base, 0));
+                        const unsigned body_start = static_cast<unsigned>(proto_.code.size());
+                        const unsigned extra_exit = extra_condition ? emit_condition(*extra_condition, error) : 0;
+                        loop_breaks_.emplace_back();
+                        if (stable_index) one_based_indices_.emplace_back(index_name, one_based);
+                        if (cached_append) append_indices_.emplace_back(append_receiver, append_index_register);
+                        if (!emit_block(*body, error)) return false;
+                        if (cached_append) append_indices_.pop_back();
+                        if (stable_index) one_based_indices_.pop_back();
+                        const unsigned loop = static_cast<unsigned>(proto_.code.size());
+                        const unsigned encoded_step = static_cast<unsigned>(step + 127);
+                        proto_.code.push_back(abc(ADDI, one_based, one_based, encoded_step));
+                        proto_.code.push_back(abc(MMBINI, one_based, encoded_step, 6));
+                        const unsigned for_loop = static_cast<unsigned>(proto_.code.size());
+                        proto_.code.push_back(abx(FORLOOP, loop_base, for_loop - body_start + 1));
+                        const unsigned loop_end = static_cast<unsigned>(proto_.code.size());
+                        proto_.code[prep] = abx(FORPREP, loop_base, loop - prep - 1);
+                        if (extra_condition) patch_jump(extra_exit, loop_end);
+                        for (const unsigned jump : loop_breaks_.back()) patch_jump(jump, loop_end);
+                        loop_breaks_.pop_back();
+                        return error.empty();
+                    }
+                }
                 if (clauses->v.size() == 3 && clauses->v[0].type == CalUnitType::Operator
                     && clauses->v[0].str == "=" && clauses->v[0].v.size() == 2
                     && clauses->v[0].v[0].type == CalUnitType::Parameter) {
@@ -593,9 +855,9 @@ class ChunkWriter {
             case Constant::Boolean: byte(c.boolean ? LUA_VTRUE : LUA_VFALSE); break;
             }
         }
-        size(p.upvalue_names.size()); for (unsigned i = 0; i < p.upvalue_names.size(); ++i) { byte(root ? 1 : 0); byte(0); byte(0); }
+        size(p.upvalues.size()); for (const auto& upvalue : p.upvalues) { byte(upvalue.instack ? 1 : 0); byte(static_cast<std::uint8_t>(upvalue.index)); byte(0); }
         size(p.children.size()); for (const auto& child : p.children) proto(child, p.source.empty() ? parent_source : &p.source, false);
-        size(0); size(0); size(0); size(p.upvalue_names.size()); for (const auto& name : p.upvalue_names) string(nullptr);
+        size(0); size(0); size(0); size(p.upvalues.size()); for (const auto& upvalue : p.upvalues) string(nullptr);
     }
 public:
     std::vector<std::uint8_t> write(const Proto& root)
@@ -615,23 +877,40 @@ std::shared_ptr<Proto> compile_lua_program(const Cifa& compiler, std::vector<std
     const auto* functions = compiler.compiled_functions();
     if (!root || !functions) { error = "Cifa AST is not compiled"; return {}; }
     auto proto = std::make_shared<Proto>();
-    proto->upvalue_names.push_back(0);
+    proto->upvalues.push_back({true, 0});
+    std::vector<std::string> function_names;
+    function_names.reserve(functions->size());
     for (const auto& [name, overloads] : *functions) {
         if (overloads.size() != 1) { error = "overloads are not supported: " + name; return {}; }
-        const auto& function = overloads.begin()->second;
+        function_names.push_back(name);
+    }
+    std::unordered_map<std::string, unsigned> root_function_registers;
+    root_function_registers.emplace("tostring", 1);
+    const Constant tostring_key{Constant::String, 0, 0, false, "tostring"};
+    proto->constants.push_back(tostring_key);
+    proto->code.push_back(abc(GETTABUP, 1, 0, 0, 1));
+    for (const auto& name : function_names)
+        root_function_registers.emplace(name, static_cast<unsigned>(root_function_registers.size() + 1));
+    for (const auto& name : function_names) {
+        const auto& function = functions->at(name).begin()->second;
         Proto child;
         child.params = static_cast<unsigned>(function.arguments.size());
-        child.upvalue_names.push_back(0);
-        FunctionCompiler child_compiler(compiler, child, functions);
+        child.upvalues.push_back({false, 0});
+        std::unordered_map<std::string, unsigned> child_function_upvalues;
+        for (const auto& [function_name, register_index] : root_function_registers) {
+            child_function_upvalues.emplace(function_name, static_cast<unsigned>(child.upvalues.size()));
+            child.upvalues.push_back({true, register_index});
+        }
+        FunctionCompiler child_compiler(compiler, child, functions, false, 0, &child_function_upvalues);
         if (!child_compiler.compile_body(function.body, function.arguments, error)) return {};
         proto->children.push_back(std::move(child));
-        const unsigned reg = 1;
+        const unsigned reg = root_function_registers.at(name);
         proto->code.push_back(abx(CLOSURE, reg, static_cast<unsigned>(proto->children.size() - 1)));
         const Constant key{Constant::String, 0, 0, false, name};
         const unsigned key_index = [&]() { for (unsigned i = 0; i < proto->constants.size(); ++i) if (proto->constants[i].kind == Constant::String && proto->constants[i].string == name) return i; proto->constants.push_back(key); return static_cast<unsigned>(proto->constants.size() - 1); }();
         proto->code.push_back(abc(SETTABUP, 0, key_index, reg, 0));
     }
-    FunctionCompiler root_compiler(compiler, *proto, functions, true);
+    FunctionCompiler root_compiler(compiler, *proto, functions, true, static_cast<unsigned>(root_function_registers.size() + 1));
     if (!root_compiler.compile_body(*root, {}, error)) return {};
     chunk = ChunkWriter().write(*proto);
     return proto;
@@ -663,6 +942,7 @@ struct RuntimeProto {
     TValue* k = nullptr;
     std::uint32_t* code = nullptr;
     RuntimeProto** p = nullptr;
+    UpvalueDesc* upvalues = nullptr;
 };
 
 static TValue make_nil() { return {}; }
@@ -755,6 +1035,7 @@ public:
         free_tables();
         free_table(global_table_);
         free_closures();
+        free_upvalues();
         clear_callinfo();
         delete[] stack_;
         for (CifaLuaString* string : strings_) free_lua_string(string);
@@ -765,6 +1046,7 @@ public:
         error_.clear();
         free_tables();
         free_closures();
+        free_upvalues();
         state_.ci = nullptr;
         if (!global_table_) {
             global_env_ = new_table();
@@ -772,7 +1054,11 @@ public:
             tables_ = global_table_->allnext;
             global_table_->allnext = nullptr;
         }
-        TValue root = make_lclosure(&proto, &global_env_);
+        TValue root = make_lclosure(&proto);
+        LClosure* root_closure = &root.value_.closure->l;
+        root_closure->upvals[0] = new_upvalue(&global_env_);
+        for (unsigned index = 1; index < root_closure->nupvalues; ++index)
+            root_closure->upvals[index] = new_closed_upvalue();
         TValue tostring = make_cclosure(&LuaVm::luaB_tostring);
         set_table(global_env_, string_value("tostring"), tostring);
         const std::size_t initial_stack = std::max<unsigned>(proto.maxstacksize + 1, 2);
@@ -804,6 +1090,7 @@ private:
     Table* tables_ = nullptr;
     Table* global_table_ = nullptr;
     Closure* closures_ = nullptr;
+    std::vector<UpVal*> upvalues_;
     CallInfo* callinfo_root_ = nullptr;
 #if defined(CIFA_LUA_OPCODE_PROFILE)
     std::array<std::uint64_t, EXTRAARG + 1> opcode_counts_{};
@@ -813,6 +1100,7 @@ private:
     static unsigned arg_a(std::uint32_t i) { return (i >> POS_A) & 0xff; }
     static unsigned arg_b(std::uint32_t i) { return (i >> POS_B) & 0xff; }
     static unsigned arg_c(std::uint32_t i) { return (i >> POS_C) & 0xff; }
+    static int arg_sb(std::uint32_t i) { return static_cast<int>(arg_b(i)) - 127; }
     static unsigned arg_bx(std::uint32_t i) { return (i >> POS_Bx) & 0x1ffff; }
     static unsigned arg_ax(std::uint32_t i) { return i >> POS_Ax; }
     static bool arg_k(std::uint32_t i) { return ((i >> POS_k) & 1) != 0; }
@@ -916,9 +1204,13 @@ private:
         while (closures_) {
             Closure* closure = closures_;
             closures_ = reinterpret_cast<Closure*>(closure->l.header.next);
-            if (closure->l.header.tt == LUA_VLCL) delete closure->l.upvals[0];
-            delete closure;
+            ::operator delete(closure);
         }
+    }
+    void free_upvalues()
+    {
+        for (UpVal* upvalue : upvalues_) delete upvalue;
+        upvalues_.clear();
     }
     void grow_stack(std::size_t needed)
     {
@@ -927,6 +1219,8 @@ private:
         /* luaD_reallocstack: change every active stack pointer to an offset,
            move the raw stack allocation, and restore pointers afterwards. */
         const StkId old_stack = state_.stack.p;
+        const std::uintptr_t old_begin = reinterpret_cast<std::uintptr_t>(old_stack);
+        const std::uintptr_t old_end = old_begin + sizeof(StackValue) * stack_size_;
         state_.top.offset = state_.top.p - old_stack;
         state_.stack_last.offset = state_.stack_last.p - old_stack;
         for (CallInfo* frame = state_.ci; frame; frame = frame->previous) {
@@ -936,6 +1230,13 @@ private:
 
         StackValue* grown = new StackValue[needed]{};
         std::copy_n(stack_, stack_size_, grown);
+        for (UpVal* upvalue : upvalues_) {
+            const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(upvalue->v.p);
+            if (address >= old_begin && address < old_end) {
+                const std::size_t slot = (address - old_begin) / sizeof(StackValue);
+                upvalue->v.p = &grown[slot].val;
+            }
+        }
         delete[] stack_;
         stack_ = grown;
         stack_size_ = needed;
@@ -1029,14 +1330,30 @@ private:
         delete[] table->node;
         delete table;
     }
-    TValue make_lclosure(RuntimeProto* proto, TValue* upvalue)
+    UpVal* new_upvalue(TValue* value)
     {
-        Closure* closure = new Closure{};
+        UpVal* upvalue = new UpVal{};
+        upvalue->v.p = value;
+        upvalues_.push_back(upvalue);
+        return upvalue;
+    }
+    UpVal* new_closed_upvalue()
+    {
+        UpVal* upvalue = new UpVal{};
+        upvalue->v.p = &upvalue->u.value;
+        upvalue->u.value = make_nil();
+        upvalues_.push_back(upvalue);
+        return upvalue;
+    }
+    TValue make_lclosure(RuntimeProto* proto)
+    {
+        const unsigned count = static_cast<unsigned>(proto->sizeupvalues);
+        const std::size_t bytes = offsetof(LClosure, upvals) + sizeof(UpVal*) * count;
+        Closure* closure = static_cast<Closure*>(::operator new(bytes));
+        std::memset(closure, 0, bytes);
         closure->l.header.tt = LUA_VLCL;
-        closure->l.nupvalues = 1;
+        closure->l.nupvalues = static_cast<unsigned char>(count);
         closure->l.p = proto;
-        closure->l.upvals[0] = new UpVal{};
-        closure->l.upvals[0]->v.p = upvalue;
         closure->l.header.next = reinterpret_cast<CifaLuaGCObject*>(closures_);
         closures_ = closure;
         return make_closure_value(closure, false);
@@ -1330,6 +1647,8 @@ private:
             case MOVE: setobj(base[arg_a(instruction)].val, base[arg_b(instruction)].val); break;
             case LOADI: base[arg_a(instruction)].val = make_integer(static_cast<int>(arg_bx(instruction)) - 65535); break;
             case LOADK: setobj(base[arg_a(instruction)].val, cl->p->k[arg_bx(instruction)]); break;
+            case GETUPVAL: setobj(base[arg_a(instruction)].val, *cl->upvals[arg_b(instruction)]->v.p); break;
+            case SETUPVAL: setobj(*cl->upvals[arg_b(instruction)]->v.p, base[arg_a(instruction)].val); break;
             case LOADNIL: {
                 const unsigned a = arg_a(instruction);
                 for (unsigned index = 0; index <= arg_b(instruction); ++index) setobj(base[a + index].val, make_nil());
@@ -1358,6 +1677,14 @@ private:
                 TValue* slot = ttisinteger(rc) ? fastgeti(rb, rc.value_.i) : fastget(rb, rc);
                 if (slot && !ttisnil(*slot)) setobj(ra, *slot);
                 else setobj(ra, get_table(rb, rc));
+                break;
+            }
+            case GETI: {
+                TValue& ra = base[arg_a(instruction)].val;
+                const TValue& rb = base[arg_b(instruction)].val;
+                const TValue key = make_integer(arg_c(instruction));
+                if (TValue* slot = fastgeti(rb, key.value_.i); slot && !ttisnil(*slot)) setobj(ra, *slot);
+                else setobj(ra, get_table(rb, key));
                 break;
             }
             case SETTABLE: {
@@ -1393,30 +1720,70 @@ private:
                 break;
             }
             case ADDI: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) + arg_sc(instruction)); ++pc; break;
+            case ADDK: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) + integer(cl->p->k[arg_c(instruction)])); ++pc; break;
+            case SUBK: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) - integer(cl->p->k[arg_c(instruction)])); ++pc; break;
+            case MULK: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) * integer(cl->p->k[arg_c(instruction)])); ++pc; break;
+            case MODK: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) % integer(cl->p->k[arg_c(instruction)])); ++pc; break;
+            case DIVK: base[arg_a(instruction)].val = make_number(number(base[arg_b(instruction)].val) / number(cl->p->k[arg_c(instruction)])); ++pc; break;
+            case IDIVK: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) / integer(cl->p->k[arg_c(instruction)])); ++pc; break;
             case ADD: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) + integer(base[arg_c(instruction)].val)); ++pc; break;
             case SUB: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) - integer(base[arg_c(instruction)].val)); ++pc; break;
             case MUL: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) * integer(base[arg_c(instruction)].val)); ++pc; break;
             case MOD: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) % integer(base[arg_c(instruction)].val)); ++pc; break;
+            case DIV: base[arg_a(instruction)].val = make_number(number(base[arg_b(instruction)].val) / number(base[arg_c(instruction)].val)); ++pc; break;
             case IDIV: base[arg_a(instruction)].val = make_integer(integer(base[arg_b(instruction)].val) / integer(base[arg_c(instruction)].val)); ++pc; break;
             case JMP: pc += arg_sj(instruction); break;
+            case FORPREP: {
+                const unsigned a = arg_a(instruction);
+                const std::int64_t initial = integer(base[a].val);
+                const std::int64_t limit = integer(base[a + 1].val);
+                const std::int64_t step = integer(base[a + 2].val);
+                base[a + 3].val = make_integer(initial);
+                if ((step > 0 && initial > limit) || (step < 0 && initial < limit)) pc += arg_bx(instruction) + 1;
+                else base[a + 1].val = make_integer(step > 0 ? limit - initial : initial - limit);
+                break;
+            }
+            case FORLOOP: {
+                const unsigned a = arg_a(instruction);
+                const std::int64_t count = integer(base[a + 1].val);
+                if (count > 0) {
+                    base[a + 1].val = make_integer(count - 1);
+                    const std::int64_t index = integer(base[a].val) + integer(base[a + 2].val);
+                    base[a].val = make_integer(index);
+                    base[a + 3].val = make_integer(index);
+                    pc -= arg_bx(instruction);
+                }
+                break;
+            }
             case EQ: if (equalobj(base[arg_a(instruction)].val, base[arg_b(instruction)].val) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1; break;
+            case EQI: if ((integer(base[arg_a(instruction)].val) == arg_sb(instruction)) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1; break;
             case LT: {
                 const TValue& ra = base[arg_a(instruction)].val;
                 const TValue& rb = base[arg_b(instruction)].val;
                 if ((ttisstring(ra) && ttisstring(rb) ? string_copy(ra.value_.str) < string_copy(rb.value_.str) : number(ra) < number(rb)) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1;
                 break;
             }
+            case LTI: if ((number(base[arg_a(instruction)].val) < arg_sb(instruction)) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1; break;
             case LE: {
                 const TValue& ra = base[arg_a(instruction)].val;
                 const TValue& rb = base[arg_b(instruction)].val;
                 if ((ttisstring(ra) && ttisstring(rb) ? string_copy(ra.value_.str) <= string_copy(rb.value_.str) : number(ra) <= number(rb)) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1;
                 break;
             }
+            case LEI: if ((number(base[arg_a(instruction)].val) <= arg_sb(instruction)) != arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1; break;
             case TEST: if ((!cifa_test_false(base[arg_a(instruction)].val)) != !arg_k(instruction)) ++pc; else pc += arg_sj(*pc) + 1; break;
             case CLOSURE: {
                 RuntimeProto* child = cl->p->p[arg_bx(instruction)];
                 if (!child || !child->code) { set_error("Lua VM has an invalid child Proto"); return make_nil(); }
-                base[arg_a(instruction)].val = make_lclosure(child, cl->upvals[0]->v.p);
+                TValue child_closure = make_lclosure(child);
+                LClosure* captured = &child_closure.value_.closure->l;
+                for (unsigned index = 0; index < captured->nupvalues; ++index) {
+                    const UpvalueDesc& upvalue = child->upvalues[index];
+                    if (upvalue.instack) captured->upvals[index] = new_upvalue(&base[upvalue.index].val);
+                    else if (upvalue.index < cl->nupvalues) captured->upvals[index] = cl->upvals[upvalue.index];
+                    else { set_error("Lua VM closure has an invalid upvalue descriptor"); return make_nil(); }
+                }
+                base[arg_a(instruction)].val = child_closure;
                 break;
             }
             case CALL: {
@@ -1450,6 +1817,7 @@ struct Program {
         delete[] proto.k;
         delete[] proto.code;
         delete[] proto.p;
+        delete[] proto.upvalues;
         proto = {};
     }
 
@@ -1458,7 +1826,7 @@ struct Program {
         target.numparams = static_cast<unsigned char>(source.params);
         target.is_vararg = static_cast<unsigned char>(source.vararg);
         target.maxstacksize = static_cast<unsigned char>(source.maxstack);
-        target.sizeupvalues = static_cast<int>(source.upvalue_names.size());
+        target.sizeupvalues = static_cast<int>(source.upvalues.size());
         target.sizecode = static_cast<int>(source.code.size());
         target.sizek = static_cast<int>(source.constants.size());
         target.sizep = static_cast<int>(source.children.size());
@@ -1475,6 +1843,8 @@ struct Program {
             }
         }
         target.p = target.sizep == 0 ? nullptr : new RuntimeProto*[target.sizep];
+        target.upvalues = target.sizeupvalues == 0 ? nullptr : new UpvalueDesc[target.sizeupvalues];
+        std::copy(source.upvalues.begin(), source.upvalues.end(), target.upvalues);
         for (int index = 0; index < target.sizep; ++index) {
             auto child = std::make_unique<RuntimeProto>();
             RuntimeProto* child_ptr = child.get();
