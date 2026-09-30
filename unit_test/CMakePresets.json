@@ -1,0 +1,34 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "MSVC x64 tests",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/cmake"
+    },
+    {
+      "name": "clang-high-inline",
+      "displayName": "Clang high-inline x64 tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake-clang-high-inline",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin/clang-cl.exe",
+        "CMAKE_CXX_COMPILER": "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin/clang-cl.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe",
+        "CIFA_CLANG_HIGH_INLINE": "ON",
+        "CIFA_COMPUTED_GOTO": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "release", "configurePreset": "windows", "configuration": "Release"},
+    {"name": "debug", "configurePreset": "windows", "configuration": "Debug"},
+    {"name": "clang-high-inline-release", "configurePreset": "clang-high-inline"}
+  ],
+  "testPresets": [
+    {"name": "release", "configurePreset": "windows", "configuration": "Release", "output": {"outputOnFailure": true}},
+    {"name": "debug", "configurePreset": "windows", "configuration": "Debug", "output": {"outputOnFailure": true}}
+  ]
+}

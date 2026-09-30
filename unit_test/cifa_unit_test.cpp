@@ -1,17 +1,13 @@
 ﻿#include "../Cifa.h"
+#include "../CifaBytecode.h"
 #include <filesystem>
 #include <cstdio>
 #include <print>
 #include <numeric>
 #include <format>
-#include "../CifaBytecode.h"
 #include "test_process.h"
 
-namespace cifa {
-using TestBytecode = CifaBytecode;
-}
 using namespace cifa;
-using DirectCifa = Cifa;
 
 static double template_square(double x)
 {
@@ -38,10 +34,9 @@ static double template_menu(double x, double y, Object choices, double count)
     return x + y + count + (choices.hasValue() ? 0.0 : 1.0);
 }
 
-template <typename Backend>
-struct BackendTests
+struct CifaTests
 {
-#define Cifa Backend
+#define Cifa cifa::Cifa
 bool local_array_store_test()
 {
     Cifa c;
@@ -256,7 +251,7 @@ bool typed_function_argument_error_test()
 
 bool object_vector_argument_error_test()
 {
-    const auto expect_conversion_error = [](const typename Backend::func_type& menu, const std::string& target_type)
+    const auto expect_conversion_error = [](const Cifa::func_type& menu, const std::string& target_type)
     {
         Cifa c;
         c.set_output_error(false);
@@ -1311,16 +1306,16 @@ bool int64_storage_test()
 bool custom_operator_dispatch_test()
 {
     using CallbackList = std::vector<std::function<Object(const Object&, const Object&)>>;
-    const std::pair<const char*, CallbackList DirectCifa::*> operations[] = {
-        {"+", &DirectCifa::user_add}, {"-", &DirectCifa::user_sub}, {"*", &DirectCifa::user_mul}, {"/", &DirectCifa::user_div},
-        {"%", &DirectCifa::user_mod}, {"&", &DirectCifa::user_bit_and}, {"|", &DirectCifa::user_bit_or}, {"^", &DirectCifa::user_bit_xor},
-        {"<<", &DirectCifa::user_shift_left}, {">>", &DirectCifa::user_shift_right}, {"==", &DirectCifa::user_equal},
-        {"!=", &DirectCifa::user_not_equal}, {"<", &DirectCifa::user_less}, {">", &DirectCifa::user_more},
-        {"<=", &DirectCifa::user_less_equal}, {">=", &DirectCifa::user_more_equal}
+    const std::pair<const char*, CallbackList Cifa::*> operations[] = {
+        {"+", &Cifa::user_add}, {"-", &Cifa::user_sub}, {"*", &Cifa::user_mul}, {"/", &Cifa::user_div},
+        {"%", &Cifa::user_mod}, {"&", &Cifa::user_bit_and}, {"|", &Cifa::user_bit_or}, {"^", &Cifa::user_bit_xor},
+        {"<<", &Cifa::user_shift_left}, {">>", &Cifa::user_shift_right}, {"==", &Cifa::user_equal},
+        {"!=", &Cifa::user_not_equal}, {"<", &Cifa::user_less}, {">", &Cifa::user_more},
+        {"<=", &Cifa::user_less_equal}, {">=", &Cifa::user_more_equal}
     };
     for (const auto& [symbol, callbacks] : operations)
     {
-        DirectCifa c;
+        Cifa c;
         c.set_output_error(false);
         c.register_parameter("host", RegisteredTestValue{});
         int calls = 0;
@@ -2682,20 +2677,20 @@ bool include_test()
     struct IncludeCase
     {
         const char* name;
-        bool (BackendTests::*test)();
+        bool (CifaTests::*test)();
     };
     const IncludeCase cases[] = {
-        { "file cases", &BackendTests::include_file_cases_test },
-        { "missing file", &BackendTests::include_missing_file_test },
-        { "with parameters", &BackendTests::include_with_parameters_test },
-        { "run_script include dir", &BackendTests::include_run_script_include_dir_test },
-        { "run_script default dir", &BackendTests::include_run_script_default_dir_test },
-        { "run_script include dir multi", &BackendTests::include_run_script_include_dir_multi_test },
-        { "run_script include dir with parameters", &BackendTests::include_run_script_include_dir_with_params_test },
-        { "multiple search directories", &BackendTests::include_multi_search_dirs_test },
-        { "absolute path", &BackendTests::include_absolute_path_test },
-        { "error location in included file", &BackendTests::include_error_location_in_included_file_test },
-        { "error location after include", &BackendTests::include_error_location_after_include_test },
+        { "file cases", &CifaTests::include_file_cases_test },
+        { "missing file", &CifaTests::include_missing_file_test },
+        { "with parameters", &CifaTests::include_with_parameters_test },
+        { "run_script include dir", &CifaTests::include_run_script_include_dir_test },
+        { "run_script default dir", &CifaTests::include_run_script_default_dir_test },
+        { "run_script include dir multi", &CifaTests::include_run_script_include_dir_multi_test },
+        { "run_script include dir with parameters", &CifaTests::include_run_script_include_dir_with_params_test },
+        { "multiple search directories", &CifaTests::include_multi_search_dirs_test },
+        { "absolute path", &CifaTests::include_absolute_path_test },
+        { "error location in included file", &CifaTests::include_error_location_in_included_file_test },
+        { "error location after include", &CifaTests::include_error_location_after_include_test },
     };
 
     bool ok = true;
@@ -2712,9 +2707,6 @@ bool include_test()
 
 #undef Cifa
 };
-
-using DirectTests = BackendTests<DirectCifa>;
-using BytecodeTests = BackendTests<TestBytecode>;
 
 bool direct_source_map_test()
 {
@@ -2870,18 +2862,51 @@ bool diagnostic_position_test()
     return true;
 }
 
+bool bytecode_runtime_error_parity_test()
+{
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"return size(42);", "function 'size' requires a string, array, or map"},
+        {"return 1 / 0;", "division by zero"},
+        {"empty() {} return abs(empty());", "has no return value"},
+        {"value = 1; value.clear();", "clear"},
+        {"values = {1}; values.keys();", "keys"}
+    };
+
+    for (const auto& [script, expected] : cases)
+    {
+        Cifa ast;
+        CifaBytecode bytecode;
+        ast.set_output_error(false);
+        bytecode.set_output_error(false);
+        const auto ast_result = ast.run_script(script);
+        const auto bytecode_result = bytecode.run_script(script);
+        if (ast.has_error() || bytecode.has_error()
+            || ast_result.getSpecialType() != "Error"
+            || bytecode_result.getSpecialType() != "Error"
+            || !ast.has_runtime_error() || !bytecode.has_runtime_error()
+            || ast.get_runtime_error().find(expected) == std::string::npos
+            || bytecode.get_runtime_error().find(expected) == std::string::npos)
+        {
+            std::println(stderr, "Bytecode runtime parity failed for: {}\nAST: {}{}\nBytecode: {}{}",
+                script, ast.get_errors_str(), ast.get_runtime_error(),
+                bytecode.get_errors_str(), bytecode.get_runtime_error());
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char** argv)
 {
     configure_test_process();
     if (argc > 1 && std::string(argv[1]) == "--error-checks")
     {
-        DirectTests direct;
+        CifaTests direct;
         return direct.object_conversion_fallback_test() && direct.runtime_error_abort_test()
             && direct.object_vector_argument_error_test() && direct.script_function_return_check_test() ? 0 : 1;
     }
     int total = 0, ok = 0;
-    DirectTests direct;
-    BytecodeTests bytecode;
+    CifaTests direct;
     auto run_direct_test = [&total, &ok](std::string name, bool (*test)())
     {
         total++;
@@ -2896,121 +2921,17 @@ int main(int argc, char** argv)
         }
     };
 
-    auto run_common_test = [&total, &ok, &direct, &bytecode](std::string name, auto direct_test, auto bytecode_test)
+    auto run_test = [&total, &ok](std::string name, auto& test_object, auto test)
     {
         total++;
-        const bool direct_passed = (direct.*direct_test)();
-        const bool bytecode_passed = (bytecode.*bytecode_test)();
-        if (direct_passed && bytecode_passed)
-        {
-            ok++;
-            std::println("[PASS] {}. {} success", total, name);
-        }
-        else
-        {
-            std::println(stderr, "  backend results: Cifa={}, LuaVm={}", direct_passed, bytecode_passed);
-            std::println("[FAIL] {}. {} failed", total, name);
-        }
-    };
-    auto run_runtime_error_parity_test = [&total, &ok](std::string name, const std::string& script, const std::string& expected)
-    {
-        total++;
-        Cifa direct_backend;
-        TestBytecode bytecode_backend;
-        direct_backend.set_output_error(false);
-        bytecode_backend.set_output_error(false);
-        const auto direct_result = direct_backend.run_script(script);
-        const auto bytecode_result = bytecode_backend.run_script(script);
-        const bool failed = direct_result.getSpecialType() == "Error" && bytecode_result.getSpecialType() == "Error"
-            && direct_backend.has_runtime_error() && bytecode_backend.has_runtime_error()
-            && direct_backend.get_runtime_error().find(expected) != std::string::npos
-            && bytecode_backend.get_runtime_error().find(expected) != std::string::npos;
-        const auto direct_recovery = direct_backend.run_script("return 42;");
-        const auto bytecode_recovery = bytecode_backend.run_script("return 42;");
-        const bool recovered = !direct_backend.has_runtime_error() && !bytecode_backend.has_runtime_error()
-            && direct_recovery.isNumber() && bytecode_recovery.isNumber()
-            && direct_recovery.toInt() == 42 && bytecode_recovery.toInt() == 42;
-        if (failed && recovered)
+        if ((test_object.*test)())
         {
             ok++;
             std::println("[PASS] {}. {} success", total, name);
         }
         else std::println("[FAIL] {}. {} failed", total, name);
     };
-    auto run_backend_test = [&total, &ok](std::string name, auto& backend, auto test)
-    {
-        total++;
-        if ((backend.*test)())
-        {
-            ok++;
-            std::println("[PASS] {}. {} success", total, name);
-        }
-        else std::println("[FAIL] {}. {} failed", total, name);
-    };
-    #define RUN_COMMON(name) run_common_test(#name, &DirectTests::name, &BytecodeTests::name)
-    #define RUN_CIFA(name) run_backend_test("cifa_" #name, direct, &DirectTests::name)
-
-    std::println("[Common tests]");
-    RUN_COMMON(exit_function_test);
-    RUN_COMMON(builtin_math_function_test);
-    RUN_COMMON(builtin_type_function_test);
-    RUN_COMMON(range_for_test);
-    RUN_COMMON(goto_test);
-    RUN_COMMON(loop_math_test);
-    RUN_COMMON(loop_control_test);
-    RUN_COMMON(control_state_test);
-    RUN_COMMON(ternary_operator_test);
-    RUN_COMMON(logical_short_circuit_test);
-    RUN_COMMON(numeric_literal_radix_test);
-    RUN_COMMON(switch_case_test);
-    RUN_COMMON(recursion_test);
-    RUN_COMMON(script_void_function_test);
-    RUN_COMMON(script_function_return_check_test);
-    RUN_COMMON(script_function_argument_count_test);
-    RUN_COMMON(string_operation_test);
-    RUN_COMMON(string_compare_test);
-    RUN_COMMON(bitwise_operator_test);
-    RUN_COMMON(scope_shadowing_test);
-    RUN_COMMON(complex_math_priority_test);
-    RUN_COMMON(same_precedence_left_assoc_test);
-    RUN_COMMON(unary_minus_test);
-    RUN_COMMON(array_access_test);
-    RUN_COMMON(array_literal_assignment_test);
-    RUN_COMMON(size_of_array_test);
-    RUN_COMMON(register_vector_test);
-    RUN_COMMON(register_map_test);
-    RUN_COMMON(type_promotion_test);
-    RUN_COMMON(typed_numeric_storage_test);
-    RUN_COMMON(auto_type_inference_test);
-    RUN_COMMON(c_style_cast_test);
-    RUN_COMMON(integer_arithmetic_test);
-    RUN_COMMON(typed_function_conversion_test);
-    RUN_COMMON(typed_array_and_struct_test);
-    RUN_COMMON(typed_conversion_error_test);
-    RUN_COMMON(empty_statement_test);
-    RUN_COMMON(else_if_chain_test);
-    RUN_COMMON(multi_dimensional_array_test);
-    RUN_COMMON(compound_assignment_test);
-    RUN_COMMON(runtime_error_stack_test);
-    RUN_COMMON(uninitialized_variable_runtime_test);
-    RUN_COMMON(nested_execution_state_test);
-    RUN_COMMON(nested_static_error_source_test);
-    RUN_COMMON(mixed_array_literal_test);
-    RUN_COMMON(string_key_map_test);
-    RUN_COMMON(static_syntax_error_test);
-    RUN_COMMON(loop_and_recursion_execution_test);
-    RUN_COMMON(array_methods_test);
-    RUN_COMMON(array_function_value_semantics_test);
-    RUN_COMMON(map_methods_test);
-    RUN_COMMON(non_block_branch_declaration_test);
-    RUN_COMMON(sprintf_format_test);
-    RUN_COMMON(struct_test);
-    RUN_COMMON(include_test);
-    #undef RUN_COMMON
-
-    std::println("[Runtime error parity]");
-    run_runtime_error_parity_test("division by zero", "return 1 / 0;", "integer division by zero");
-    run_runtime_error_parity_test("uninitialized variable", "int value; return value + 1;", "has not been initialized");
+    #define RUN_CIFA(name) run_test(#name, direct, &CifaTests::name)
 
     std::println("[Cifa tests]");
     run_direct_test("diagnostic_position_test", diagnostic_position_test);
@@ -3019,8 +2940,64 @@ int main(int argc, char** argv)
     run_direct_test("global_definition_scope_test", global_definition_scope_test);
     run_direct_test("nested_script_global_scope_test", nested_script_global_scope_test);
     run_direct_test("nested_runtime_reporter_test", nested_runtime_reporter_test);
-    run_direct_test("object_conversion_fallback_test", +[]() { DirectTests direct; return direct.object_conversion_fallback_test(); });
-    run_direct_test("custom_operator_dispatch_test", +[]() { DirectTests direct; return direct.custom_operator_dispatch_test(); });
+    run_direct_test("object_conversion_fallback_test", +[]() { CifaTests direct; return direct.object_conversion_fallback_test(); });
+    run_direct_test("custom_operator_dispatch_test", +[]() { CifaTests direct; return direct.custom_operator_dispatch_test(); });
+    run_direct_test("bytecode_runtime_error_parity_test", bytecode_runtime_error_parity_test);
+    RUN_CIFA(exit_function_test);
+    RUN_CIFA(builtin_math_function_test);
+    RUN_CIFA(builtin_type_function_test);
+    RUN_CIFA(range_for_test);
+    RUN_CIFA(goto_test);
+    RUN_CIFA(loop_math_test);
+    RUN_CIFA(loop_control_test);
+    RUN_CIFA(control_state_test);
+    RUN_CIFA(ternary_operator_test);
+    RUN_CIFA(logical_short_circuit_test);
+    RUN_CIFA(numeric_literal_radix_test);
+    RUN_CIFA(switch_case_test);
+    RUN_CIFA(recursion_test);
+    RUN_CIFA(script_void_function_test);
+    RUN_CIFA(script_function_return_check_test);
+    RUN_CIFA(script_function_argument_count_test);
+    RUN_CIFA(string_operation_test);
+    RUN_CIFA(string_compare_test);
+    RUN_CIFA(bitwise_operator_test);
+    RUN_CIFA(scope_shadowing_test);
+    RUN_CIFA(complex_math_priority_test);
+    RUN_CIFA(same_precedence_left_assoc_test);
+    RUN_CIFA(unary_minus_test);
+    RUN_CIFA(array_access_test);
+    RUN_CIFA(array_literal_assignment_test);
+    RUN_CIFA(size_of_array_test);
+    RUN_CIFA(register_vector_test);
+    RUN_CIFA(register_map_test);
+    RUN_CIFA(type_promotion_test);
+    RUN_CIFA(typed_numeric_storage_test);
+    RUN_CIFA(auto_type_inference_test);
+    RUN_CIFA(c_style_cast_test);
+    RUN_CIFA(integer_arithmetic_test);
+    RUN_CIFA(typed_function_conversion_test);
+    RUN_CIFA(typed_array_and_struct_test);
+    RUN_CIFA(typed_conversion_error_test);
+    RUN_CIFA(empty_statement_test);
+    RUN_CIFA(else_if_chain_test);
+    RUN_CIFA(multi_dimensional_array_test);
+    RUN_CIFA(compound_assignment_test);
+    RUN_CIFA(runtime_error_stack_test);
+    RUN_CIFA(uninitialized_variable_runtime_test);
+    RUN_CIFA(nested_execution_state_test);
+    RUN_CIFA(nested_static_error_source_test);
+    RUN_CIFA(mixed_array_literal_test);
+    RUN_CIFA(string_key_map_test);
+    RUN_CIFA(static_syntax_error_test);
+    RUN_CIFA(loop_and_recursion_execution_test);
+    RUN_CIFA(array_methods_test);
+    RUN_CIFA(array_function_value_semantics_test);
+    RUN_CIFA(map_methods_test);
+    RUN_CIFA(non_block_branch_declaration_test);
+    RUN_CIFA(sprintf_format_test);
+    RUN_CIFA(struct_test);
+    RUN_CIFA(include_test);
     RUN_CIFA(register_function_test);
     RUN_CIFA(register_function_template_test);
     RUN_CIFA(registration_name_validation_test);

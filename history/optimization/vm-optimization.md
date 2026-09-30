@@ -55,6 +55,184 @@ LTO binary 完整回归为 `Passed 78 out of 78 tests.`，PI 结果为 502 字�
 21 次样本中位数为：PI `8.5241 ms`、increment `1.3991 ms`、addloop `2.7131 ms`、calls `8.3113 ms`、
 strings `7.3091 ms`、arrayloop `0.0051 ms`。与普通 Clang high 的同批基线相比没有稳定收益，部分 workload
 变慢，因此保留 LTO 构建 preset 作为可复现实验配置，但不将 LTO 作为默认性能优化。
+#### 显式整数 PI 的类型推导修复与编译器对照（2026-09-30）
+
+本轮首先修复了显式类型脚本 `cifa/calc-pi.c` 的正确性问题。此前动态脚本
+`cifa/calc-pi-dynamic.c` 可以得到完整 PI，但显式整数脚本只返回 `"3."`；该结果不能作为
+性能数据。根因是 Lua backend 的编译期 `expression_kind()` 没有识别 `size()` 的整数返回类型，
+也没有把 `vector<T>` 参数及其索引表达式传播为元素类型。于是 `int len = size(a)` 和
+`int val = a[i]` 被当成未知类型 RHS，进入未知值到 `int` 的保守转换路径，非零值可能被压成 `1`。
+
+修复内容保持脚本语义不变：
+
+- `size(...)` 在 bytecode lowering 中固定推导为整数；
+- 函数参数若为 `vector<T>`，在函数编译上下文登记其元素类型；
+- `vector<T>[i]` 的表达式类型由 `T` 推导；
+- 动态值、非数值元素和无法证明的表达式仍走原有通用转换路径；
+- PI 回归同时覆盖动态脚本和显式整数脚本，均要求 502 字符、前缀和 FNV-1a32
+	`0x1d4b4c2f`。
+
+修复后 Debug `lua_backend` 回归通过。Release benchmark 使用 31 个独立、预先编译的 VM 样本，
+每个样本只计 `run()` 执行时间，不把重复 VM 状态复用或编译时间混入执行中位数。结果如下：
+
+| 编译器 | 脚本 | compile_ms | median execute_ms | min--max execute_ms | 校验 |
+| --- | --- | ---: | ---: | ---: | --- |
+| MSVC 2026 x64 Release | `calc-pi.c` | `1.1694` | `6.9925` | `6.8356--7.6190` | 502/FNV 正确 |
+| MSVC 2026 x64 Release | `calc-pi-dynamic.c` | `0.9873` | `12.4013` | `12.0633--13.1208` | 502/FNV 正确 |
+| Clang 22.1.3 clang-cl Release | `calc-pi.c` | `0.9324` | `5.7656` | `5.6525--6.0766` | 502/FNV 正确 |
+| Clang 22.1.3 clang-cl Release | `calc-pi-dynamic.c` | `0.8498` | `10.3176` | `10.0287--11.2698` | 502/FNV 正确 |
+
+结论：显式整数类型不仅恢复了正确性，也使 PI 路径避开大量动态数值转换；Clang 整数版本的中位数
+已接近约 `5 ms` 目标，较同编译器动态版本快约 `44%`。MSVC 整数版本仍比 Clang 整数版本慢约
+`21%`，因此后续性能对照应同时报告脚本类型和编译器，不能用动态脚本结果代表整数脚本性能。
+这组结果是当前有效基线，不把此前只返回 `"3."` 的整数 benchmark 纳入历史性能比较。
+
+#### Lua 风格寄存器 VM 与 TValue 布局基线（2026-09-30）
+
+当前 backend 已经不是在执行阶段逐个解释原始 Cifa AST，而是先把 AST lowering 为 Lua 5.4 风格的
+寄存器字节码，再由私有 `LuaVm` 执行。执行器采用 Lua 风格的 `TValue`、连续寄存器栈、`CallInfo`、
+`Proto/RuntimeProto`、closure、table array/hash 和 `CLOSURE/CALL/RETURN` 协议；脚本函数在编译期
+生成 child `Proto`，root code 用 `CLOSURE + SETTABUP` 安装到全局表，宿主函数在 VM 启动时包装为
+C closure。这个架构对齐 Lua 的目的，是让热路径直接围绕寄存器、tagged value 和 table 操作运行，
+而不是在每条指令中回到 Cifa 的 `Object`/AST 抽象层。
+
+`TValue` 的关键收紧应精确描述为：payload 使用一个 8 字节 union，tag 使用 1 字节 `unsigned char`，
+因此逻辑字段尺寸是 `8 + 1 = 9` 字节。当前 MSVC/Clang C++ ABI 仍会按 union 对齐要求将结构体实际
+对齐为 16 字节，源码中的硬约束为：
+
+```cpp
+static_assert(sizeof(TValue) == 16);
+```
+
+所以“16 字节变为 9 字节”是值表示的逻辑字段收紧和 tag 压缩，不应误写成当前 `TValue` 数组元素的
+物理 `sizeof` 已经是 9 字节。直接使用 packed struct 或改变数组对齐会影响 `TValue`、`Node`、栈复制、
+closure/upvalue 和 table layout，必须单独设计 byte-overlay 并以完整回归和 PI A/B 验证，不能只凭字段
+总和修改生产布局。
+
+这项工作是当前最重要的性能跃迁，历史数据应这样解读：早期私有 VM 的 PI 中位数约为
+`15.3--16.2 ms`，单独将 `luaV_execute` 热循环改为按 case 按需解码操作数，只降到约 `15.66 ms`；
+真正的大幅下降来自后续的 TValue/Node 热布局对齐。私有 TValue 的 tag 从 4 字节收紧为 Lua 风格的
+1 字节，并把 `MOVE`、`LOADK`、table get/set、call/return 等热复制统一为只复制 payload+tag 的
+`setobj` 路径。Lua 风格约 24B 的 `Node` union overlay 也曾作为对照尝试，但因 C++ union 活动成员
+和默认 `TValue` 整体赋值引发访问冲突，没有保留；当前安全实现仍使用约 32B 的 Node。最终资源
+回收版本为私有 Release PI 30 样本中位数 `8.1367 ms`，同一 `.luac` 的官方 Lua 5.4.9 C++ runner
+为 `8.2829 ms`，两者均为 length=502、FNV-1a32=`1d4b4c2f`。因此“16 降到 9”应记录为
+TValue tag/layout 和热复制协议的主要收益；Node 24B overlay 是失败实验，不能归因于某一个普通
+指针改成对象。
+
+#### 其他裸指针对象化审核（2026-09-30）
+
+本轮对 `CifaBytecode.cpp` 中的 VM 指针按所有权、地址稳定性和热访问频率审核。结论是：当前没有一个
+适合直接替换并预期获得稳定性能收益的候选，源码保持不变。
+
+| 对象/字段 | 审核结论 | 原因 |
+| --- | --- | --- |
+| `RuntimeProto::code/k/p/upvalues` | 不改 | `code`、常量表和 child 指针数组直接位于取指/常量/closure 热路径；上一次 `unique_ptr<T[]>` 实验已在 MSVC 和 Clang 的整数 PI 上回退。 |
+| `LuaVm::stack_` | 不改 | `StkId`、`UpVal::v.p` 和 `CallInfo` 都可能保存栈内地址；`vector` 扩容会使这些地址失效，若修复则需要全量指针重定位并增加复杂度。 |
+| `Table::array/node` | 不改 | 这是 Lua table 的连续 array/hash 存储；rehash 期间大量临时 slot/node 指针依赖稳定地址，`vector` 不能消除扩容和指针失效问题，也可能改变 Node 布局。 |
+| `CifaLuaString`、`string_hash_` | 不改 | 字符串对象是 flexible-array 风格的单块分配，`contents` 紧跟 header；哈希桶和 `hnext` 是热查找链，普通 C++ 对象化会增加布局或访问成本。 |
+| `Table* tables_`、`Closure* closures_`、`UpVal*` 链表 | 不改 | 这些是 Lua 风格 intrusive free/allocation lists；改成 owning container 只能改变所有权表达，不能去掉对象图指针，且可能增加二次间接访问。 |
+| `CallInfo*` | 暂不改 | 调用帧有 `previous/next`、当前 `ci` 和执行期间地址引用。可研究专用 frame arena，但普通 `vector<CallInfo>` 会引入重分配和地址修复；当前 PI 尚未证明它是主热点。 |
+| `no_values_`、`Program::children` | 已是 RAII | 这两处属于冷态所有权，使用 `unique_ptr` 合理；它们不应被拿来解释热路径性能。冻结后的 child `RuntimeProto*` 仍只是非拥有索引。 |
+| `std::vector<CifaLuaString*>`、`std::vector<UpVal*>`、`host_functions_` | 不以性能为目的改写 | 可改成 `unique_ptr` 容器改善所有权表达，但会改变遍历/析构代码生成；`host_functions_` 还必须保持地址稳定，因为 C closure 保存其元素地址。只有单独的生命周期重构需求才值得做。 |
+
+审核原则：可以把冷态“谁负责释放”改成 RAII，但不能把 Lua VM 的连续存储、intrusive 链表、栈地址或
+热表 slot 机械改成值对象/`vector`。对于本 VM，TValue/Node 的布局和 `setobj` 复制协议比“裸指针是否
+看起来不现代”更重要；后续任何对象化实验都必须先证明不改变 `sizeof`、地址稳定性、热访问间接层数，
+再通过 MSVC/Clang 交错 A/B 和完整回归。
+
+#### CifaBytecode 的 Cifa 引用与接口历史审计（2026-09-30）
+
+当前 `CifaBytecode` 已经继承 `Cifa`；`CifaBytecode.cpp` 中出现的 `Cifa` 引用有两类，不能混为一谈：
+
+- `FunctionCompiler(const Cifa& owner, ...)` 只在编译期读取诊断源码帧、struct 定义和注册全局名；
+- `LuaVm::run(RuntimeProto&, Cifa&)`、`sync_globals`、`import_globals` 和 `HostFunction::owner` 位于
+	宿主边界，负责全局变量同步、注册函数调用、runtime error 和 `exit()` 传播。
+
+第一类可以逐步收窄为 bytecode 编译视图，第二类仍必须保留 Cifa 实例引用，因为它代表运行期宿主状态。
+不能为了消灭一个 `Cifa&` 把宿主全局和 callback 状态复制进 VM；那会恢复双状态缓存并破坏嵌套执行、宿主
+替换和重复运行语义。
+
+Git 历史的增量如下：
+
+| 提交 | 主要变化 | 与当前接口的关系 |
+| --- | --- | --- |
+| `e3efbd5` | 重新按 Lua VM 实现，`CifaBytecode.cpp` 大幅重写；新增 `Cifa` friend、编译 AST/函数/注册表访问，以及 runtime 宿主同步路径 | 引入了当前 `Cifa` 引用的整体边界 |
+| `b54ca8b` | 整数路径优化，主要只改 `CifaBytecode.cpp`，未新增这组 Cifa accessor | 不是动态 PI 10 ms 回退的接口来源 |
+| `551f61f` | “修完语法”，修改 `Cifa.cpp`、`Cifa.h`、`CifaBytecode.cpp`、测试和 CMake；新增约 1411 行、删除约 319 行 | 增加了完整语法/错误/类型兼容逻辑，但没有新建另一套 VM 宿主接口 |
+| `53177f9`、`8b6bfdd` | 类型推导、`vector<int>` 和专用 lowering，分别大幅扩展 Cifa 与 bytecode compiler | 主要改变编译期类型传播和 opcode 选择，不是 Cifa 引用本身 |
+
+因此“减少接口”的安全方向不是删除运行期 `Cifa&`，而是让编译器核心成为
+`CifaBytecode` 的实现细节：`FunctionCompiler` 直接持有 `CifaBytecode` owner，
+`compile_lua_program` 是 `CifaBytecode` 的私有成员，纯 Lua 协议类型和辅助函数放在 `cifa`
+命名空间中，不再通过 `BytecodeCompileView` 转运编译状态。编译入口直接读取继承来的
+`compilation_root`、`compilation_functions`、`compilation_struct_defs` 和注册表；运行期
+`LuaVm` 仍通过 `Cifa` 引用进行宿主回调、全局同步和错误传播。`Proto -> RuntimeProto` 仍是
+必要的编译期布局冻结，不是重复的可变宿主缓存；脚本函数表合并到本次编译快照仍是独立的
+编译期操作。这个边界避免了复制宿主状态，也没有改变 VM 热循环的数据布局。
+
+接口重构后 Debug `lua_backend`、`full_lua_backend` 均通过；Clang high-inline 动态 PI 31 样本为
+`9.4044 ms`，502 字符、FNV-1a32=`1d4b4c2f`，与重构前约 `9.12 ms` 属于同一性能档位，没有明显
+回退。该数值不单独宣称优化收益，因为 benchmark 运行环境存在正常波动。
+
+#### 动态 PI 的 8/9/10 ms 口径复核（2026-09-30）
+
+历史中的动态 PI 约 `8 ms`、`9 ms` 和当前约 `10 ms` 并不是同一套编译口径：
+
+- 当前源码、独立 `lua_backend_benchmark`、普通 Clang `/O2`：动态 PI 31 样本中位数
+	`10.217 ms`，502 字符、FNV-1a32=`1d4b4c2f`；
+- 同一当前源码、同一 benchmark、同一动态脚本，只把 Clang 内联阈值设为 `10000`：
+	`9.1216 ms`；
+- 同一 high-inline 口径的显式整数 PI：`5.2348 ms`；
+- 9 月 26 日文档中的 `8.4746 ms` 来自旧的通用 `cifa_benchmark`、Clang high、pool allocator、
+	`--vm-only` 工作树，不是当前独立 Lua backend benchmark；
+- `b54ca8b` 甚至还没有 `benchmarks/lua_backend_benchmark.cpp`，所以不能用它证明“语法完成前的
+	同一动态 Lua VM 为 8 ms”。
+
+当前 Lua backend 的 opcode profile 显示动态 PI 的主要成本仍在通用 VM 热路径：约 2.2M 次 `MOVE`、
+0.34M 次 `LOADI`、0.22M 次 `GETTABLE`、0.23M 次 `SETTABLE`，以及大量通用 `ADD/SUB/MUL/DIV/MOD`。
+这与 Cifa accessor 的编译期读取无关。要稳定回到约 `8 ms`，优先级应是：
+
+1. 保持当前 high-inline/PGO 的可复现构建口径；
+2. 针对动态脚本中运行时已经证明为整数的数组元素和算术链，设计不改变错误语义的动态整数专用 opcode；
+3. 继续减少 `MOVE`、临时寄存器和 `TValue` 热复制，而不是删除宿主状态引用；
+4. 每项优化都用同一个独立 benchmark、31 样本、502/FNV 校验，并同时跑普通 Clang、high-inline 和 MSVC。
+
+结论：当前已能在 high-inline 下回到约 `9.1 ms`，历史 `8 ms` 档位更可能需要 PGO 或进一步消除
+动态算术/临时值成本；现有证据不足以把 10 ms 归因于“修完语法”或 Cifa 接口层。
+
+本轮还整理了继承边界：`CifaBytecode` 本来已经是 `public Cifa`，但 Lua backend 读取父类编译状态和
+注册表时主要依赖 accessor。已将 `Cifa::registered_types` 移入 `protected`，为后续把 backend 专用的
+状态读取集中到继承实现预留空间；暂时保留现有 accessor，避免匿名命名空间中的 `FunctionCompiler`
+和其他辅助代码发生大范围耦合。该接口整理不改变 VM 对象布局，也未引入新的 public API。
+
+指针对象化 A/B：仅把 `LuaVm::string_hash_` 的桶数组所有权改为 `std::unique_ptr<CifaLuaString*[]>`，
+保持桶元素、`CifaLuaString::hnext` 链表和所有热访问表达式不变。Debug `lua_backend` 与
+`full_lua_backend` 均通过，两个 PI 的 length/FNV 均正确；但 Clang Release 31 样本中位数为整数
+`5.9567 ms`、动态 `10.5367 ms`，相对当前约 `5.9455 ms`、`10.1648 ms` 的基线，动态路径约回退
+`3.6%`，整数路径也没有收益。因此该对象化实验已撤销，当前仍使用显式 `new[]/delete[]`，而不是把
+“更现代的所有权表达”误判成性能优化。
+
+#### C++ 容器/RAII 改写实验：冷态所有权也必须满足性能门槛（2026-09-30）
+
+针对 bytecode 中较明显的 C 风格所有权，曾把 `RuntimeProto` 的四组冻结数组：`code`、`k`、`p`、
+`upvalues`，从裸指针加 `new[]/delete[]` 改为 `std::unique_ptr<T[]>`。实验保持连续数组和解释器中的
+裸指针式取指访问不变，只改变冷态对象的释放责任，理论上属于适合 RAII 的低风险改写。
+
+实验结果：两个 PI 脚本和完整 Debug 回归均正确，但 Release 执行存在跨编译器回退。三轮 MSVC
+Release 结果中，显式整数 PI 约为 `7.14--7.22 ms`，动态 PI 约为 `12.47--12.83 ms`，均高于改写前
+的有效基线 `6.9925 ms` 和 `12.4013 ms`；Clang 整数 PI 也从此前约 `5.7656 ms` 上升到约 `5.9455 ms`。
+Clang 动态 PI 单批约为 `10.1648 ms`，不能抵消其他路径的回退。因此该 RAII 改写已撤回。
+
+结论不是“不能使用 C++ 容器或 RAII”，而是 bytecode VM 中应按热/冷边界选择：冷态诊断表、编译期临时
+所有权和非取指资源可以优先采用 RAII；`TValue`、连续寄存器栈、table array/hash、closure/upvalue
+及 `RuntimeProto` 热访问数组则必须先证明不改变布局、间接层数和代码生成。任何这类改写都必须同时满足：
+
+- Debug 私有 VM 回归和完整差分测试通过；
+- 整数 PI、动态 PI 的结果长度与 FNV 校验通过；
+- MSVC Release 和 Clang Release 均无稳定性能回退；
+- 只有在交错 A/B 样本确认后，才能把改写记录为优化，而不是仅记录为代码风格变化。
+
 # VM 优化记录
 
 ## 性能优化历史摘要：约 300ms 到当前约 10ms

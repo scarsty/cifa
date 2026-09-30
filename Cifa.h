@@ -549,6 +549,7 @@ private:
         std::type_index identity;
         std::function<Object(const Object&)> convert;
     };
+protected:
     std::unordered_map<std::string, RegisteredType> registered_types;
     std::unordered_map<std::type_index, std::string> type_names;
     //内置的运算符表示列表，用户可扩展运算符时会用到，注意这些运算符在语法分析阶段会被转换为对应的符号（如and转换为&&），因此用户扩展时也应使用符号形式的运算符
@@ -566,6 +567,12 @@ private:
     std::unordered_map<std::string, void*> user_data;
     std::unordered_map<std::string, Object> global_variables;    //C++ 注册变量与脚本顶层变量共用的实例全局表
     std::vector<std::string> include_dirs;                  //#include 搜索目录
+    CalUnit compilation_root;
+    std::unordered_map<std::string, FunctionOverloads> compilation_functions;
+    std::unordered_map<std::string, std::vector<StructField>> compilation_struct_defs;
+    bool compiled = false;
+
+private:
 
     struct ErrorMessage
     {
@@ -642,15 +649,11 @@ private:
     };
 
     std::deque<ExecutionContext> execution_contexts;
-    CalUnit compilation_root;
-    std::unordered_map<std::string, FunctionOverloads> compilation_functions;
-    std::unordered_map<std::string, std::vector<StructField>> compilation_struct_defs;
     std::vector<SourceLineInfo> compilation_source_line_infos;
     const std::unordered_map<std::string, FunctionOverloads>* compile_visible_functions = nullptr;
     const std::unordered_map<std::string, std::vector<StructField>>* compile_visible_struct_defs = nullptr;
     const std::unordered_set<std::string>* compile_visible_host_functions = nullptr;
     bool compiling = false;
-    bool compiled = false;
     bool compile_failed = false;
     ErrorSet errors;
     std::vector<std::string> runtime_error_call_stack;
@@ -754,19 +757,8 @@ public:
 
     std::string get_runtime_error() const;
     bool has_runtime_error() const;
-    const CalUnit* compiled_ast() const { return compiled ? &compilation_root : nullptr; }
-    const std::unordered_map<std::string, FunctionOverloads>* compiled_functions() const
-    {
-        return compiled ? &compilation_functions : nullptr;
-    }
     const std::unordered_map<std::string, func_type>& registered_functions() const { return functions; }
     const std::unordered_map<std::string, Object>& registered_globals() const { return global_variables; }
-    const std::unordered_map<std::string, FunctionOverloads>& registered_script_functions() const { return functions2; }
-    const std::vector<StructField>* compiled_struct_definition(const std::string& name) const
-    {
-        const auto found = compilation_struct_defs.find(name);
-        return found == compilation_struct_defs.end() ? nullptr : &found->second;
-    }
     std::string compiled_source_frame(const CalUnit& location) const;
     void update_registered_global(const std::string& name, Object value) { global_variables[name] = std::move(value); }
     void persist_compiled_script_functions();

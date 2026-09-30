@@ -9,6 +9,8 @@
 
 namespace cifa {
 
+struct Proto;
+
 // Compiles Cifa's checked AST directly to a Lua 5.4 binary chunk and executes
 // it using Lua's register VM.
 class CifaBytecode : public Cifa {
@@ -33,8 +35,11 @@ public:
     const std::vector<std::uint8_t>& emitted_chunk() const { return chunk_; }
 
 private:
+    class FunctionCompiler;
+
     bool emit_chunk();
     Object execute_chunk();
+    std::shared_ptr<Proto> compile_lua_program(std::vector<std::uint8_t>& chunk, std::string& error) const;
 
     bool compiled_ = false;
     std::string translation_error_;
