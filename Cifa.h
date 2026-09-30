@@ -759,6 +759,18 @@ public:
     {
         return compiled ? &compilation_functions : nullptr;
     }
+    const std::unordered_map<std::string, func_type>& registered_functions() const { return functions; }
+    const std::unordered_map<std::string, Object>& registered_globals() const { return global_variables; }
+    const std::unordered_map<std::string, FunctionOverloads>& registered_script_functions() const { return functions2; }
+    const std::vector<StructField>* compiled_struct_definition(const std::string& name) const
+    {
+        const auto found = compilation_struct_defs.find(name);
+        return found == compilation_struct_defs.end() ? nullptr : &found->second;
+    }
+    std::string compiled_source_frame(const CalUnit& location) const;
+    void update_registered_global(const std::string& name, Object value) { global_variables[name] = std::move(value); }
+    void persist_compiled_script_functions();
+    void persist_compiled_struct_definitions();
 
     //用户可扩展的运算符函数列表
     template <typename T>

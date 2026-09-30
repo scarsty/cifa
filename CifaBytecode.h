@@ -29,7 +29,7 @@ public:
     const std::string& get_translation_error() const { return translation_error_; }
     std::string get_runtime_error() const { return runtime_error_; }
     bool has_runtime_error() const { return !runtime_error_.empty(); }
-    bool is_exit_requested() const { return false; }
+    bool is_exit_requested() const { return Cifa::is_exit_requested(); }
     const std::vector<std::uint8_t>& emitted_chunk() const { return chunk_; }
 
 private:

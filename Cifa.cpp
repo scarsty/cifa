@@ -4141,8 +4141,21 @@ Object Cifa::make_error_result() const
     return Object("", "Error");
 }
 
+std::string Cifa::compiled_source_frame(const CalUnit& location) const
+{
+    return format_runtime_frame(location, compilation_source_line_infos);
+}
+
+void Cifa::persist_compiled_script_functions()
+{
+    for (const auto& [name, overloads] : compilation_functions)
+        for (const auto& [arity, function] : overloads) functions2[name][arity] = function;
+}
+
 bool Cifa::compile_script_internal(std::string script)
 {
+    compile_visible_functions = &functions2;
+    RaiiGuard visible_functions_guard([this]() { compile_visible_functions = nullptr; });
     run_compilation([this, script = std::move(script)]() mutable
         {
             std::set<std::string> visited;
@@ -4160,6 +4173,8 @@ Object Cifa::run_file(const std::string& filename)
 
 bool Cifa::compile_file_internal(const std::string& filename)
 {
+    compile_visible_functions = &functions2;
+    RaiiGuard visible_functions_guard([this]() { compile_visible_functions = nullptr; });
     run_compilation([this, filename]()
         {
             std::string str;
@@ -4307,6 +4322,14 @@ void Cifa::compile_pipeline(std::string str)
     if (output_error)
     {
         print_errors();
+    }
+}
+
+void Cifa::persist_compiled_struct_definitions()
+{
+    for (const auto& [name, fields] : compilation_struct_defs)
+    {
+        struct_defs[name] = fields;
     }
 }
 

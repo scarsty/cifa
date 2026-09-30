@@ -75,5 +75,10 @@ target_link_libraries(cifa_lua_backend_test PRIVATE cifa)
 add_test(NAME lua_backend COMMAND cifa_lua_backend_test)
 set_tests_properties(lua_backend PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(cifa_full_lua_backend_test unit_test/cifa_unit_test.cpp)
+target_link_libraries(cifa_full_lua_backend_test PRIVATE cifa)
+add_test(NAME full_lua_backend COMMAND cifa_full_lua_backend_test)
+set_tests_properties(full_lua_backend PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_executable(cifa_lua_backend_benchmark benchmarks/lua_backend_benchmark.cpp)
 target_link_libraries(cifa_lua_backend_benchmark PRIVATE cifa)
