@@ -719,7 +719,9 @@ private:
             Constant right_constant{};
             const bool right_is_constant = node.v[1].type == CalUnitType::Constant
                 && number(node.v[1].str, right_constant);
+            const NumericKind left_kind = expression_kind(node.v[0]);
             const bool has_right_constant = !prefer_general_arithmetic && right_is_constant
+                && (left_kind == NumericKind::Integer || operation == DIV)
                 && (operation == ADD || operation == SUB || operation == MUL || operation == MOD
                     || operation == DIV || operation == IDIV);
             const unsigned right = has_right_constant ? 0 : emit_expression(node.v[1], error);
@@ -1758,6 +1760,7 @@ public:
     }
     const std::string& error() const { return error_; }
 private:
+    friend class CifaBytecode;
     friend struct Program;
     CifaLuaState state_;
     std::string error_;
@@ -3003,15 +3006,6 @@ struct Program {
     void initialize(const Proto& source) { freeze(source, root); }
 };
 
-Object object_from_value(const TValue& value)
-{
-    if (ttisinteger(value)) return Object(static_cast<std::int64_t>(value.value_.i));
-    if (ttisfloat(value)) return Object(value.value_.n);
-    if (value.tt_ == LUA_VTRUE || value.tt_ == LUA_VFALSE) return Object(static_cast<bool>(value.value_.b));
-    if (ttisstring(value)) return Object(string_copy(value.value_.str));
-    return {};
-}
-
 bool CifaBytecode::compile_script(std::string script)
 {
     compiled_ = false;
@@ -3081,7 +3075,7 @@ Object CifaBytecode::execute_chunk()
             ? "<unknown>" : info->source->debug_name;
         return Object::make_no_value(name, info == nullptr ? std::string{} : info->call_frame);
     }
-    return runtime_error_.empty() ? object_from_value(result) : Object("", "Error");
+    return runtime_error_.empty() ? program->vm.object_from_value(result) : Object("", "Error");
 }
 
 } // namespace cifa

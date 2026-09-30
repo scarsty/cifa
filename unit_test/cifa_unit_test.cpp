@@ -2896,6 +2896,155 @@ bool bytecode_runtime_error_parity_test()
     return true;
 }
 
+static bool bytecode_values_equal(const Object& left, const Object& right)
+{
+    if (left.getSpecialType() != right.getSpecialType()) return false;
+    if (!left.hasValue() || !right.hasValue()) return left.hasValue() == right.hasValue();
+    if (left.isNumber() && right.isNumber()) return left.toDouble() == right.toDouble();
+    if (left.isType<bool>() && right.isType<bool>()) return left.toBool() == right.toBool();
+    if (left.isType<std::string>() && right.isType<std::string>()) return left.toString() == right.toString();
+    if (left.isType<ObjectVector>() && right.isType<ObjectVector>())
+    {
+        const auto& left_values = left.ref<ObjectVector>();
+        const auto& right_values = right.ref<ObjectVector>();
+        if (left_values.size() != right_values.size()) return false;
+        for (std::size_t index = 0; index < left_values.size(); ++index)
+            if (!bytecode_values_equal(left_values[index], right_values[index])) return false;
+        return true;
+    }
+    if (left.isType<ObjectMap>() && right.isType<ObjectMap>())
+    {
+        const auto& left_values = left.ref<ObjectMap>();
+        const auto& right_values = right.ref<ObjectMap>();
+        if (left_values.size() != right_values.size()) return false;
+        auto left_item = left_values.begin();
+        auto right_item = right_values.begin();
+        for (; left_item != left_values.end(); ++left_item, ++right_item)
+            if (left_item->first != right_item->first || !bytecode_values_equal(left_item->second, right_item->second)) return false;
+        return true;
+    }
+    return left.getType() == right.getType();
+}
+
+static std::string bytecode_value_summary(const Object& value)
+{
+    if (!value.hasValue()) return "<empty>";
+    if (value.isInteger()) return std::format("int:{}", value.toInt64());
+    if (value.isType<double>()) return std::format("double:{}", value.toDouble());
+    if (value.isType<bool>()) return std::format("bool:{}", value.toBool());
+    if (value.isType<std::string>()) return std::format("string:{}", value.toString());
+    if (value.getSpecialType() == "NoValue") return "NoValue";
+    if (value.isType<ObjectVector>()) return std::format("array(size={})", value.ref<ObjectVector>().size());
+    if (value.isType<ObjectMap>()) return std::format("map(size={})", value.ref<ObjectMap>().size());
+    return value.getType().name();
+}
+
+bool bytecode_result_parity_test()
+{
+    const std::vector<std::string> scripts = {
+        "return 1 + 2 * 3;",
+        "int total = 0; for (int i = 1; i <= 5; i++) total += i; return total;",
+        "values = {1, 2}; values.push_back(3); values[0] = 7; return values;",
+        "values = {1, 2, 3}; values.erase(1); return values;",
+        "items = {}; items[\"alpha\"] = 1; items[\"beta\"] = 2; return items;",
+        "text = \"cifa\"; return text + \" bytecode\";",
+        "return max(3, 8) + min(4, 2);",
+        "double_value(value) { return value * 2; } return double_value(3.5);",
+        "empty() {} return type(empty());"
+    };
+
+    for (const auto& script : scripts)
+    {
+        Cifa ast;
+        CifaBytecode bytecode;
+        ast.set_output_error(false);
+        bytecode.set_output_error(false);
+        const Object ast_result = ast.run_script(script);
+        const Object bytecode_result = bytecode.run_script(script);
+        if (ast.has_error() || bytecode.has_error() || ast.has_runtime_error() || bytecode.has_runtime_error()
+            || !bytecode_values_equal(ast_result, bytecode_result))
+        {
+            std::println(stderr, "Bytecode result parity failed for: {}\nAST: {} errors={}{}\nBytecode: {} errors={}{}",
+                script, bytecode_value_summary(ast_result), ast.get_errors_str(), ast.get_runtime_error(),
+                bytecode_value_summary(bytecode_result), bytecode.get_errors_str(), bytecode.get_runtime_error());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool bytecode_state_parity_test()
+{
+    Cifa ast;
+    CifaBytecode bytecode;
+    ast.set_output_error(false);
+    bytecode.set_output_error(false);
+    ast.register_parameter("value", 10);
+    bytecode.register_parameter("value", 10);
+    const auto ast_first = ast.run_script("value += 5; return value;");
+    const auto bytecode_first = bytecode.run_script("value += 5; return value;");
+    const auto ast_second = ast.run_script("value *= 2; return value;");
+    const auto bytecode_second = bytecode.run_script("value *= 2; return value;");
+    return !ast.has_error() && !bytecode.has_error()
+        && !ast.has_runtime_error() && !bytecode.has_runtime_error()
+        && bytecode_values_equal(ast_first, bytecode_first)
+        && bytecode_values_equal(ast_second, bytecode_second)
+        && ast_second.toInt64() == 30 && bytecode_second.toInt64() == 30;
+}
+
+bool bytecode_host_boundary_parity_test()
+{
+    const auto run = [](Cifa& interpreter)
+    {
+        interpreter.set_output_error(false);
+        interpreter.register_parameter("seed", 4.0);
+        interpreter.register_function("square", template_square);
+        const auto result = interpreter.run_script(
+            "shared = seed; run_string(\"shared += 1; return shared;\"); return square(shared);");
+        if (interpreter.has_error() || interpreter.has_runtime_error() || !result.isNumber()) return result;
+        return result;
+    };
+
+    Cifa ast;
+    CifaBytecode bytecode;
+    const auto ast_result = run(ast);
+    const auto bytecode_result = run(bytecode);
+    if (!bytecode_values_equal(ast_result, bytecode_result)
+        || !ast_result.isNumber() || ast_result.toDouble() != 25.0
+        || ast.has_error() || bytecode.has_error()
+        || ast.has_runtime_error() || bytecode.has_runtime_error())
+    {
+        std::println(stderr, "Bytecode host boundary parity failed: AST={} Bytecode={} AST errors={}{} Bytecode errors={}{}",
+            bytecode_value_summary(ast_result), bytecode_value_summary(bytecode_result),
+            ast.get_errors_str(), ast.get_runtime_error(), bytecode.get_errors_str(), bytecode.get_runtime_error());
+        return false;
+    }
+
+    const auto run_exit = [](Cifa& interpreter)
+    {
+        interpreter.set_output_error(false);
+        interpreter.run_script("value = 1; exit(); value = 2;");
+        if (interpreter.has_error() || interpreter.has_runtime_error())
+        {
+            std::println(stderr, "Exit setup failed: errors={}{} exit={}",
+                interpreter.get_errors_str(), interpreter.get_runtime_error(), interpreter.is_exit_requested());
+            return false;
+        }
+        const auto result = interpreter.run_script("return value;");
+        const bool ok = !interpreter.has_error() && !interpreter.has_runtime_error()
+            && result.isNumber() && result.toInt() == 1;
+        if (!ok)
+            std::println(stderr, "Exit follow-up failed: result={} errors={}{} exit={}",
+                bytecode_value_summary(result), interpreter.get_errors_str(), interpreter.get_runtime_error(), interpreter.is_exit_requested());
+        return ok;
+    };
+    Cifa ast_exit;
+    CifaBytecode bytecode_exit;
+    const bool ast_exit_ok = run_exit(ast_exit);
+    const bool bytecode_exit_ok = run_exit(bytecode_exit);
+    return ast_exit_ok && bytecode_exit_ok;
+}
+
 int main(int argc, char** argv)
 {
     configure_test_process();
@@ -2943,6 +3092,9 @@ int main(int argc, char** argv)
     run_direct_test("object_conversion_fallback_test", +[]() { CifaTests direct; return direct.object_conversion_fallback_test(); });
     run_direct_test("custom_operator_dispatch_test", +[]() { CifaTests direct; return direct.custom_operator_dispatch_test(); });
     run_direct_test("bytecode_runtime_error_parity_test", bytecode_runtime_error_parity_test);
+    run_direct_test("bytecode_result_parity_test", bytecode_result_parity_test);
+    run_direct_test("bytecode_state_parity_test", bytecode_state_parity_test);
+    run_direct_test("bytecode_host_boundary_parity_test", bytecode_host_boundary_parity_test);
     RUN_CIFA(exit_function_test);
     RUN_CIFA(builtin_math_function_test);
     RUN_CIFA(builtin_type_function_test);
