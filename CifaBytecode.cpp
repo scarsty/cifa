@@ -263,8 +263,9 @@ private:
 
     const std::vector<StructField>* struct_definition(const std::string& name) const
     {
-        const auto found = owner_.compilation_struct_defs.find(name);
-        return found == owner_.compilation_struct_defs.end() ? nullptr : &found->second;
+        const auto& structs = owner_.compilation_struct_defs;
+        const auto found = structs.find(name);
+        return found == structs.end() ? nullptr : &found->second;
     }
 
     void emit_uninitialized_check(const CalUnit& node, unsigned value)
@@ -1515,11 +1516,10 @@ public:
 
 std::shared_ptr<Proto> CifaBytecode::compile_lua_program(std::vector<std::uint8_t>& chunk, std::string& error) const
 {
-    const auto* root = compiled ? &compilation_root : nullptr;
-    const auto* current_functions = compiled ? &compilation_functions : nullptr;
-    if (!root || !current_functions) { error = "Cifa AST is not compiled"; return {}; }
+    const auto& root = compilation_root;
+    const auto& current_functions = compilation_functions;
     std::unordered_map<std::string, FunctionOverloads> functions = functions2;
-    for (const auto& [name, overloads] : *current_functions)
+    for (const auto& [name, overloads] : current_functions)
         for (const auto& [arity, function] : overloads) functions[name][arity] = function;
     auto proto = std::make_shared<Proto>();
     proto->upvalues.push_back({true, 0});
@@ -1558,7 +1558,7 @@ std::shared_ptr<Proto> CifaBytecode::compile_lua_program(std::vector<std::uint8_
         proto->code.push_back(abc(SETTABUP, 0, key_index, reg, 0));
     }
     FunctionCompiler root_compiler(*this, *proto, &functions, true, static_cast<unsigned>(root_function_registers.size() + 1));
-    if (!root_compiler.compile_body(*root, {}, error)) return {};
+    if (!root_compiler.compile_body(root, {}, error)) return {};
     chunk = ChunkWriter().write(*proto);
     return proto;
 }
@@ -3008,7 +3008,7 @@ struct Program {
 
 bool CifaBytecode::compile_script(std::string script)
 {
-    compiled_ = false;
+    program_.reset();
     translation_error_.clear();
     runtime_error_.clear();
     chunk_.clear();
@@ -3017,7 +3017,7 @@ bool CifaBytecode::compile_script(std::string script)
 
 bool CifaBytecode::compile_file(const std::string& filename)
 {
-    compiled_ = false;
+    program_.reset();
     translation_error_.clear();
     runtime_error_.clear();
     chunk_.clear();
@@ -3033,7 +3033,6 @@ bool CifaBytecode::emit_chunk()
     program_ = std::move(program);
     persist_compiled_script_functions();
     persist_compiled_struct_definitions();
-    compiled_ = true;
     return true;
 }
 
@@ -3065,7 +3064,7 @@ Object CifaBytecode::run_file(const std::string& filename)
 
 Object CifaBytecode::execute_chunk()
 {
-    const auto program = std::static_pointer_cast<Program>(program_);
+    const auto& program = program_;
     if (!program || !program->root.code) return Object("", "Error");
     const TValue result = program->vm.run(program->root, *this);
     runtime_error_ = program->vm.error();
@@ -3073,7 +3072,7 @@ Object CifaBytecode::execute_chunk()
         const auto* info = reinterpret_cast<const NoValueInfo*>(result.value_.closure);
         const std::string name = info == nullptr || info->source == nullptr || info->source->debug_name.empty()
             ? "<unknown>" : info->source->debug_name;
-        return Object::make_no_value(name, info == nullptr ? std::string{} : info->call_frame);
+        return Object::no_value(name, info == nullptr ? std::string{} : info->call_frame);
     }
     return runtime_error_.empty() ? program->vm.object_from_value(result) : Object("", "Error");
 }

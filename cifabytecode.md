@@ -75,6 +75,16 @@ VM 中的值使用带类型标签的 `TValue`。当前支持的主要值包括�
 
 table 同时支持数组和 map 行为。脚本函数调用、宿主函数调用和全局变量同步仍遵循 Cifa 的既有语义；字节码后端只改变执行路径，不改变这些可观察规则。
 
+### 自定义 C++ 类型、`std::any` 与性能边界
+
+Bytecode 的原生值集合不是任意 C++ 类型的通用运行时。它只对自身定义的基础值、字符串、table、闭包、宿主闭包以及 `NoValue` 建立了固定的标签、访问和指令语义；任意用户自定义 C++ 类型不能直接作为 bytecode 的高效原生值参与寄存器运算、比较、索引和生命周期管理。需要把自定义 C++ 对象暴露给脚本时，应通过明确的宿主函数/窄边界接口转换为 bytecode 支持的值，或由宿主保存不透明句柄，而不是把 C++ 对象整体塞进每个 VM 槽位。
+
+`std::any` 可以承载几乎任意 C++ 类型，但这只是通用边界容器，不是适合 bytecode 热路径的值表示。它会擦除静态类型，使 VM 难以使用紧凑的标签和直接访问；读取通常需要类型检查或 `any_cast`，跨宿主边界还可能触发包装、解包和重新物化。对数组、map 和自定义对象而言，若值按值传递，容器和其元素还可能被递归复制。因而“`std::any` 能承载任何 C++ 类型”不能推出“bytecode 能以低成本执行任何 C++ 类型”。
+
+C++ 的复制语义同样是重要的性能约束。一个看似普通的参数传递、寄存器赋值、返回值同步或宿主调用，可能复制字符串、容器、`std::any` 内部对象以及它们拥有的子对象；这些复制发生在 VM 指令之外时尤其容易被误认为只是一次轻量的 `TValue` 搬运。若改为引用或共享所有权，又必须明确别名、写时分离、失效和宿主可观察状态，否则会改变 Cifa 的按值语义。
+
+RAII 适合表达冷态资源的所有权和异常安全，但 `unique_ptr`、`shared_ptr`、容器析构以及自定义析构函数并不会因为放入 bytecode 就消失。若它们位于寄存器值、临时结果、参数窗口或每轮循环都会创建/销毁的对象中，构造、引用计数、析构和间接寻址都会进入脚本热路径，造成严重性能问题；资源所有权也可能扩大对象尺寸并破坏连续值布局。Bytecode 应尽量让热路径使用紧凑的带标签值和稳定的 VM 容器，把 RAII 资源管理限制在宿主边界、程序冻结/销毁等冷路径。任何把 `std::any`、深复制或复杂 RAII 对象引入值槽的设计，都必须以相同脚本、相同结果校验和交错基准证明没有热路径回退，不能只凭接口泛化能力判断其适合 VM。
+
 ## 编译结果的组织
 
 编译期使用 `Proto` 保存可变的构建结果：
@@ -97,29 +107,9 @@ Lua 的二元运算指令通常会配合 metamethod 指令。Cifa 当前没有�
 
 `EXTRAARG` 仍保留 Lua 风格编码，并用于 `NEWTABLE` 的扩展数组大小。它不能因为 `MMBIN*` 被删除而一并移除。
 
-## 调试和基准测试
+## 调试和回归测试
 
-`benchmarks/lua_backend_benchmark.cpp` 会：
-
-1. 编译 `cifa/calc-pi-dynamic.c`；
-2. 通过 VM 执行并校验 502 个字符的 PI 结果；
-3. 校验 FNV-1a32 为 `1d4b4c2f`；
-4. 重复执行并报告编译时间和执行时间；
-5. 把生成的 chunk 写入 `build/cifa_lua_backend_benchmark.luac`。
-
-修改字节码 lowering 或 VM dispatch 后，应使用当前源码重新构建 benchmark，再比较结果。不要使用旧的 benchmark 可执行文件推断当前指令分布或性能。
-
-### MSVC PI 性能诊断
-
-当前 MSVC x64 Release 的动态 PI 对照必须区分测量口径：
-
-- `Cifa::run_script` 每个样本都包含词法、解析、静态检查和 AST 执行；本轮 31 样本中位数约为 `300 ms`，不能与 VM 热执行直接比较。
-- `CifaBytecode` benchmark 的 `compile_ms` 单独测量编译，`median_execute_ms` 只测已经编译后的 VM 执行；本轮 MSVC x64 Release 为 `compile_ms=0.9623 ms`、执行中位数 `12.913 ms`，结果为 502 字符、FNV-1a32 `1d4b4c2f`。
-- 带 opcode profile 的一次 PI 执行约有 4.4M 条动态指令，其中 `MOVE` 约 2.21M、`ADDI` 约 674K、`LOADI` 约 342K、`LEN` 约 280K、`GETTABLE` 约 252K、`SETTABLE` 约 220K。它说明当前主要嫌疑是寄存器 VM 的分派和中间值搬运，不能仅凭现有数据归因于 RAII。
-
-RAII 也不是当前首要嫌疑：历史实验中把 `RuntimeProto` 热数组改为 `unique_ptr` 已在 MSVC 和 Clang 的整数 PI 上回退，随后已撤回。后续若要减少指令，应先对 `MOVE`、`LEN` 及其相邻 lowering 做静态 listing 和交错 A/B，不能把冷态所有权对象的析构成本当作热循环成本。
-
-测试边界如下：`unit_test/cifa_unit_test.cpp` 保留 Cifa 的完整语法/静态检查测试，并额外执行字节码后端的运行时错误 parity。当前 parity 覆盖 `size`、除零、`NoValue` 和容器方法错误；宿主函数内部的复杂 Object 转换错误（例如 `to_number({1})`）仍需单独完成统一错误传播，不能用宽松断言掩盖差异。
+字节码后端的回归测试位于 `unit_test/cifa_unit_test.cpp`，覆盖 Cifa 的语法/静态检查以及字节码后端的运行时错误 parity。修改 lowering 或 VM dispatch 后，应使用当前源码重新构建 `cifa_tests` 并运行完整回归，不要依赖历史 benchmark 输出判断当前行为。
 
 ## 相关文件
 
@@ -127,6 +117,5 @@ RAII 也不是当前首要嫌疑：历史实验中把 `RuntimeProto` 热数组�
 | --- | --- |
 | `CifaBytecode.h` | 后端公开接口和类声明 |
 | `CifaBytecode.cpp` | Proto、chunk 编译、私有 LuaVm 和运行时实现 |
-| `benchmarks/lua_backend_benchmark.cpp` | 动态 PI 正确性和性能基准 |
 | `unit_test/cifa_unit_test.cpp` | Direct Cifa 与 Lua backend 的统一回归和 parity 测试 |
-| `history/optimization/vm-optimization.md` | 字节码后端的优化实验和历史数据 |
+| `vm-optimization.md` | 字节码后端的优化实验和历史数据 |

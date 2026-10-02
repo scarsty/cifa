@@ -10,6 +10,7 @@
 namespace cifa {
 
 struct Proto;
+struct Program;
 
 // Compiles Cifa's checked AST directly to a Lua 5.4 binary chunk and executes
 // it using Lua's register VM.
@@ -27,7 +28,7 @@ public:
     Object run_script(std::string script);
     Object run_file(const std::string& filename);
 
-    bool valid() const { return compiled_ && translation_error_.empty(); }
+    bool valid() const { return program_ != nullptr && translation_error_.empty(); }
     const std::string& get_translation_error() const { return translation_error_; }
     std::string get_runtime_error() const { return runtime_error_; }
     bool has_runtime_error() const { return !runtime_error_.empty(); }
@@ -41,11 +42,10 @@ private:
     Object execute_chunk();
     std::shared_ptr<Proto> compile_lua_program(std::vector<std::uint8_t>& chunk, std::string& error) const;
 
-    bool compiled_ = false;
     std::string translation_error_;
     std::string runtime_error_;
     std::vector<std::uint8_t> chunk_;
-    std::shared_ptr<void> program_;
+    std::shared_ptr<Program> program_;
 };
 
 } // namespace cifa

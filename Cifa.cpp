@@ -631,7 +631,6 @@ Cifa::Cifa()
     REGISTER_MATH2(fmin);
 #undef REGISTER_MATH2
 #undef REGISTER_MATH1
-    builtin_function_generations = function_generations;
 }
 
 const std::unordered_set<std::string>& Cifa::keyword_tokens()
@@ -3275,8 +3274,6 @@ bool Cifa::register_function(const std::string& name, func_type func)
 {
     if (!validate_registration_name(name)) { return false; }
     functions[name] = std::move(func);
-    ++function_version;
-    ++function_generations[name];
     return true;
 }
 
@@ -3407,7 +3404,7 @@ Object Cifa::run_function(const CalUnit& call_site, std::vector<CalUnit>& vc, Sc
         const auto& state = context.return_states.back();
         if (!has_runtime_error() && !is_exit_requested() && (!state.has_value || !state.value.hasValue()))
         {
-            result = Object::make_no_value(name, format_runtime_frame(call_site));
+            result = Object::no_value(name, format_runtime_frame(call_site));
         }
         context.return_states.pop_back();
         return has_runtime_error() ? make_error_result() : result;
@@ -4162,7 +4159,7 @@ bool Cifa::compile_script_internal(std::string script)
             script = preprocess_includes(script, "<script>", ".", include_dirs, visited);
             compile_pipeline(std::move(script));
         });
-    return compiled && !compile_failed;
+    return !compile_failed;
 }
 
 //从文件运行脚本，使用实例全局变量表
@@ -4193,7 +4190,7 @@ bool Cifa::compile_file_internal(const std::string& filename)
             str = preprocess_includes(str, normalize_path(filename), dir, include_dirs, visited);
             compile_pipeline(std::move(str));
         });
-    return compiled && !compile_failed;
+    return !compile_failed;
 }
 
 Object Cifa::run_compilation_result()
@@ -4281,7 +4278,6 @@ void Cifa::run_compilation(const std::function<void()>& action)
     compilation_struct_defs.clear();
     compilation_source_line_infos.clear();
     compile_failed = false;
-    compiled = false;
     compiling = true;
     action();
     compiling = false;
@@ -4315,7 +4311,6 @@ void Cifa::compile_pipeline(std::string str)
     if (!compile_failed)
     {
         compilation_root = std::move(c);
-        compiled = true;
         return;
     }
 
@@ -4674,8 +4669,7 @@ void Cifa::set_runtime_error(const std::string& message, const Object* source, c
     error_message = message.empty() ? "runtime error" : message;
     if (source != nullptr && source->getSpecialType() == "NoValue")
     {
-        const auto* object = std::get_if<std::any>(&source->value);
-        const auto* no_value = object == nullptr ? nullptr : std::any_cast<Object::NoValue>(object);
+        const auto* no_value = std::any_cast<Object::NoValue>(&source->value);
         if (no_value != nullptr && !no_value->call_frame.empty())
         {
             error_message += "\nNo return value originated at:\n" + no_value->call_frame;
