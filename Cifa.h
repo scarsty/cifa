@@ -2,12 +2,12 @@
 #include <any>
 #include <array>
 #include <concepts>
+#include <cstdio>
 #include <cstdint>
 #include <cmath>
 #include <deque>
 #include <format>
 #include <functional>
-#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -20,6 +20,41 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <version>
+
+#ifdef __cpp_lib_print
+#include <print>
+#else
+namespace std
+{
+template <typename... Args>
+void print(FILE* stream, format_string<Args...> fmt, Args&&... args)
+{
+    const auto text = format(fmt, std::forward<Args>(args)...);
+    std::fwrite(text.data(), 1, text.size(), stream);
+}
+
+template <typename... Args>
+void print(format_string<Args...> fmt, Args&&... args)
+{
+    print(stdout, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void println(FILE* stream, format_string<Args...> fmt, Args&&... args)
+{
+    print(stream, fmt, std::forward<Args>(args)...);
+    std::fputc('\n', stream);
+}
+
+template <typename... Args>
+void println(format_string<Args...> fmt, Args&&... args)
+{
+    print(fmt, std::forward<Args>(args)...);
+    std::puts("");
+}
+}
+#endif
 
 namespace cifa
 {
@@ -76,14 +111,6 @@ struct Object
     {
         if constexpr (std::is_integral_v<std::decay_t<T>>)
         {
-            if constexpr (std::is_unsigned_v<std::decay_t<T>>)
-            {
-                if (v > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-                {
-                    report_runtime_error("integer value out of range", this);
-                    return;
-                }
-            }
             value = static_cast<std::int64_t>(v);
         }
         else
@@ -434,67 +461,6 @@ public:
     using ScopeStack = std::vector<std::unordered_map<std::string, Object>>;
 
 private:
-    template <typename Arg>
-    static decltype(auto) object_to_cpp_arg(Object& o)
-    {
-        using T = std::remove_cvref_t<Arg>;
-        if constexpr (std::is_same_v<T, Object>)
-        {
-            if constexpr (std::is_lvalue_reference_v<Arg>)
-            {
-                return static_cast<Arg>(o);
-            }
-            else
-            {
-                return o;
-            }
-        }
-        else if constexpr (std::is_same_v<T, std::string>)
-        {
-            return o.toString();
-        }
-        else if constexpr (std::is_same_v<T, bool>)
-        {
-            return o.toBool();
-        }
-        else if constexpr (std::is_integral_v<T>)
-        {
-            const auto number = o.toInt64();
-            if (!std::in_range<T>(number))
-            {
-                o.report_conversion_error(typeid(T).name());
-                return T{};
-            }
-            return static_cast<T>(number);
-        }
-        else if constexpr (std::is_floating_point_v<T>)
-        {
-            return static_cast<T>(o.toDouble());
-        }
-        else
-        {
-            return o.to<T>();
-        }
-    }
-
-    template <typename R, typename... Args, size_t... I>
-    Object call_registered_function(R (*func)(Args...), ObjectVector& args, std::index_sequence<I...>)
-    {
-        if constexpr (std::is_void_v<R>)
-        {
-            func(object_to_cpp_arg<Args>(args[I])...);
-            return Object();
-        }
-        else if constexpr (std::is_same_v<std::remove_cvref_t<R>, Object>)
-        {
-            return func(object_to_cpp_arg<Args>(args[I])...);
-        }
-        else
-        {
-            return Object(func(object_to_cpp_arg<Args>(args[I])...));
-        }
-    }
-
     //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
     inline static const std::vector<std::vector<std::string>> ops = { { "::", ".", "++", "--" }, { "~", "!" }, { "*", "/", "%" }, { "+", "-" }, { "<<", ">>" }, { ">", "<", ">=", "<=" }, { "==", "!=" }, { "&" }, { "^" }, { "|" }, { "&&" }, { ":", "?" }, { "||" }, { "=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "|=", "^=" }, { "," } };
     //单目运算符全部是右结合
@@ -635,26 +601,6 @@ public:
     std::string registered_type_name(const Object& object) const;
 
     bool register_function(const std::string& name, func_type func);
-
-    template <typename R, typename... Args>
-    bool register_function(const std::string& name, R (*func)(Args...))
-    {
-        if (!validate_registration_name(name))
-        {
-            return false;
-        }
-        functions[name] = [this, name, func](ObjectVector& args) -> Object
-        {
-            constexpr size_t argc = sizeof...(Args);
-            if (args.size() != argc)
-            {
-                set_runtime_error("function '" + name + "' expects " + std::to_string(argc) + " arguments, got " + std::to_string(args.size()));
-                return Object();
-            }
-            return call_registered_function(func, args, std::index_sequence_for<Args...>{});
-        };
-        return true;
-    }
 
     bool register_user_data(const std::string& name, void* p);
     bool register_parameter(const std::string& name, Object o);

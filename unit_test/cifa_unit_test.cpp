@@ -2,36 +2,43 @@
 #include "../CifaBytecode.h"
 #include <filesystem>
 #include <cstdio>
-#include <print>
 #include <numeric>
 #include <format>
 #include "test_process.h"
 
 using namespace cifa;
 
-static double template_square(double x)
+static Object cifa_abs(ObjectVector& x)
 {
-    return x * x;
+    if (x.empty()) { return Object(); }
+    double x0 = x[0];
+    return std::abs(x0);
 }
 
-static double template_add(double a, double b)
+static Object host_square(ObjectVector& args)
 {
-    return a + b;
+    return args[0].toDouble() * args[0].toDouble();
 }
 
-static int template_trunc(double x)
+static Object host_add(ObjectVector& args)
 {
-    return int(x);
+    return args[0].toDouble() + args[1].toDouble();
 }
 
-static void template_set_flag(Object flag)
+static Object host_trunc(ObjectVector& args)
 {
-    (void)flag;
+    return static_cast<std::int64_t>(args[0].toDouble());
 }
 
-static double template_menu(double x, double y, Object choices, double count)
+static Object host_set_flag(ObjectVector&)
 {
-    return x + y + count + (choices.hasValue() ? 0.0 : 1.0);
+    return Object();
+}
+
+static Object host_menu(ObjectVector& args)
+{
+    return args[0].toDouble() + args[1].toDouble() + args[3].toDouble()
+        + (args[2].hasValue() ? 0.0 : 1.0);
 }
 
 struct CifaTests
@@ -87,13 +94,28 @@ bool register_function_test()
         && std::fabs(o.ref<double>() - 1.0) <= std::numeric_limits<double>::epsilon();
 }
 
-bool register_function_template_test()
+bool register_cifa_abs_function_test()
 {
     Cifa c;
-    c.register_function("square", template_square);
-    c.register_function("add", template_add);
-    c.register_function("trunc", template_trunc);
-    c.register_function("set_flag", template_set_flag);
+    if (!c.register_function("abs", cifa_abs)) { return false; }
+
+    const auto negative = c.run_script("return abs(-3.5);");
+    if (!negative.isType<double>() || negative.toDouble() != 3.5 || c.has_error() || c.has_runtime_error())
+    {
+        return false;
+    }
+
+    const auto positive = c.run_script("return abs(2);");
+    return positive.isType<double>() && positive.toDouble() == 2.0 && !c.has_error() && !c.has_runtime_error();
+}
+
+bool register_function_pointer_test()
+{
+    Cifa c;
+    c.register_function("square", host_square);
+    c.register_function("add", host_add);
+    c.register_function("trunc", host_trunc);
+    c.register_function("set_flag", host_set_flag);
 
     const auto o = c.run_script(R"(
         set_flag(1);
@@ -109,7 +131,7 @@ bool registration_name_validation_test()
     int context = 0;
     const bool valid_function = [&]()
     {
-        return c.register_function("valid_function", template_square);
+        return c.register_function("valid_function", host_square);
     }();
     if (!valid_function || !c.register_parameter("valid_parameter", 1)
         || !c.register_vector("valid_vector", std::vector<int>{1, 2})
@@ -120,9 +142,9 @@ bool registration_name_validation_test()
 
     Cifa invalid;
     invalid.set_output_error(false);
-    const bool template_registration_failed = [&]()
+    const bool function_registration_failed = [&]()
     {
-        return !invalid.register_function("1bad", template_square);
+        return !invalid.register_function("1bad", host_square);
     }()
         && invalid.has_runtime_error()
         && invalid.get_runtime_error().find("invalid registration name '1bad'") != std::string::npos;
@@ -135,7 +157,7 @@ bool registration_name_validation_test()
     return Cifa::is_valid_key("valid_key") && Cifa::is_valid_key("_value2")
         && !Cifa::is_valid_key("1bad") && !Cifa::is_valid_key("bad-key") && !Cifa::is_valid_key("return")
         && Cifa::revise_key("1bad-key") == "_bad_key" && Cifa::revise_key("return") == "return_"
-        && Cifa::revise_key("") == "_" && template_registration_failed && standard_registration_failed;
+        && Cifa::revise_key("") == "_" && function_registration_failed && standard_registration_failed;
 }
 
 bool exit_function_test()
@@ -242,7 +264,7 @@ bool typed_function_argument_error_test()
 {
     Cifa c;
     c.set_output_error(false);
-    c.register_function("menu", template_menu);
+    c.register_function("menu", host_menu);
     auto o = c.run_script("strs = {1, 2}; menu(85, 100, strs, strs);");
     return o.getSpecialType() == "Error"
         && c.get_runtime_error().find("variable 'strs'") != std::string::npos
@@ -1283,7 +1305,7 @@ bool int64_storage_test()
 {
     Cifa c;
     c.register_parameter("wide", std::int64_t{9007199254740993LL});
-    c.register_function("identity64", +[](std::int64_t value) { return value; });
+    c.register_function("identity64", [](ObjectVector& args) -> Object { return args[0]; });
     auto result = c.run_script(R"(
         auto exact = 9007199254740993;
         int largest = 9223372036854775807;
@@ -2998,7 +3020,7 @@ bool bytecode_host_boundary_parity_test()
     {
         interpreter.set_output_error(false);
         interpreter.register_parameter("seed", 4.0);
-        interpreter.register_function("square", template_square);
+        interpreter.register_function("square", host_square);
         const auto result = interpreter.run_script(
             "shared = seed; run_string(\"shared += 1; return shared;\"); return square(shared);");
         if (interpreter.has_error() || interpreter.has_runtime_error() || !result.isNumber()) return result;
@@ -3151,7 +3173,8 @@ int main(int argc, char** argv)
     RUN_CIFA(struct_test);
     RUN_CIFA(include_test);
     RUN_CIFA(register_function_test);
-    RUN_CIFA(register_function_template_test);
+    RUN_CIFA(register_cifa_abs_function_test);
+    RUN_CIFA(register_function_pointer_test);
     RUN_CIFA(registration_name_validation_test);
     RUN_CIFA(typed_function_argument_error_test);
     RUN_CIFA(object_vector_argument_error_test);

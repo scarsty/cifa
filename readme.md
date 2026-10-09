@@ -26,7 +26,7 @@ Cifa曾经单独开发，后来为方便改成了mlcc的一部分，目前因为
 
 ### 基本用法
 
-在自己的工程中加入Cifa.h和Cifa.cpp即可。例程如下：
+使用 C++20 或更新标准编译；在自己的工程中加入 Cifa.h 和 Cifa.cpp。编译器提供 `std::print` 时直接使用，否则由 Cifa.h 提供兼容实现。例程如下：
 
 ```c++
 #include "Cifa.h"
@@ -307,24 +307,16 @@ int main()
 ```
 这样也不必再定义sin1这个函数。
 
-如果宿主函数本身就是普通 C++ 函数指针，也可以直接注册，Cifa 会通过模板自动判断参数个数并完成常见类型转换。无重载的函数不需要手动写类型：
+宿主函数应接收 `ObjectVector&` 并返回 `Object`。若原函数接受普通 C++ 参数，可用 lambda 显式转换：
 
 ```c++
 double square(double x) { return x * x; }
-double add(double a, double b) { return a + b; }
-
-c1.register_function("square", square);
-c1.register_function("add", add);
+c1.register_function("square", [](ObjectVector& args) -> Object {
+    return square(args[0].toDouble());
+});
 ```
 
-对于有重载的标准库函数，通常需要用 `static_cast` 指明具体签名：
-
-```c++
-c1.register_function("sin", static_cast<double(*)(double)>(&std::sin));
-c1.register_function("pow", static_cast<double(*)(double, double)>(&std::pow));
-```
-
-函数名仍需显式传入，因为 C++ 函数指针本身不携带源码中的名字。
+普通函数可以直接注册，例如 `c1.register_function("sin", sin1);`。若函数定义在被多个源文件包含的头文件中，应使用 `inline` 或只在一个源文件中定义。
 
 此时再运行如下脚本：
 ```c++
@@ -1038,7 +1030,7 @@ interpreter.run_script("MyObject value = source; auto copy = source; Index index
     //无语法错误，判断结果是否是一个数值
     if (c.isNumber())
     {
-        std::print("{}\n", c.toDouble());
+        std::cout << c.toDouble() << '\n';
     }
     //若需正常继续计算，需要排除nan和inf
     if (c.isEffectNumber())

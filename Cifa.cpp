@@ -6,7 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <print>
+#include <optional>
 #include <sstream>
 
 namespace cifa
@@ -593,8 +593,12 @@ Cifa::Cifa()
             return x[0].to<double>();
         });
 
-#define REGISTER_MATH1(func) register_function(#func, static_cast<double (*)(double)>(&std::func))
-#define REGISTER_MATH2(func) register_function(#func, static_cast<double (*)(double, double)>(&std::func))
+#define REGISTER_MATH1(func) register_function(#func, [this](ObjectVector& args) -> Object { \
+        if (args.size() != 1) { set_runtime_error("function '" #func "' expects 1 arguments, got " + std::to_string(args.size())); return Object(); } \
+        return std::func(args[0].toDouble()); })
+#define REGISTER_MATH2(func) register_function(#func, [this](ObjectVector& args) -> Object { \
+        if (args.size() != 2) { set_runtime_error("function '" #func "' expects 2 arguments, got " + std::to_string(args.size())); return Object(); } \
+        return std::func(args[0].toDouble(), args[1].toDouble()); })
     REGISTER_MATH1(sqrt);
     REGISTER_MATH1(cbrt);
     REGISTER_MATH1(round);

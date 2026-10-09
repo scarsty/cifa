@@ -3,7 +3,10 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <version>
+#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
 #include <stacktrace>
+#endif
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -32,7 +35,10 @@ inline void configure_test_process()
 #endif
 #endif
     std::set_terminate([] {
-        std::cerr << "Unhandled test failure\n" << std::stacktrace::current() << '\n';
+        std::cerr << "Unhandled test failure\n";
+#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
+        std::cerr << std::stacktrace::current() << '\n';
+#endif
         std::_Exit(98);
     });
 }
