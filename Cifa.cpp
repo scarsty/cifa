@@ -1172,8 +1172,13 @@ Object Cifa::eval_scoped(CalUnit& c, ScopeStack& scopes)
                     auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
                     return assign_object_value(target, Object(std::vector<Object>{ }), c.v[0], &c);
                 }
+                Object value = eval_scoped(c.v[1], scopes);
+                if (has_runtime_error())
+                {
+                    return value;
+                }
                 auto& target = get_parameter_for_assign(c.v[0], scopes, c.v[0].with_type);
-                return assign_object_value(target, eval_scoped(c.v[1], scopes), c.v[0], &c);
+                return assign_object_value(target, std::move(value), c.v[0], &c);
             }
             if (c.str == "+=" || c.str == "-=" || c.str == "*=" || c.str == "/=" || c.str == "%="
                 || c.str == "<<=" || c.str == ">>=" || c.str == "&=" || c.str == "|=" || c.str == "^=")

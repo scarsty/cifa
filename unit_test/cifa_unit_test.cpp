@@ -44,6 +44,31 @@ static Object host_menu(ObjectVector& args)
 struct CifaTests
 {
 #define Cifa cifa::Cifa
+bool scope_stack_stability_test()
+{
+    Cifa c;
+    auto noop = [](ObjectVector&) { return Object(1); };
+    for (const auto& name : { "conv", "M", "active", "pool" })
+    {
+        if (!c.register_function(name, noop)) { return false; }
+    }
+    for (const auto& name : { "full_scan", "X", "channel", "conv_c", "pool_type", "act" })
+    {
+        if (!c.register_parameter(name, 1)) { return false; }
+    }
+    const auto result = c.run_script(R"(
+        if (full_scan)
+        {
+            C1 = conv(X, M(3,3,channel,conv_c), {1,1}, {1,1}) + M(1,1,conv_c,1);
+            A1 = active(pool(C1,pool_type,{2,2}),act,{},{0.1});
+            C1 = conv(A1,M(3,3,conv_c,conv_c),{1,1},{1,1});
+            return A1;
+        }
+        return 0;
+    )");
+    return !c.has_error() && !c.has_runtime_error() && result.isNumber() && result.toInt() == 1;
+}
+
 bool local_array_store_test()
 {
     Cifa c;
@@ -3108,6 +3133,7 @@ int main(int argc, char** argv)
     run_direct_test("diagnostic_position_test", diagnostic_position_test);
     run_direct_test("direct_source_map_test", direct_source_map_test);
     run_direct_test("nested_ast_function_lookup_test", nested_ast_function_lookup_test);
+    run_test("scope_stack_stability_test", direct, &CifaTests::scope_stack_stability_test);
     run_direct_test("global_definition_scope_test", global_definition_scope_test);
     run_direct_test("nested_script_global_scope_test", nested_script_global_scope_test);
     run_direct_test("nested_runtime_reporter_test", nested_runtime_reporter_test);

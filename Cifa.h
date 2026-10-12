@@ -220,7 +220,15 @@ struct Object
     template <typename T>
     T to() const
     {
-        if (const auto* object = value_ptr<T>())
+        if constexpr (std::same_as<T, int>)
+        {
+            return toInt();
+        }
+        else if constexpr (std::same_as<T, double>)
+        {
+            return toDouble();
+        }
+        else if (const auto* object = value_ptr<T>())
         {
             return *object;
         }
@@ -458,7 +466,7 @@ class Cifa
 {
 public:
     using func_type = std::function<Object(ObjectVector&)>;
-    using ScopeStack = std::vector<std::unordered_map<std::string, Object>>;
+    using ScopeStack = std::deque<std::unordered_map<std::string, Object>>;
 
 private:
     //运算符，此处的顺序即优先级，单目和右结合由下面的列表判断
